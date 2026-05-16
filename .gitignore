@@ -11,9 +11,6 @@ dist/
 .env.*.local
 !.env.example
 
-# Bun
-bun.lock
-
 # Logs
 logs/
 *.log

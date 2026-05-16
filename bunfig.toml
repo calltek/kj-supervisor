@@ -1,0 +1,13 @@
+# Bun runtime + package manager config
+
+[install]
+# Lockfile en texto (versionable, mejor diff)
+saveTextLockfile = true
+# Resolver peerDependencies automáticamente
+peer = true
+
+[install.cache]
+disable = false
+
+[run]
+silent = false
