@@ -19,7 +19,7 @@ import {
     writeAgentTokenToDisk,
 } from './client/auth'
 import { KJControlClient } from './client/control.client'
-import { loadSettings } from './config/settings'
+import { loadSettings, PING_INTERVAL_MS } from './config/settings'
 import { createLogger } from './logger'
 import {
     PROTOCOL_VERSION,
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
             healthHandle = startHealthLoop({
                 client,
                 logger,
-                interval_ms: settings.ping_interval_ms,
+                interval_ms: PING_INTERVAL_MS,
             })
             return
         }
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
         healthHandle = startHealthLoop({
             client,
             logger,
-            interval_ms: settings.ping_interval_ms,
+            interval_ms: PING_INTERVAL_MS,
         })
     })
 

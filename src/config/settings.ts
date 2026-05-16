@@ -6,13 +6,19 @@
 
 import pkg from '../../package.json' with { type: 'json' }
 
+/**
+ * Health:ping cadence. Hardcoded rather than env-configurable so the
+ * control's last_seen_at timeout has a predictable budget regardless
+ * of which supervisor binary is connected.
+ */
+export const PING_INTERVAL_MS = 30_000
+
 export interface KJSettings {
     control_url: string
     provisioning_token: string | null
     agent_token_env: string | null
     config_dir: string
     log_level: 'debug' | 'info' | 'warn' | 'error'
-    ping_interval_ms: number
     kj_agent_version: string
 }
 
@@ -46,14 +52,6 @@ function parseUrl(name: string, raw: string): string {
     return raw.replace(/\/+$/, '')
 }
 
-function parsePositiveInt(name: string, raw: string): number {
-    const n = Number.parseInt(raw, 10)
-    if (!Number.isFinite(n) || n <= 0) {
-        throw new Error(`${name} must be a positive integer, got: ${raw}`)
-    }
-    return n
-}
-
 export function loadSettings(): KJSettings {
     const control_url = parseUrl('KJ_CONTROL_URL', requireEnv('KJ_CONTROL_URL'))
 
@@ -64,16 +62,12 @@ export function loadSettings(): KJSettings {
         )
     }
 
-    const ping_raw = optionalEnv('KJ_PING_INTERVAL_MS')
-    const ping_interval_ms = ping_raw ? parsePositiveInt('KJ_PING_INTERVAL_MS', ping_raw) : 30000
-
     return {
         control_url,
         provisioning_token: optionalEnv('KJ_PROVISIONING_TOKEN'),
         agent_token_env: optionalEnv('KJ_AGENT_TOKEN'),
         config_dir: optionalEnv('KJ_CONFIG_DIR') ?? '/etc/kj-agent',
         log_level: log_level_raw as KJSettings['log_level'],
-        ping_interval_ms,
         kj_agent_version: pkg.version,
     }
 }

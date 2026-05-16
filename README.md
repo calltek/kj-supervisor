@@ -54,7 +54,6 @@ token del disco y el control acepta la reconexión sin necesidad del
 | `KJ_AGENT_TOKEN` | no | — | Override del token persistente. Útil en dev; en prod se lee del disco. |
 | `KJ_CONFIG_DIR` | no | `/etc/kj-agent` | Dónde guardar el `token`. |
 | `KJ_LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error`. |
-| `KJ_PING_INTERVAL_MS` | no | `30000` | Cadencia del `health:ping`. |
 
 ## Scripts
 
