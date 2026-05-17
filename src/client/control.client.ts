@@ -110,6 +110,42 @@ export class KJControlClient extends EventEmitter {
         ;(this.socket as unknown as { auth: Record<string, string> }).auth = next
     }
 
+    /** Fire-and-forget push. Used for events the control doesn't ack. */
+    push(event: string, payload: unknown): void {
+        this.socket.emit(event, payload)
+    }
+
+    /**
+     * Subscribe to a control-driven command. The handler runs on every
+     * event and its return value (or resolved promise) is sent back as
+     * the ack. Errors thrown become INTERNAL_ERROR acks so a buggy
+     * handler never leaves the control hanging.
+     */
+    onCommand<TPayload, TAck>(
+        event: string,
+        handler: (payload: TPayload) => Promise<TAck> | TAck
+    ): void {
+        this.socket.on(event, async (payload: TPayload, ack?: (response: unknown) => void) => {
+            try {
+                const result = await handler(payload)
+                if (ack) ack(result)
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err)
+                this.logger.error({ event, err: message }, 'handler threw')
+                if (ack) {
+                    ack({
+                        ok: false,
+                        error: {
+                            code: 'INTERNAL_ERROR',
+                            message,
+                            retryable: false,
+                        },
+                    })
+                }
+            }
+        })
+    }
+
     /**
      * Emit an event and await its ack. Rejects on timeout. The control
      * does NOT send error payloads via the ack channel for our use
