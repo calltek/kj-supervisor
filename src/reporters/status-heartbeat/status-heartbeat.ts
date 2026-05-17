@@ -16,8 +16,8 @@
  *   hb.stop()  // before pushing the final RUNNING/STOPPED/etc.
  */
 
-import type { AgentStatusReport } from '../protocol'
-import type { AgentStatusReporter } from './agent-status.reporter'
+import type { AgentStatusReport } from '../../protocol'
+import type { AgentStatusReporter } from '../agent-status/agent-status.reporter'
 
 export interface StatusHeartbeatOptions {
     reporter: AgentStatusReporter

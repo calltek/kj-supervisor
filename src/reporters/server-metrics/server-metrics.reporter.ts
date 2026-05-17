@@ -7,8 +7,8 @@
 
 import { cpus, loadavg, uptime } from 'node:os'
 
-import type { KJLogger } from '../logger'
-import type { ServerMetricsPayload } from '../protocol'
+import type { KJLogger } from '../../logger'
+import type { ServerMetricsPayload } from '../../protocol'
 
 export interface ServerMetricsClient {
     emitWithAck<T>(event: string, payload: unknown, timeoutMs: number): Promise<T>

@@ -9,16 +9,16 @@
  * Real outcome (RUNNING / ERROR) is reported asynchronously via push.
  */
 
-import type { AgentSpawnPayload, ControlCommandAck, WsErrorPayload } from '../protocol'
+import type { AgentSpawnPayload, ControlCommandAck, WsErrorPayload } from '../../protocol'
 import {
     KJ_LABEL,
     KJ_LABEL_AGENT_ID,
     type KJDocker,
     type PullProgressEvent,
-} from '../docker/client'
-import type { AgentStatusReporter } from '../reporters/agent-status.reporter'
-import { StatusHeartbeat } from '../reporters/status-heartbeat'
-import type { KJLogger } from '../logger'
+} from '../../docker/client/client'
+import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
+import type { KJLogger } from '../../logger'
 
 export interface AgentSpawnHandlerDeps {
     docker: KJDocker

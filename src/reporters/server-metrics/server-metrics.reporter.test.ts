@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { KJLogger } from '../logger'
+import { KJLogger } from '../../logger'
 import { startServerMetricsLoop } from './server-metrics.reporter'
 
 const silentLogger = KJLogger.create('error')

@@ -7,7 +7,7 @@
 
 import Docker from 'dockerode'
 
-import type { KJLogger } from '../logger'
+import type { KJLogger } from '../../logger'
 
 /** Labels we attach to every container we spawn so we can reconcile later. */
 export const KJ_LABEL = 'kj-agent'

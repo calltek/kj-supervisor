@@ -9,9 +9,9 @@
  * changes when token reporting lands.
  */
 
-import type { KJContainerSummary, KJDocker } from '../docker/client'
-import type { KJLogger } from '../logger'
-import type { AgentMetricsReport } from '../protocol'
+import type { KJContainerSummary, KJDocker } from '../../docker/client/client'
+import type { KJLogger } from '../../logger'
+import type { AgentMetricsReport } from '../../protocol'
 
 export interface AgentMetricsClient {
     push(event: string, payload: unknown): void

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { KJContainerSummary } from '../docker/client'
-import { KJLogger } from '../logger'
-import type { AgentMetricsReport } from '../protocol'
+import type { KJContainerSummary } from '../../docker/client/client'
+import { KJLogger } from '../../logger'
+import type { AgentMetricsReport } from '../../protocol'
 import { startAgentMetricsLoop } from './agent-metrics.reporter'
 
 const silentLogger = KJLogger.create('error')

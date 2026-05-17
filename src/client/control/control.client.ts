@@ -17,8 +17,8 @@
 import { EventEmitter } from 'node:events'
 import { io, type Socket } from 'socket.io-client'
 
-import type { WsErrorPayload } from '../protocol'
-import type { KJLogger } from '../logger'
+import type { WsErrorPayload } from '../../protocol'
+import type { KJLogger } from '../../logger'
 
 export interface ControlClientOptions {
     /** Base URL of the control, e.g. `http://localhost:5050`. */

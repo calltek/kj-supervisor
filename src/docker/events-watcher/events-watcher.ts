@@ -18,11 +18,11 @@
  *     the new state so the control catches the drift.
  */
 
-import { KJ_LABEL_AGENT_ID, type DockerEvent, type KJDocker } from './client'
-import type { OperationTracker } from './operation-tracker'
-import type { KJLogger } from '../logger'
-import type { AgentStatusReport } from '../protocol'
-import type { AgentStatusReporter } from '../reporters/agent-status.reporter'
+import { KJ_LABEL_AGENT_ID, type DockerEvent, type KJDocker } from '../client/client'
+import type { OperationTracker } from '../operation-tracker/operation-tracker'
+import type { KJLogger } from '../../logger'
+import type { AgentStatusReport } from '../../protocol'
+import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 
 export interface KJDockerEventsWatcherDeps {
     docker: KJDocker

@@ -17,19 +17,19 @@ import {
     type SupervisorAuth,
     toHandshakeAuth,
     writeAgentTokenToDisk,
-} from './client/auth'
-import { KJControlClient } from './client/control.client'
+} from './client/auth/auth'
+import { KJControlClient } from './client/control/control.client'
 import {
     AGENT_METRICS_INTERVAL_MS,
     KJSettings,
     PING_INTERVAL_MS,
     SERVER_METRICS_INTERVAL_MS,
 } from './config/settings'
-import { KJDocker } from './docker/client'
-import { KJDockerEventsWatcher } from './docker/events-watcher'
-import { OperationTracker } from './docker/operation-tracker'
-import { AgentLifecycleHandler } from './handlers/agent-lifecycle.handler'
-import { AgentSpawnHandler } from './handlers/agent-spawn.handler'
+import { KJDocker } from './docker/client/client'
+import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
+import { OperationTracker } from './docker/operation-tracker/operation-tracker'
+import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
+import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
 import { KJLogger } from './logger'
 import {
     type AgentPausePayload,
@@ -43,13 +43,16 @@ import {
     WS_ERROR_CODES,
     type WsErrorPayload,
 } from './protocol'
-import { type AgentMetricsHandle, startAgentMetricsLoop } from './reporters/agent-metrics.reporter'
-import { AgentStatusReporter } from './reporters/agent-status.reporter'
-import { type HealthLoopHandle, startHealthLoop } from './reporters/health.reporter'
+import {
+    type AgentMetricsHandle,
+    startAgentMetricsLoop,
+} from './reporters/agent-metrics/agent-metrics.reporter'
+import { AgentStatusReporter } from './reporters/agent-status/agent-status.reporter'
+import { type HealthLoopHandle, startHealthLoop } from './reporters/health/health.reporter'
 import {
     type ServerMetricsHandle,
     startServerMetricsLoop,
-} from './reporters/server-metrics.reporter'
+} from './reporters/server-metrics/server-metrics.reporter'
 
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_MISSING,

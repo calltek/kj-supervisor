@@ -5,8 +5,8 @@
  * server:hello time.
  */
 
-import type { AgentStatusReport } from '../protocol'
-import type { KJLogger } from '../logger'
+import type { AgentStatusReport } from '../../protocol'
+import type { KJLogger } from '../../logger'
 
 export interface StatusClient {
     push(event: string, payload: unknown): void

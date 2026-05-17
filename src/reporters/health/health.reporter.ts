@@ -4,8 +4,8 @@
  * socket to disconnect so Socket.IO restarts its reconnection cycle.
  */
 
-import type { HealthPingPayload, HealthPongAck } from '../protocol'
-import type { KJLogger } from '../logger'
+import type { HealthPingPayload, HealthPongAck } from '../../protocol'
+import type { KJLogger } from '../../logger'
 
 export interface HealthClient {
     emitWithAck<T>(event: string, payload: unknown, timeoutMs: number): Promise<T>

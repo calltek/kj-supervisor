@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { PassThrough } from 'node:stream'
 
-import { KJLogger } from '../logger'
-import type { AgentStatusReport } from '../protocol'
-import { AgentStatusReporter } from '../reporters/agent-status.reporter'
+import { KJLogger } from '../../logger'
+import type { AgentStatusReport } from '../../protocol'
+import { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 import { KJDockerEventsWatcher } from './events-watcher'
-import { OperationTracker } from './operation-tracker'
+import { OperationTracker } from '../operation-tracker/operation-tracker'
 
 const silentLogger = KJLogger.create('error')
 

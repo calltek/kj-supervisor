@@ -13,9 +13,9 @@
  * for that agent_id doesn't trip our ALREADY_RUNNING guard.
  */
 
-import type { KJDocker } from '../docker/client'
-import type { OperationTracker } from '../docker/operation-tracker'
-import type { KJLogger } from '../logger'
+import type { KJDocker } from '../../docker/client/client'
+import type { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
+import type { KJLogger } from '../../logger'
 import type {
     AgentPausePayload,
     AgentResumePayload,
@@ -23,9 +23,9 @@ import type {
     AgentStopPayload,
     ControlCommandAck,
     WsErrorPayload,
-} from '../protocol'
-import type { AgentStatusReporter } from '../reporters/agent-status.reporter'
-import { StatusHeartbeat } from '../reporters/status-heartbeat'
+} from '../../protocol'
+import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
 
 export interface AgentLifecycleHandlerDeps {
     docker: KJDocker

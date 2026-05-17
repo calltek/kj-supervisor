@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import { KJLogger } from '../logger'
-import type { AgentStatusReport } from '../protocol'
-import { AgentStatusReporter } from './agent-status.reporter'
+import { KJLogger } from '../../logger'
+import type { AgentStatusReport } from '../../protocol'
+import { AgentStatusReporter } from '../agent-status/agent-status.reporter'
 import { StatusHeartbeat } from './status-heartbeat'
 
 const silentLogger = KJLogger.create('error')

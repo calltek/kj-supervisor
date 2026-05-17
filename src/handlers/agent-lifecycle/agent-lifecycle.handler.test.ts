@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { KJContainerSummary } from '../docker/client'
-import { OperationTracker } from '../docker/operation-tracker'
-import { KJLogger } from '../logger'
-import type { AgentStatusReport } from '../protocol'
-import { AgentStatusReporter } from '../reporters/agent-status.reporter'
+import type { KJContainerSummary } from '../../docker/client/client'
+import { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
+import { KJLogger } from '../../logger'
+import type { AgentStatusReport } from '../../protocol'
+import { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 import { AgentLifecycleHandler } from './agent-lifecycle.handler'
 
 const silentLogger = KJLogger.create('error')
