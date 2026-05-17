@@ -30,6 +30,7 @@ import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
 import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
+import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
     type AgentPausePayload,
@@ -41,6 +42,7 @@ import {
     PROTOCOL_VERSION,
     type ServerHelloAck,
     type ServerHelloPayload,
+    type SupervisorUpgradeRequiredPayload,
     WS_ERROR_CODES,
     type WsErrorPayload,
 } from './protocol'
@@ -115,6 +117,11 @@ async function main(): Promise<void> {
         status: statusReporter,
         logger,
     })
+    const upgradeHandler = new SupervisorUpgradeHandler({
+        docker,
+        logger,
+        supervisor_container: settings.supervisor_container,
+    })
 
     void eventsWatcher.start()
 
@@ -130,6 +137,11 @@ async function main(): Promise<void> {
     client.onCommand<AgentResumePayload, ControlCommandAck>('agent:resume', (payload) =>
         lifecycleHandler.handleResume(payload)
     )
+
+    // Push event (not a command), no ack — handler returns void.
+    client.onPush<SupervisorUpgradeRequiredPayload>('supervisor:upgrade-required', (payload) => {
+        void upgradeHandler.handle(payload)
+    })
 
     let healthHandle: HealthLoopHandle | null = null
     let serverMetricsHandle: ServerMetricsHandle | null = null
