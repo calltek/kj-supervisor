@@ -1,5 +1,5 @@
 {
-    "name": "kj-agent",
+    "name": "kj-supervisor",
     "version": "0.1.0",
     "description": "Kujira supervisor — orchestrates Claude agent containers on a customer VPS",
     "private": true,

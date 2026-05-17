@@ -77,7 +77,7 @@ export class KJSettings {
             control_url,
             provisioning_token: KJSettings.optionalEnv('KJ_PROVISIONING_TOKEN'),
             agent_token_env: KJSettings.optionalEnv('KJ_AGENT_TOKEN'),
-            config_dir: KJSettings.optionalEnv('KJ_CONFIG_DIR') ?? '/etc/kj-agent',
+            config_dir: KJSettings.optionalEnv('KJ_CONFIG_DIR') ?? '/etc/kj-supervisor',
             log_level: log_level_raw as KJLogLevel,
             kj_agent_version: pkg.version,
             supervisor_container: KJSettings.optionalEnv('KJ_SUPERVISOR_CONTAINER'),

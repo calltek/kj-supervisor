@@ -1,4 +1,4 @@
-# Kujira — Supervisor (`kj-agent`)
+# Kujira — Supervisor (`kj-supervisor`)
 
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
 una conexión WebSocket persistente con el control (`kj-backend`) y
@@ -23,11 +23,11 @@ el host:
 ┌──────────────────────────────┐         ┌────────────────────────────────┐
 │ kj-backend (control)         │         │ VPS del cliente                │
 │ - api.kujira.run             │◀──TLS──▶│ ┌────────────────────────────┐ │
-│ - Postgres = fuente verdad   │         │ │ kj-agent supervisor        │ │
+│ - Postgres = fuente verdad   │         │ │ kj-supervisor              │ │
 │ - Socket.IO server /agents   │         │ │  - 1 container Docker      │ │
 └──────────────────────────────┘         │ │  - 1 WS al control         │ │
                                           │ │  - bind: docker.sock       │ │
-                                          │ │  - bind: /etc/kj-agent     │ │
+                                          │ │  - bind: /etc/kj-supervisor│ │
                                           │ └────────────────────────────┘ │
                                           │                                │
                                           │ ┌────────────────────────────┐ │
@@ -68,7 +68,7 @@ curl -fsSL https://kujira.run/install-supervisor.sh | \
     KJ_PROVISIONING_TOKEN=kjprov_... KJ_CONTROL_URL=https://api.kujira.run sh
 ```
 
-El script instala Docker si falta, crea `/etc/kj-agent/config`, lanza el
+El script instala Docker si falta, crea `/etc/kj-supervisor/`, lanza el
 container del supervisor y desaparece. El supervisor toma el control
 desde ahí.
 
@@ -76,12 +76,13 @@ desde ahí.
 
 ```bash
 docker run -d \
-  --name kj-agent-supervisor \
+  --name kj-supervisor \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /etc/kj-agent:/etc/kj-agent \
+  -v /etc/kj-supervisor:/etc/kj-supervisor \
   -e KJ_CONTROL_URL=https://api.kujira.run \
-  ghcr.io/calltek/kj-agent-supervisor:latest
+  -e KJ_SUPERVISOR_CONTAINER=kj-supervisor \
+  ghcr.io/calltek/kj-supervisor:latest
 ```
 
 **Mínimo de privilegios fuera del docker socket** — sin `--privileged`,
@@ -89,7 +90,7 @@ sin `--cap-add`, sin red de host.
 
 ### 2.3 Persistencia local
 
-`/etc/kj-agent/` (montado dentro del container) guarda:
+`/etc/kj-supervisor/` (montado dentro del container) guarda:
 
 - `token` — el `agent_token` persistente, modo `0600`. Sin él, el
   supervisor no puede reconectarse y tiene que volver a aprovisionarse.
@@ -228,7 +229,7 @@ diff <(cat src/protocol.ts) <(curl -s https://api.kujira.run/protocol)
 ## 6. Estructura del repo (planeada)
 
 ```
-kj-agent/
+kj-supervisor/
 ├── CLAUDE.md                 ← este fichero
 ├── README.md                 ← quickstart + scripts
 ├── package.json
@@ -278,8 +279,8 @@ No es definitiva — irá ajustándose. Pero es buen norte para el Hito 1.
 |---|---|---|
 | `KJ_CONTROL_URL` | sí | URL del control (`https://api.kujira.run`). |
 | `KJ_PROVISIONING_TOKEN` | en bootstrap | Token de un solo uso del operador. Tras el primer handshake se borra del disco. |
-| `KJ_AGENT_TOKEN` | tras bootstrap | Token persistente. Se guarda en `/etc/kj-agent/token` mode `0600`. |
-| `KJ_CONFIG_DIR` | no | Default `/etc/kj-agent`. Override para dev. |
+| `KJ_AGENT_TOKEN` | tras bootstrap | Token persistente. Se guarda en `/etc/kj-supervisor/token` mode `0600`. |
+| `KJ_CONFIG_DIR` | no | Default `/etc/kj-supervisor`. Override para dev. |
 | `KJ_LOG_LEVEL` | no | Default `info`. `debug`, `warn`, `error` válidos. |
 | `KJ_PING_INTERVAL_MS` | no | Default `30000`. |
 | `KJ_METRICS_INTERVAL_MS` | no | Default `60000`. |
@@ -375,7 +376,7 @@ imagen no necesita ser real — puede ser `alpine:latest` con
 
 - Handler de `supervisor:upgrade-required`.
 - `docker pull <target_image_tag>`.
-- Blue/green swap del propio container con el volumen `/etc/kj-agent`
+- Blue/green swap del propio container con el volumen `/etc/kj-supervisor`
   compartido.
 - La nueva instancia notifica al control "soy la nueva", la antigua se
   apaga.
@@ -397,13 +398,14 @@ bun run pull-protocol:dev   # descarga protocol.ts de localhost:5050
 bun --watch src/main.ts
 
 # Build de imagen Docker
-docker build -t kj-agent-supervisor:dev .
+docker build -t kj-supervisor:dev .
 docker run --rm -it \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ./local/etc-kj-agent:/etc/kj-agent \
+  -v ./local/etc-kj-supervisor:/etc/kj-supervisor \
   -e KJ_CONTROL_URL=http://host.docker.internal:5050 \
   -e KJ_PROVISIONING_TOKEN=kjprov_xxx \
-  kj-agent-supervisor:dev
+  -e KJ_SUPERVISOR_CONTAINER=kj-supervisor \
+  kj-supervisor:dev
 ```
 
 ---

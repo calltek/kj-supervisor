@@ -15,7 +15,7 @@ permissions:
 
 env:
     REGISTRY: ghcr.io
-    IMAGE_NAME: ${{ github.repository_owner }}/kj-agent-supervisor
+    IMAGE_NAME: ${{ github.repository_owner }}/kj-supervisor
 
 jobs:
     test:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kj-agent supervisor installer.
+# kj-supervisor installer.
 #
 # Usage:
 #   curl -fsSL https://kujira.run/install-supervisor.sh | \
@@ -7,7 +7,7 @@
 #
 # What it does:
 #   1. Detect OS, install Docker if missing.
-#   2. Create /etc/kj-agent (0700) with provisioning_token.
+#   2. Create /etc/kj-supervisor (0700) with provisioning_token.
 #   3. docker pull the supervisor image.
 #   4. docker run the supervisor with the right binds and env.
 #   5. Tail the container logs until 'handshake complete' or timeout.
@@ -20,9 +20,9 @@ set -euo pipefail
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────
 
-SUPERVISOR_IMAGE="${KJ_SUPERVISOR_IMAGE:-ghcr.io/calltek/kj-agent-supervisor:latest}"
-SUPERVISOR_CONTAINER="${KJ_SUPERVISOR_CONTAINER:-kj-agent-supervisor}"
-CONFIG_DIR="${KJ_CONFIG_DIR:-/etc/kj-agent}"
+SUPERVISOR_IMAGE="${KJ_SUPERVISOR_IMAGE:-ghcr.io/calltek/kj-supervisor:latest}"
+SUPERVISOR_CONTAINER="${KJ_SUPERVISOR_CONTAINER:-kj-supervisor}"
+CONFIG_DIR="${KJ_CONFIG_DIR:-/etc/kj-supervisor}"
 HANDSHAKE_TIMEOUT_SECONDS="${KJ_INSTALL_HANDSHAKE_TIMEOUT:-30}"
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ if $SUDO docker inspect "$SUPERVISOR_CONTAINER" >/dev/null 2>&1; then
 fi
 
 # Decide whether to inject the provisioning_token via env (first boot) or
-# trust the persisted /etc/kj-agent/token from a previous install.
+# trust the persisted $CONFIG_DIR/token from a previous install.
 ENV_ARGS=( -e "KJ_CONTROL_URL=$KJ_CONTROL_URL" )
 if [ -f "$CONFIG_DIR/token" ]; then
     log "Found existing $CONFIG_DIR/token — reusing the persisted agent_token"
@@ -193,7 +193,7 @@ $SUDO docker run -d \
     --name "$SUPERVISOR_CONTAINER" \
     --restart unless-stopped \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "$CONFIG_DIR":/etc/kj-agent \
+    -v "$CONFIG_DIR":/etc/kj-supervisor \
     "${ENV_ARGS[@]}" \
     "$SUPERVISOR_IMAGE" >/dev/null
 ok "Container started"
@@ -217,7 +217,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         cat <<EOF
 
 ═══════════════════════════════════════════════════════════════════════════
-  kj-agent supervisor is up.
+  kj-supervisor is up.
 
   Container:  $SUPERVISOR_CONTAINER
   Image:      $SUPERVISOR_IMAGE

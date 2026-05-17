@@ -31,7 +31,7 @@ class FakeDocker {
     }
 }
 
-const TARGET = 'ghcr.io/calltek/kj-agent-supervisor:1.5.0'
+const TARGET = 'ghcr.io/calltek/kj-supervisor:1.5.0'
 
 function payload(target = TARGET) {
     return { target_image_tag: target, reason: 'protocol version mismatch' }
@@ -66,7 +66,7 @@ describe('SupervisorUpgradeHandler', () => {
         const handler = new SupervisorUpgradeHandler({
             docker: docker as never,
             logger: silentLogger,
-            supervisor_container: 'kj-agent-supervisor',
+            supervisor_container: 'kj-supervisor',
             exit_fn: (code) => {
                 exit_calls.push(code)
             },
@@ -77,9 +77,9 @@ describe('SupervisorUpgradeHandler', () => {
 
         expect(docker.pulled).toEqual([TARGET])
         expect(docker.clones).toHaveLength(1)
-        expect(docker.clones[0]?.source).toBe('kj-agent-supervisor')
+        expect(docker.clones[0]?.source).toBe('kj-supervisor')
         expect(docker.clones[0]?.image).toBe(TARGET)
-        expect(docker.clones[0]?.name).toMatch(/^kj-agent-supervisor-new-\d+$/)
+        expect(docker.clones[0]?.name).toMatch(/^kj-supervisor-new-\d+$/)
 
         // Wait past the grace period.
         await new Promise((r) => setTimeout(r, 25))
@@ -93,7 +93,7 @@ describe('SupervisorUpgradeHandler', () => {
         const handler = new SupervisorUpgradeHandler({
             docker: docker as never,
             logger: silentLogger,
-            supervisor_container: 'kj-agent-supervisor',
+            supervisor_container: 'kj-supervisor',
             exit_fn: () => {
                 exited = true
             },
@@ -114,7 +114,7 @@ describe('SupervisorUpgradeHandler', () => {
         const handler = new SupervisorUpgradeHandler({
             docker: docker as never,
             logger: silentLogger,
-            supervisor_container: 'kj-agent-supervisor',
+            supervisor_container: 'kj-supervisor',
             exit_fn: () => {
                 exited = true
             },
@@ -133,7 +133,7 @@ describe('SupervisorUpgradeHandler', () => {
         const handler = new SupervisorUpgradeHandler({
             docker: docker as never,
             logger: silentLogger,
-            supervisor_container: 'kj-agent-supervisor',
+            supervisor_container: 'kj-supervisor',
             exit_fn: () => undefined,
             handover_grace_ms: 60_000, // long, so the in_progress flag stays set
         })

@@ -37,7 +37,7 @@ export class KJLogger {
         const root = pino({
             level,
             redact: { paths: REDACT_PATHS, censor: '[redacted]' },
-            base: { service: 'kj-agent' },
+            base: { service: 'kj-supervisor' },
             ...(isDev && {
                 transport: {
                     target: 'pino-pretty',

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Multi-stage build for kj-agent supervisor.
+# Multi-stage build for kj-supervisor.
 #
 # Pre-condition: `bun run pull-protocol[:dev]` must have run on the host
 # before `docker build`, so src/protocol.ts exists. The Dockerfile does
@@ -36,7 +36,7 @@ COPY --chown=kj:kj src ./src
 USER kj
 
 ENV NODE_ENV=production
-ENV KJ_CONFIG_DIR=/etc/kj-agent
+ENV KJ_CONFIG_DIR=/etc/kj-supervisor
 ENV KJ_LOG_LEVEL=info
 
 # The supervisor doesn't expose ports — only outbound to the control.
