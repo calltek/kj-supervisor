@@ -21,10 +21,14 @@ import {
 import { KJControlClient } from './client/control.client'
 import { KJSettings, PING_INTERVAL_MS } from './config/settings'
 import { KJDocker } from './docker/client'
+import { AgentLifecycleHandler } from './handlers/agent-lifecycle.handler'
 import { AgentSpawnHandler } from './handlers/agent-spawn.handler'
 import { KJLogger } from './logger'
 import {
+    type AgentPausePayload,
+    type AgentResumePayload,
     type AgentSpawnPayload,
+    type AgentStopPayload,
     type ControlCommandAck,
     PROTOCOL_VERSION,
     type ServerHelloAck,
@@ -82,9 +86,23 @@ async function main(): Promise<void> {
     const docker = new KJDocker(logger)
     const statusReporter = new AgentStatusReporter(client, logger)
     const spawnHandler = new AgentSpawnHandler({ docker, status: statusReporter, logger })
+    const lifecycleHandler = new AgentLifecycleHandler({
+        docker,
+        status: statusReporter,
+        logger,
+    })
 
     client.onCommand<AgentSpawnPayload, ControlCommandAck>('agent:spawn', (payload) =>
         spawnHandler.handle(payload)
+    )
+    client.onCommand<AgentStopPayload, ControlCommandAck>('agent:stop', (payload) =>
+        lifecycleHandler.handleStop(payload)
+    )
+    client.onCommand<AgentPausePayload, ControlCommandAck>('agent:pause', (payload) =>
+        lifecycleHandler.handlePause(payload)
+    )
+    client.onCommand<AgentResumePayload, ControlCommandAck>('agent:resume', (payload) =>
+        lifecycleHandler.handleResume(payload)
     )
 
     let healthHandle: HealthLoopHandle | null = null
