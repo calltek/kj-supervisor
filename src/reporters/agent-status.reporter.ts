@@ -23,7 +23,12 @@ export class AgentStatusReporter {
 
     push(report: AgentStatusReport): void {
         this.logger.info(
-            { agent_id: report.agent_id, status: report.status, container_id: report.container_id },
+            {
+                agent_id: report.agent_id,
+                status: report.status,
+                container_id: report.container_id,
+                last_action: report.last_action,
+            },
             'agent:status push'
         )
         this.client.push('agent:status', report)

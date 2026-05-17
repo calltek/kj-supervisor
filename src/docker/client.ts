@@ -27,6 +27,14 @@ export interface KJContainerSummary {
     agent_id: number | null
 }
 
+/** Shape of each pull progress event Docker emits per layer. */
+export interface PullProgressEvent {
+    status: string
+    id?: string
+    progressDetail?: { current?: number; total?: number }
+    progress?: string
+}
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -39,16 +47,23 @@ export class KJDocker {
     /**
      * Pull an image from the registry. Resolves when the daemon has the
      * image; rejects on pull failure (network, auth, missing tag).
+     *
+     * `onProgress` is invoked on every layer event (downloading,
+     * extracting...) so the caller can surface granular progress to
+     * the control. The callback must not throw.
      */
-    async pullImage(image_tag: string): Promise<void> {
+    async pullImage(
+        image_tag: string,
+        onProgress?: (event: PullProgressEvent) => void
+    ): Promise<void> {
         this.logger.info({ image_tag }, 'pulling image')
         const stream = await this.docker.pull(image_tag)
         await new Promise<void>((resolve, reject) => {
             this.docker.modem.followProgress(
                 stream,
                 (err) => (err ? reject(err) : resolve()),
-                () => {
-                    // per-layer progress; ignore for now
+                (event: PullProgressEvent) => {
+                    if (onProgress) onProgress(event)
                 }
             )
         })
