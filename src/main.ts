@@ -20,14 +20,19 @@ import {
 } from './client/auth'
 import { KJControlClient } from './client/control.client'
 import { KJSettings, PING_INTERVAL_MS } from './config/settings'
+import { KJDocker } from './docker/client'
+import { AgentSpawnHandler } from './handlers/agent-spawn.handler'
 import { KJLogger } from './logger'
 import {
+    type AgentSpawnPayload,
+    type ControlCommandAck,
     PROTOCOL_VERSION,
     type ServerHelloAck,
     type ServerHelloPayload,
     WS_ERROR_CODES,
     type WsErrorPayload,
 } from './protocol'
+import { AgentStatusReporter } from './reporters/agent-status.reporter'
 import { type HealthLoopHandle, startHealthLoop } from './reporters/health.reporter'
 
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -71,6 +76,16 @@ async function main(): Promise<void> {
         auth: toHandshakeAuth(auth),
         logger,
     })
+
+    // Docker-side pieces. Constructed once at boot — they hold no
+    // connection state, so we don't rebuild them per reconnect.
+    const docker = new KJDocker(logger)
+    const statusReporter = new AgentStatusReporter(client, logger)
+    const spawnHandler = new AgentSpawnHandler({ docker, status: statusReporter, logger })
+
+    client.onCommand<AgentSpawnPayload, ControlCommandAck>('agent:spawn', (payload) =>
+        spawnHandler.handle(payload)
+    )
 
     let healthHandle: HealthLoopHandle | null = null
     const stopHealthLoop = (): void => {
