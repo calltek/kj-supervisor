@@ -1,0 +1,14 @@
+.git
+.github
+.vscode
+node_modules
+dist
+local
+.env
+.env.*
+*.log
+**/*.test.ts
+CLAUDE.md
+README.md
+Dockerfile
+.dockerignore
