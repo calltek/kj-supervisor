@@ -6,7 +6,7 @@
 
 import pino from 'pino'
 
-export type KJLogger = pino.Logger
+import type { KJLogLevel } from './config/settings'
 
 const REDACT_PATHS = [
     'auth.provisioning_token',
@@ -18,18 +18,53 @@ const REDACT_PATHS = [
     '*.agent_token',
 ]
 
-export function createLogger(level: pino.LevelWithSilent): KJLogger {
-    const isDev = process.env.NODE_ENV !== 'production'
+type LogMethod = (objOrMsg: unknown, msg?: string) => void
 
-    return pino({
-        level,
-        redact: { paths: REDACT_PATHS, censor: '[redacted]' },
-        base: { service: 'kj-agent' },
-        ...(isDev && {
-            transport: {
-                target: 'pino-pretty',
-                options: { colorize: true, translateTime: 'SYS:HH:MM:ss.l' },
-            },
-        }),
-    })
+export class KJLogger {
+    private readonly pino: pino.Logger
+
+    constructor(pinoInstance: pino.Logger) {
+        this.pino = pinoInstance
+    }
+
+    /**
+     * Build a root logger from the supervisor's settings. Pretty
+     * transport in dev, raw JSON in prod (Docker picks it up).
+     */
+    static create(level: KJLogLevel): KJLogger {
+        const isDev = process.env.NODE_ENV !== 'production'
+
+        const root = pino({
+            level,
+            redact: { paths: REDACT_PATHS, censor: '[redacted]' },
+            base: { service: 'kj-agent' },
+            ...(isDev && {
+                transport: {
+                    target: 'pino-pretty',
+                    options: { colorize: true, translateTime: 'SYS:HH:MM:ss.l' },
+                },
+            }),
+        })
+
+        return new KJLogger(root)
+    }
+
+    /** Spawn a child logger with extra bindings (e.g. `{ component: 'auth' }`). */
+    child(bindings: Record<string, unknown>): KJLogger {
+        return new KJLogger(this.pino.child(bindings))
+    }
+
+    debug: LogMethod = (objOrMsg, msg) => this.emit('debug', objOrMsg, msg)
+    info: LogMethod = (objOrMsg, msg) => this.emit('info', objOrMsg, msg)
+    warn: LogMethod = (objOrMsg, msg) => this.emit('warn', objOrMsg, msg)
+    error: LogMethod = (objOrMsg, msg) => this.emit('error', objOrMsg, msg)
+    fatal: LogMethod = (objOrMsg, msg) => this.emit('fatal', objOrMsg, msg)
+
+    private emit(level: pino.Level, objOrMsg: unknown, msg?: string): void {
+        if (typeof objOrMsg === 'string') {
+            this.pino[level](objOrMsg)
+        } else {
+            this.pino[level](objOrMsg as object, msg)
+        }
+    }
 }

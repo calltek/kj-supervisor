@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import pino from 'pino'
 
+import { KJLogger } from '../logger'
 import { type HealthClient, startHealthLoop } from './health.reporter'
 
-const silentLogger = pino({ level: 'silent' })
+const silentLogger = KJLogger.create('error')
 
 type AckResult = { ok: true; pong: unknown } | { ok: false; error: unknown }
 

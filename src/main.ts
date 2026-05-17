@@ -19,8 +19,8 @@ import {
     writeAgentTokenToDisk,
 } from './client/auth'
 import { KJControlClient } from './client/control.client'
-import { loadSettings, PING_INTERVAL_MS } from './config/settings'
-import { createLogger } from './logger'
+import { KJSettings, PING_INTERVAL_MS } from './config/settings'
+import { KJLogger } from './logger'
 import {
     PROTOCOL_VERSION,
     type ServerHelloAck,
@@ -32,8 +32,8 @@ import { type HealthLoopHandle, startHealthLoop } from './reporters/health.repor
 const FATAL_ERROR_CODES = new Set(['AUTH_MISSING', 'AUTH_INVALID', 'PROVISIONING_TOKEN_EXPIRED'])
 
 async function main(): Promise<void> {
-    const settings = loadSettings()
-    const logger = createLogger(settings.log_level)
+    const settings = KJSettings.load()
+    const logger = KJLogger.create(settings.log_level)
     logger.info(
         {
             control_url: settings.control_url,
