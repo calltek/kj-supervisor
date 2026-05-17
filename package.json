@@ -18,12 +18,14 @@
         "test": "bun test"
     },
     "dependencies": {
+        "dockerode": "^5.0.0",
         "pino": "^9.5.0",
         "socket.io-client": "^4.8.3"
     },
     "devDependencies": {
         "@biomejs/biome": "^2.4.14",
         "@types/bun": "^1.3.13",
+        "@types/dockerode": "^4.0.1",
         "pino-pretty": "^13.1.3",
         "typescript": "^5.9.3"
     }
