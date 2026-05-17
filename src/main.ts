@@ -36,6 +36,7 @@ import {
     type AgentResumePayload,
     type AgentSpawnPayload,
     type AgentStopPayload,
+    type ContainerView,
     type ControlCommandAck,
     PROTOCOL_VERSION,
     type ServerHelloAck,
@@ -147,12 +148,29 @@ async function main(): Promise<void> {
         // A reconnect re-runs this whole handshake; cancel any stale ping loop first.
         stopLoops()
 
+        // Reconciliation: tell the control what kj-agent containers we
+        // actually see right now. The control compares against its DB
+        // and decides about orphans (kill) and ghosts (mark ERROR).
+        let live_containers: ContainerView[] = []
+        try {
+            const summaries = await docker.listKjContainers()
+            live_containers = summaries
+                .filter((s): s is { container_id: string; agent_id: number } => s.agent_id != null)
+                .map((s) => ({ agent_id: s.agent_id, container_id: s.container_id }))
+            logger.info({ count: live_containers.length }, 'reconcile snapshot for server:hello')
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            logger.warn(
+                { error: message },
+                'failed to list containers for reconcile; sending empty list'
+            )
+        }
+
         const payload: ServerHelloPayload = {
             kj_agent_version: settings.kj_agent_version,
             protocol_version: PROTOCOL_VERSION,
             hostname: hostname(),
-            // Hito 5 lo poblará con `docker ps --filter "label=kj-agent" -q`.
-            containers: [],
+            containers: live_containers,
         }
 
         let ack: ServerHelloAck
