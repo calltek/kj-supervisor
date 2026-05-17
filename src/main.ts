@@ -19,7 +19,12 @@ import {
     writeAgentTokenToDisk,
 } from './client/auth'
 import { KJControlClient } from './client/control.client'
-import { KJSettings, PING_INTERVAL_MS } from './config/settings'
+import {
+    AGENT_METRICS_INTERVAL_MS,
+    KJSettings,
+    PING_INTERVAL_MS,
+    SERVER_METRICS_INTERVAL_MS,
+} from './config/settings'
 import { KJDocker } from './docker/client'
 import { KJDockerEventsWatcher } from './docker/events-watcher'
 import { OperationTracker } from './docker/operation-tracker'
@@ -38,8 +43,13 @@ import {
     WS_ERROR_CODES,
     type WsErrorPayload,
 } from './protocol'
+import { type AgentMetricsHandle, startAgentMetricsLoop } from './reporters/agent-metrics.reporter'
 import { AgentStatusReporter } from './reporters/agent-status.reporter'
 import { type HealthLoopHandle, startHealthLoop } from './reporters/health.reporter'
+import {
+    type ServerMetricsHandle,
+    startServerMetricsLoop,
+} from './reporters/server-metrics.reporter'
 
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_MISSING,
@@ -118,16 +128,21 @@ async function main(): Promise<void> {
     )
 
     let healthHandle: HealthLoopHandle | null = null
-    const stopHealthLoop = (): void => {
-        if (healthHandle) {
-            healthHandle.stop()
-            healthHandle = null
-        }
+    let serverMetricsHandle: ServerMetricsHandle | null = null
+    let agentMetricsHandle: AgentMetricsHandle | null = null
+
+    const stopLoops = (): void => {
+        healthHandle?.stop()
+        serverMetricsHandle?.stop()
+        agentMetricsHandle?.stop()
+        healthHandle = null
+        serverMetricsHandle = null
+        agentMetricsHandle = null
     }
 
     client.on('ready', async () => {
         // A reconnect re-runs this whole handshake; cancel any stale ping loop first.
-        stopHealthLoop()
+        stopLoops()
 
         const payload: ServerHelloPayload = {
             kj_agent_version: settings.kj_agent_version,
@@ -161,6 +176,11 @@ async function main(): Promise<void> {
                 logger,
                 interval_ms: PING_INTERVAL_MS,
             })
+            serverMetricsHandle = startServerMetricsLoop({
+                client,
+                logger,
+                interval_ms: SERVER_METRICS_INTERVAL_MS,
+            })
             return
         }
 
@@ -191,12 +211,23 @@ async function main(): Promise<void> {
             logger,
             interval_ms: PING_INTERVAL_MS,
         })
+        serverMetricsHandle = startServerMetricsLoop({
+            client,
+            logger,
+            interval_ms: SERVER_METRICS_INTERVAL_MS,
+        })
+        agentMetricsHandle = startAgentMetricsLoop({
+            docker,
+            client,
+            logger,
+            interval_ms: AGENT_METRICS_INTERVAL_MS,
+        })
     })
 
     client.on('protocol_error', (payload: WsErrorPayload) => {
         if (FATAL_ERROR_CODES.has(payload.code)) {
             logger.fatal({ payload }, 'fatal protocol error, exiting')
-            stopHealthLoop()
+            stopLoops()
             client.disconnect()
             process.exit(1)
         }
@@ -205,12 +236,12 @@ async function main(): Promise<void> {
     })
 
     client.on('disconnect', () => {
-        stopHealthLoop()
+        stopLoops()
     })
 
     const shutdown = (signal: string): void => {
         logger.info({ signal }, 'received shutdown signal')
-        stopHealthLoop()
+        stopLoops()
         eventsWatcher.stop()
         client.disconnect()
         process.exit(0)
