@@ -125,6 +125,18 @@ export class KJDocker {
         }
     }
 
+    /** Freeze a running container (SIGSTOP via cgroups). */
+    async pauseContainer(container_id: string): Promise<void> {
+        this.logger.info({ container_id }, 'pausing container')
+        await this.docker.getContainer(container_id).pause()
+    }
+
+    /** Thaw a paused container. */
+    async unpauseContainer(container_id: string): Promise<void> {
+        this.logger.info({ container_id }, 'unpausing container')
+        await this.docker.getContainer(container_id).unpause()
+    }
+
     /** Remove a stopped container. Safe to call after stop. */
     async removeContainer(container_id: string): Promise<void> {
         await this.docker
