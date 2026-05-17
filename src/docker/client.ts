@@ -35,6 +35,22 @@ export interface PullProgressEvent {
     progress?: string
 }
 
+/**
+ * Shape of a Docker daemon event (the subset we care about). Docker's
+ * stream emits a JSON line per event with many more fields; we type
+ * only what the watcher reads.
+ */
+export interface DockerEvent {
+    Type: string // 'container', 'image', 'network'...
+    Action: string // 'start', 'die', 'stop', 'kill', 'pause', 'unpause', 'destroy'...
+    Actor: {
+        ID: string // container id
+        Attributes?: Record<string, string> // labels + extras
+    }
+    time?: number
+    timeNano?: number
+}
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -150,6 +166,22 @@ export class KJDocker {
     async unpauseContainer(container_id: string): Promise<void> {
         this.logger.info({ container_id }, 'unpausing container')
         await this.docker.getContainer(container_id).unpause()
+    }
+
+    /**
+     * Subscribe to the docker daemon events stream, filtered to events
+     * touching kj-agent-labeled containers. Returns a readable stream
+     * of newline-delimited JSON; the caller parses each line into a
+     * DockerEvent.
+     */
+    async getEvents(): Promise<NodeJS.ReadableStream> {
+        const stream = await this.docker.getEvents({
+            filters: {
+                type: ['container'],
+                label: [KJ_LABEL],
+            },
+        })
+        return stream as NodeJS.ReadableStream
     }
 
     /** Remove a stopped container. Safe to call after stop. */
