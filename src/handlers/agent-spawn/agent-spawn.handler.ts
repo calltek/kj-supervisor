@@ -99,11 +99,26 @@ export class AgentSpawnHandler {
             initial_last_action: `pulling ${payload.image_tag}`,
         }).start()
 
+        // Optional credentials sent by the control for private images
+        // (e.g. ghcr.io/calltek/kj-agent-base). Absent for public ones.
+        // Treated as ephemeral: used here for this pull and forgotten.
+        const pullAuth = payload.registry_credentials
+            ? {
+                  username: payload.registry_credentials.username,
+                  password: payload.registry_credentials.password,
+                  serveraddress: payload.registry_credentials.registry,
+              }
+            : undefined
+
         try {
-            await this.docker.pullImage(payload.image_tag, (event) => {
-                const summary = summarizePullEvent(event, payload.image_tag)
-                if (summary) pullHeartbeat.update(summary)
-            })
+            await this.docker.pullImage(
+                payload.image_tag,
+                (event) => {
+                    const summary = summarizePullEvent(event, payload.image_tag)
+                    if (summary) pullHeartbeat.update(summary)
+                },
+                pullAuth
+            )
         } catch (err) {
             pullHeartbeat.stop()
             log.error({ err: errMessage(err) }, 'image pull failed')

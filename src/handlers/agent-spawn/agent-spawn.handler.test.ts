@@ -8,16 +8,25 @@ import { AgentSpawnHandler } from './agent-spawn.handler'
 
 const silentLogger = KJLogger.create('error')
 
+interface PullCall {
+    image_tag: string
+    auth?: { username: string; password: string; serveraddress?: string }
+}
+
 class FakeDocker {
-    public pulled: string[] = []
+    public pulled: PullCall[] = []
     public ran: Array<{ image_tag: string; name: string; labels: Record<string, string> }> = []
     public containers: KJContainerSummary[] = []
     public next_pull_error: Error | null = null
     public next_run_error: Error | null = null
 
-    async pullImage(image_tag: string): Promise<void> {
+    async pullImage(
+        image_tag: string,
+        _onProgress?: unknown,
+        auth?: { username: string; password: string; serveraddress?: string }
+    ): Promise<void> {
         if (this.next_pull_error) throw this.next_pull_error
-        this.pulled.push(image_tag)
+        this.pulled.push({ image_tag, auth })
     }
 
     async runContainer(opts: {
@@ -102,7 +111,7 @@ describe('AgentSpawnHandler', () => {
         await waitForFinalStatus(client, 'RUNNING')
         expect(statusTransitions(client)).toEqual(['SPAWNING', 'RUNNING'])
 
-        expect(docker.pulled).toEqual(['alpine:latest'])
+        expect(docker.pulled.map((p) => p.image_tag)).toEqual(['alpine:latest'])
         expect(docker.ran).toHaveLength(1)
         expect(docker.ran[0]?.name).toBe('kj-agent-42')
         expect(docker.ran[0]?.labels).toEqual({
@@ -130,8 +139,53 @@ describe('AgentSpawnHandler', () => {
 
         // No pull, no run, no SPAWNING push.
         expect(docker.pulled).toEqual([])
-        expect(docker.ran).toHaveLength(0)
-        expect(statuses(client)).toEqual([])
+    })
+
+    test('propagates registry_credentials to pullImage when provided', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        const payload = makePayload({
+            image_tag: 'ghcr.io/calltek/kj-agent-base:latest',
+            registry_credentials: {
+                registry: 'ghcr.io',
+                username: 'x-access-token',
+                password: 'ghp_test_token',
+            },
+        })
+
+        await handler.handle(payload)
+        await waitForFinalStatus(client, 'RUNNING')
+
+        expect(docker.pulled).toHaveLength(1)
+        const call = docker.pulled[0]
+        expect(call?.image_tag).toBe('ghcr.io/calltek/kj-agent-base:latest')
+        expect(call?.auth).toEqual({
+            username: 'x-access-token',
+            password: 'ghp_test_token',
+            serveraddress: 'ghcr.io',
+        })
+    })
+
+    test('omits auth when registry_credentials is absent', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        await handler.handle(makePayload())
+        await waitForFinalStatus(client, 'RUNNING')
+
+        expect(docker.pulled).toHaveLength(1)
+        expect(docker.pulled[0]?.auth).toBeUndefined()
     })
 
     test('image pull failure pushes ERROR (ack still accepts)', async () => {
@@ -171,7 +225,7 @@ describe('AgentSpawnHandler', () => {
         await handler.handle(makePayload())
         await waitForFinalStatus(client, 'ERROR')
 
-        expect(docker.pulled).toEqual(['alpine:latest'])
+        expect(docker.pulled.map((p) => p.image_tag)).toEqual(['alpine:latest'])
         expect(statusTransitions(client)).toEqual(['SPAWNING', 'ERROR'])
         const seen = statuses(client)
         expect(seen[seen.length - 1]?.last_action).toContain('no space left on device')

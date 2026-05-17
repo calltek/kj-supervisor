@@ -67,13 +67,28 @@ export class KJDocker {
      * `onProgress` is invoked on every layer event (downloading,
      * extracting...) so the caller can surface granular progress to
      * the control. The callback must not throw.
+     *
+     * `auth` is forwarded to the docker daemon as the registry
+     * credentials for THIS pull. Use it for private images. Never log
+     * its contents — `dockerode` already does the right thing here.
      */
     async pullImage(
         image_tag: string,
-        onProgress?: (event: PullProgressEvent) => void
+        onProgress?: (event: PullProgressEvent) => void,
+        auth?: { username: string; password: string; serveraddress?: string }
     ): Promise<void> {
-        this.logger.info({ image_tag }, 'pulling image')
-        const stream = await this.docker.pull(image_tag)
+        this.logger.info({ image_tag, authenticated: Boolean(auth) }, 'pulling image')
+        // dockerode forwards `authconfig` to the daemon as the X-Registry-Auth
+        // header, which is what `docker login + docker pull` does under the hood.
+        const pullOptions: Record<string, unknown> = {}
+        if (auth) {
+            pullOptions.authconfig = {
+                username: auth.username,
+                password: auth.password,
+                serveraddress: auth.serveraddress,
+            }
+        }
+        const stream = await this.docker.pull(image_tag, pullOptions)
         await new Promise<void>((resolve, reject) => {
             this.docker.modem.followProgress(
                 stream,
