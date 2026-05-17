@@ -410,7 +410,99 @@ docker run --rm -it \
 
 ---
 
-## 11. Referencias
+## 11. Estado del control local — listo para arrancar Hito 1
+
+El backend (`kj-backend`) en `localhost:5050` ya tiene un Server creado
+esperando a este supervisor. Datos preparados el **2026-05-17**:
+
+### Recursos creados en el control
+
+| Recurso | ID | Detalle |
+|---|---|---|
+| **Backend URL** | — | `http://localhost:5050` |
+| **Usuario** | `1` | `supervisor-dev@kujira.local` |
+| **Organization** | `1` | `Kujira Dev`, plan `FREE` |
+| **Server** | `1` | `dev-laptop`, status `OFFLINE` esperando supervisor |
+
+Los secretos vivos (provisioning_token, password, JWT) están en el
+fichero **`.env.local`** del repo (gitignored). Plantilla en
+[.env.example](.env.example).
+
+### Arrancar de cero
+
+```bash
+# 1. Levanta el backend (en otra terminal)
+cd ~/Git/kj-backend
+bun run docker:dev   # postgres + redis
+bun run dev          # API en :5050
+
+# 2. Verifica que responde
+curl http://localhost:5050/ping
+# → { "name": "Kujira API", ... }
+
+# 3. Copia .env.example → .env.local y rellena los valores con los del repo
+cp .env.example .env.local
+# Editar .env.local con el provisioning_token actual
+
+# 4. Cuando exista el código del Hito 1
+bun install
+bun run pull-protocol:dev
+bun --watch src/main.ts
+```
+
+### Si el provisioning_token expira o se gasta
+
+```bash
+JWT="<JWT del usuario, en .env.local>"
+curl -s -X POST http://localhost:5050/org/1/server/1/regenerate-provisioning-token \
+  -H "Authorization: Bearer $JWT" | jq -r '.provisioning_token'
+```
+
+Devuelve un nuevo `kjprov_...` e **invalida** cualquier `agent_token`
+persistente anterior. Si el supervisor ya tenía un token guardado en
+disco (`local/etc-kj-supervisor/token`), bórralo antes de reintentar.
+
+Si el JWT también expiró (7 días desde su emisión), refresca con:
+
+```bash
+curl -s -X POST http://localhost:5050/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"supervisor-dev@kujira.local","password":"<password>"}' \
+  | jq -r '.token'
+```
+
+### Qué validar después del primer handshake
+
+Tras `bun --watch src/main.ts` con el `.env.local` cargado, debes ver
+(aproximadamente):
+
+```
+supervisor starting
+auth resolved { mode: "provisioning" }
+socket connected, waiting for control:ready
+control:ready received
+agent_token persisted to disk
+handshake complete { protocol_version: 1 }
+pong { server_time: ... }            ← cada 30s
+```
+
+Y en el control (BD):
+
+```sql
+-- server #1 ahora ONLINE con agent_token_hash poblado
+SELECT id, status, provisioning_token IS NULL AS provisioning_consumed,
+       agent_token_hash IS NOT NULL AS has_agent_token, last_seen_at
+FROM server WHERE id = 1;
+-- → ONLINE | t | t | <reciente>
+```
+
+Reinicios posteriores del supervisor: ya **no** necesita
+`KJ_PROVISIONING_TOKEN`. Lee el agent_token del disco
+(`local/etc-kj-supervisor/token`) y reconecta directo.
+
+---
+
+## 12. Referencias
 
 - **Especificación del protocolo** (lectura obligada):
   [kj-backend/docs/supervisor-protocol.md](../kj-backend/docs/supervisor-protocol.md).
