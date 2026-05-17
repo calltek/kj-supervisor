@@ -82,7 +82,22 @@ export class KJControlClient extends EventEmitter {
 
     /** Hard close. No reconnection. */
     disconnect(): void {
+        this.logger.info('disconnecting (no reconnect)')
         this.socket.disconnect()
+    }
+
+    /**
+     * Drop the underlying transport and let Socket.IO reconnect with
+     * its exponential backoff. Use this when the connection looks
+     * stuck (e.g. consecutive health:ping timeouts) — calling
+     * `socket.disconnect()` instead would mark the manager as
+     * client-closed and skip reconnection.
+     */
+    forceReconnect(reason: string): void {
+        this.logger.warn({ reason }, 'forcing reconnect — dropping transport')
+        // engine.close() drops the websocket without telling the Manager
+        // it was a client-initiated close, so reconnection still kicks in.
+        this.socket.io.engine?.close()
     }
 
     /**

@@ -9,7 +9,7 @@ type AckResult = { ok: true; pong: unknown } | { ok: false; error: unknown }
 
 class FakeClient implements HealthClient {
     public emit_calls = 0
-    public disconnect_calls = 0
+    public force_reconnect_calls = 0
     public next_results: AckResult[] = []
 
     async emitWithAck<T>(event: string, _payload: unknown, _timeoutMs: number): Promise<T> {
@@ -21,8 +21,8 @@ class FakeClient implements HealthClient {
         throw result.error
     }
 
-    disconnect(): void {
-        this.disconnect_calls += 1
+    forceReconnect(_reason: string): void {
+        this.force_reconnect_calls += 1
     }
 }
 
@@ -52,7 +52,7 @@ describe('startHealthLoop', () => {
         handle.stop()
 
         expect(client.emit_calls).toBe(1)
-        expect(client.disconnect_calls).toBe(0)
+        expect(client.force_reconnect_calls).toBe(0)
     })
 
     test('disconnects after N consecutive failures', async () => {
@@ -76,7 +76,7 @@ describe('startHealthLoop', () => {
         handle.stop()
 
         expect(client.emit_calls).toBe(3)
-        expect(client.disconnect_calls).toBe(1)
+        expect(client.force_reconnect_calls).toBe(1)
     })
 
     test('resets the failure counter after a successful pong', async () => {
@@ -105,7 +105,7 @@ describe('startHealthLoop', () => {
 
         // 2 fails + reset + 2 fails: never hits 3 in a row.
         expect(client.emit_calls).toBe(5)
-        expect(client.disconnect_calls).toBe(0)
+        expect(client.force_reconnect_calls).toBe(0)
     })
 
     test('stop() halts further ticks', async () => {

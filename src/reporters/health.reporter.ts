@@ -9,7 +9,7 @@ import type { KJLogger } from '../logger'
 
 export interface HealthClient {
     emitWithAck<T>(event: string, payload: unknown, timeoutMs: number): Promise<T>
-    disconnect(): void
+    forceReconnect(reason: string): void
 }
 
 export interface HealthLoopOptions {
@@ -54,8 +54,16 @@ export function startHealthLoop(opts: HealthLoopOptions): HealthLoopHandle {
             log.warn({ error: message, consecutive_failures, max_failures }, 'health:ping failed')
 
             if (consecutive_failures >= max_failures) {
-                log.error({ consecutive_failures }, 'max ping failures reached, forcing disconnect')
-                opts.client.disconnect()
+                log.error(
+                    { consecutive_failures, max_failures },
+                    'max ping failures reached, forcing reconnect'
+                )
+                opts.client.forceReconnect(
+                    `${consecutive_failures} consecutive health:ping failures`
+                )
+                // Reset so we don't trigger another reconnect on the very next tick
+                // before the new connection has had a chance to handshake.
+                consecutive_failures = 0
             }
         }
     }
