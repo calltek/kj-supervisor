@@ -13,6 +13,12 @@ import pkg from '../../package.json' with { type: 'json' }
  */
 export const PING_INTERVAL_MS = 30_000
 
+/** server:metrics cadence — load avg + uptime of the host VPS. */
+export const SERVER_METRICS_INTERVAL_MS = 60_000
+
+/** agent:metrics cadence — uptime + tokens/cost per running agent. */
+export const AGENT_METRICS_INTERVAL_MS = 60_000
+
 export type KJLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const VALID_LOG_LEVELS: ReadonlySet<KJLogLevel> = new Set(['debug', 'info', 'warn', 'error'])
