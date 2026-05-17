@@ -25,11 +25,16 @@ import {
     PROTOCOL_VERSION,
     type ServerHelloAck,
     type ServerHelloPayload,
+    WS_ERROR_CODES,
     type WsErrorPayload,
 } from './protocol'
 import { type HealthLoopHandle, startHealthLoop } from './reporters/health.reporter'
 
-const FATAL_ERROR_CODES = new Set(['AUTH_MISSING', 'AUTH_INVALID', 'PROVISIONING_TOKEN_EXPIRED'])
+const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
+    WS_ERROR_CODES.AUTH_MISSING,
+    WS_ERROR_CODES.AUTH_INVALID,
+    WS_ERROR_CODES.PROVISIONING_TOKEN_EXPIRED,
+])
 
 async function main(): Promise<void> {
     const settings = KJSettings.load()
