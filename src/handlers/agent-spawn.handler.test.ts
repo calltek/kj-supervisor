@@ -62,6 +62,15 @@ function statuses(client: FakeClient): AgentStatusReport[] {
         .map((p) => p.payload as AgentStatusReport)
 }
 
+/** Collapse consecutive same-status pushes — heartbeats produce duplicates. */
+function statusTransitions(client: FakeClient): AgentStatusReport['status'][] {
+    const out: AgentStatusReport['status'][] = []
+    for (const s of statuses(client)) {
+        if (out[out.length - 1] !== s.status) out.push(s.status)
+    }
+    return out
+}
+
 /** Wait until the background spawn promise has finished pushing its final status. */
 async function waitForFinalStatus(client: FakeClient, expected: AgentStatusReport['status']) {
     const deadline = Date.now() + 1000
@@ -91,8 +100,7 @@ describe('AgentSpawnHandler', () => {
         expect(ack).toEqual({ ok: true, accepted: true })
 
         await waitForFinalStatus(client, 'RUNNING')
-        const seen = statuses(client).map((s) => s.status)
-        expect(seen).toEqual(['SPAWNING', 'RUNNING'])
+        expect(statusTransitions(client)).toEqual(['SPAWNING', 'RUNNING'])
 
         expect(docker.pulled).toEqual(['alpine:latest'])
         expect(docker.ran).toHaveLength(1)
@@ -141,9 +149,9 @@ describe('AgentSpawnHandler', () => {
         expect(ack).toEqual({ ok: true, accepted: true })
 
         await waitForFinalStatus(client, 'ERROR')
+        expect(statusTransitions(client)).toEqual(['SPAWNING', 'ERROR'])
         const seen = statuses(client)
-        expect(seen.map((s) => s.status)).toEqual(['SPAWNING', 'ERROR'])
-        expect(seen[1]?.last_action).toContain('manifest unknown')
+        expect(seen[seen.length - 1]?.last_action).toContain('manifest unknown')
 
         // Container never started.
         expect(docker.ran).toHaveLength(0)
@@ -164,8 +172,8 @@ describe('AgentSpawnHandler', () => {
         await waitForFinalStatus(client, 'ERROR')
 
         expect(docker.pulled).toEqual(['alpine:latest'])
+        expect(statusTransitions(client)).toEqual(['SPAWNING', 'ERROR'])
         const seen = statuses(client)
-        expect(seen.map((s) => s.status)).toEqual(['SPAWNING', 'ERROR'])
-        expect(seen[1]?.last_action).toContain('no space left on device')
+        expect(seen[seen.length - 1]?.last_action).toContain('no space left on device')
     })
 })

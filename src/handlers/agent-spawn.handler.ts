@@ -10,8 +10,14 @@
  */
 
 import type { AgentSpawnPayload, ControlCommandAck, WsErrorPayload } from '../protocol'
-import { KJ_LABEL, KJ_LABEL_AGENT_ID, type KJDocker } from '../docker/client'
+import {
+    KJ_LABEL,
+    KJ_LABEL_AGENT_ID,
+    type KJDocker,
+    type PullProgressEvent,
+} from '../docker/client'
 import type { AgentStatusReporter } from '../reporters/agent-status.reporter'
+import { StatusHeartbeat } from '../reporters/status-heartbeat'
 import type { KJLogger } from '../logger'
 
 export interface AgentSpawnHandlerDeps {
@@ -83,16 +89,23 @@ export class AgentSpawnHandler {
             agent_id: payload.agent_id,
         })
 
-        this.status.push({
+        // Heartbeat keeps last_action_at fresh while pulling. The pull
+        // callback rewrites last_action so the operator sees real progress
+        // rather than a frozen "pulling image" string.
+        const pullHeartbeat = new StatusHeartbeat({
+            reporter: this.status,
             agent_id: payload.agent_id,
             status: 'SPAWNING',
-            last_action: 'pulling image',
-            last_action_at: Date.now(),
-        })
+            initial_last_action: `pulling ${payload.image_tag}`,
+        }).start()
 
         try {
-            await this.docker.pullImage(payload.image_tag)
+            await this.docker.pullImage(payload.image_tag, (event) => {
+                const summary = summarizePullEvent(event, payload.image_tag)
+                if (summary) pullHeartbeat.update(summary)
+            })
         } catch (err) {
+            pullHeartbeat.stop()
             log.error({ err: errMessage(err) }, 'image pull failed')
             this.status.push({
                 agent_id: payload.agent_id,
@@ -103,6 +116,15 @@ export class AgentSpawnHandler {
             })
             return
         }
+        pullHeartbeat.stop()
+
+        // Quick beat so the panel knows we've moved past pull.
+        this.status.push({
+            agent_id: payload.agent_id,
+            status: 'SPAWNING',
+            last_action: 'starting container',
+            last_action_at: Date.now(),
+        })
 
         let container_id: string
         try {
@@ -164,4 +186,33 @@ function ackError(
 
 function errMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Compact one-line description of a single pull progress event,
+ * suitable for `agent:status.last_action`. Returns null for events
+ * we don't care to surface (e.g. "Already exists" on cached layers).
+ */
+function summarizePullEvent(event: PullProgressEvent, image_tag: string): string | null {
+    if (!event.status) return null
+
+    // "Downloading" + progress string is the most useful one.
+    if (event.status === 'Downloading' && event.id) {
+        const detail = event.progressDetail
+        if (detail?.total) {
+            const pct = Math.round(((detail.current ?? 0) / detail.total) * 100)
+            return `pulling ${image_tag} — layer ${event.id} ${pct}%`
+        }
+        return `pulling ${image_tag} — layer ${event.id} downloading`
+    }
+    if (event.status === 'Extracting' && event.id) {
+        return `pulling ${image_tag} — layer ${event.id} extracting`
+    }
+    if (event.status.startsWith('Pulling from')) {
+        return `pulling ${image_tag}`
+    }
+    if (event.status === 'Pull complete' || event.status === 'Download complete') {
+        return null // too chatty
+    }
+    return `pulling ${image_tag} — ${event.status}`
 }

@@ -24,6 +24,7 @@ import type {
     WsErrorPayload,
 } from '../protocol'
 import type { AgentStatusReporter } from '../reporters/agent-status.reporter'
+import { StatusHeartbeat } from '../reporters/status-heartbeat'
 
 export interface AgentLifecycleHandlerDeps {
     docker: KJDocker
@@ -102,20 +103,25 @@ export class AgentLifecycleHandler {
         container_id: string,
         log: KJLogger
     ): Promise<void> {
-        this.push({
+        // Stop with grace period can take ~10s for stubborn processes
+        // (sleep infinity, anything ignoring SIGTERM). Heartbeat keeps
+        // last_action_at fresh so the control doesn't time us out.
+        const heartbeat = new StatusHeartbeat({
+            reporter: this.status,
             agent_id: payload.agent_id,
-            status: 'STOPPING',
             container_id,
-            last_action: payload.force ? 'killing (SIGKILL)' : 'stopping (SIGTERM, 10s grace)',
-            last_action_at: Date.now(),
-        })
+            status: 'STOPPING',
+            initial_last_action: payload.force
+                ? 'killing (SIGKILL)'
+                : 'stopping (SIGTERM, 10s grace)',
+        }).start()
 
         try {
             await this.docker.stopContainer(container_id, { force: payload.force })
-            // Remove the container so the next spawn for this agent_id doesn't
-            // collide with our ALREADY_RUNNING guard.
+            heartbeat.update('removing container')
             await this.docker.removeContainer(container_id)
         } catch (err) {
+            heartbeat.stop()
             log.error({ err: errMessage(err) }, 'stop failed')
             this.push({
                 agent_id: payload.agent_id,
@@ -126,6 +132,7 @@ export class AgentLifecycleHandler {
             })
             return
         }
+        heartbeat.stop()
 
         log.info('agent stopped and removed')
         this.push({

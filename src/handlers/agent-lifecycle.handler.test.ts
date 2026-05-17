@@ -59,6 +59,15 @@ function statuses(client: FakeClient): AgentStatusReport[] {
         .map((p) => p.payload as AgentStatusReport)
 }
 
+/** Collapse consecutive same-status pushes — heartbeats produce duplicates. */
+function statusTransitions(client: FakeClient): AgentStatusReport['status'][] {
+    const out: AgentStatusReport['status'][] = []
+    for (const s of statuses(client)) {
+        if (out[out.length - 1] !== s.status) out.push(s.status)
+    }
+    return out
+}
+
 async function waitForFinalStatus(client: FakeClient, expected: AgentStatusReport['status']) {
     const deadline = Date.now() + 500
     while (Date.now() < deadline) {
@@ -83,7 +92,7 @@ describe('AgentLifecycleHandler.handleStop', () => {
         expect(ack).toEqual({ ok: true, accepted: true })
 
         await waitForFinalStatus(client, 'STOPPED')
-        expect(statuses(client).map((s) => s.status)).toEqual(['STOPPING', 'STOPPED'])
+        expect(statusTransitions(client)).toEqual(['STOPPING', 'STOPPED'])
         expect(docker.stop_calls).toEqual([{ container_id: 'abc123', force: undefined }])
         expect(docker.remove_calls).toEqual(['abc123'])
     })
