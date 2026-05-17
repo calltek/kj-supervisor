@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { KJContainerSummary } from '../docker/client'
+import { OperationTracker } from '../docker/operation-tracker'
 import { KJLogger } from '../logger'
 import type { AgentStatusReport } from '../protocol'
 import { AgentStatusReporter } from '../reporters/agent-status.reporter'
@@ -48,6 +49,7 @@ class FakeClient {
 function makeHandler(docker: FakeDocker, client: FakeClient): AgentLifecycleHandler {
     return new AgentLifecycleHandler({
         docker: docker as never,
+        tracker: new OperationTracker(),
         status: new AgentStatusReporter(client, silentLogger),
         logger: silentLogger,
     })

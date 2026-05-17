@@ -21,6 +21,8 @@ import {
 import { KJControlClient } from './client/control.client'
 import { KJSettings, PING_INTERVAL_MS } from './config/settings'
 import { KJDocker } from './docker/client'
+import { KJDockerEventsWatcher } from './docker/events-watcher'
+import { OperationTracker } from './docker/operation-tracker'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle.handler'
 import { AgentSpawnHandler } from './handlers/agent-spawn.handler'
 import { KJLogger } from './logger'
@@ -84,13 +86,23 @@ async function main(): Promise<void> {
     // Docker-side pieces. Constructed once at boot — they hold no
     // connection state, so we don't rebuild them per reconnect.
     const docker = new KJDocker(logger)
+    const tracker = new OperationTracker()
     const statusReporter = new AgentStatusReporter(client, logger)
-    const spawnHandler = new AgentSpawnHandler({ docker, status: statusReporter, logger })
-    const lifecycleHandler = new AgentLifecycleHandler({
+    const eventsWatcher = new KJDockerEventsWatcher({
         docker,
+        tracker,
         status: statusReporter,
         logger,
     })
+    const spawnHandler = new AgentSpawnHandler({ docker, status: statusReporter, logger })
+    const lifecycleHandler = new AgentLifecycleHandler({
+        docker,
+        tracker,
+        status: statusReporter,
+        logger,
+    })
+
+    void eventsWatcher.start()
 
     client.onCommand<AgentSpawnPayload, ControlCommandAck>('agent:spawn', (payload) =>
         spawnHandler.handle(payload)
@@ -199,6 +211,7 @@ async function main(): Promise<void> {
     const shutdown = (signal: string): void => {
         logger.info({ signal }, 'received shutdown signal')
         stopHealthLoop()
+        eventsWatcher.stop()
         client.disconnect()
         process.exit(0)
     }

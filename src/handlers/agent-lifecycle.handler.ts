@@ -14,6 +14,7 @@
  */
 
 import type { KJDocker } from '../docker/client'
+import type { OperationTracker } from '../docker/operation-tracker'
 import type { KJLogger } from '../logger'
 import type {
     AgentPausePayload,
@@ -28,17 +29,20 @@ import { StatusHeartbeat } from '../reporters/status-heartbeat'
 
 export interface AgentLifecycleHandlerDeps {
     docker: KJDocker
+    tracker: OperationTracker
     status: AgentStatusReporter
     logger: KJLogger
 }
 
 export class AgentLifecycleHandler {
     private readonly docker: KJDocker
+    private readonly tracker: OperationTracker
     private readonly status: AgentStatusReporter
     private readonly logger: KJLogger
 
     constructor(deps: AgentLifecycleHandlerDeps) {
         this.docker = deps.docker
+        this.tracker = deps.tracker
         this.status = deps.status
         this.logger = deps.logger.child({ component: 'agent-lifecycle' })
     }
@@ -116,11 +120,13 @@ export class AgentLifecycleHandler {
                 : 'stopping (SIGTERM, 10s grace)',
         }).start()
 
+        this.tracker.track(container_id)
         try {
             await this.docker.stopContainer(container_id, { force: payload.force })
             heartbeat.update('removing container')
             await this.docker.removeContainer(container_id)
         } catch (err) {
+            this.tracker.untrack(container_id)
             heartbeat.stop()
             log.error({ err: errMessage(err) }, 'stop failed')
             this.push({
@@ -133,6 +139,7 @@ export class AgentLifecycleHandler {
             return
         }
         heartbeat.stop()
+        this.tracker.untrack(container_id)
 
         log.info('agent stopped and removed')
         this.push({
@@ -155,9 +162,11 @@ export class AgentLifecycleHandler {
             last_action_at: Date.now(),
         })
 
+        this.tracker.track(container_id)
         try {
             await this.docker.pauseContainer(container_id)
         } catch (err) {
+            this.tracker.untrack(container_id)
             log.error({ err: errMessage(err) }, 'pause failed')
             this.push({
                 agent_id: payload.agent_id,
@@ -169,6 +178,7 @@ export class AgentLifecycleHandler {
             return
         }
 
+        this.tracker.untrack(container_id)
         log.info('agent paused')
         this.push({
             agent_id: payload.agent_id,
@@ -190,9 +200,11 @@ export class AgentLifecycleHandler {
             last_action_at: Date.now(),
         })
 
+        this.tracker.track(container_id)
         try {
             await this.docker.unpauseContainer(container_id)
         } catch (err) {
+            this.tracker.untrack(container_id)
             log.error({ err: errMessage(err) }, 'resume failed')
             this.push({
                 agent_id: payload.agent_id,
@@ -204,6 +216,7 @@ export class AgentLifecycleHandler {
             return
         }
 
+        this.tracker.untrack(container_id)
         log.info('agent resumed')
         this.push({
             agent_id: payload.agent_id,
