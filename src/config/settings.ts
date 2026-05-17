@@ -30,6 +30,13 @@ export class KJSettings {
     readonly config_dir: string
     readonly log_level: KJLogLevel
     readonly kj_agent_version: string
+    /**
+     * Name of THIS supervisor's own Docker container. Only set when
+     * running inside Docker; needed for the blue/green self-upgrade
+     * (we use dockerode to clone our own spec with a new image tag,
+     * and we need our own name to find ourselves).
+     */
+    readonly supervisor_container: string | null
 
     private constructor(values: {
         control_url: string
@@ -38,6 +45,7 @@ export class KJSettings {
         config_dir: string
         log_level: KJLogLevel
         kj_agent_version: string
+        supervisor_container: string | null
     }) {
         this.control_url = values.control_url
         this.provisioning_token = values.provisioning_token
@@ -45,6 +53,7 @@ export class KJSettings {
         this.config_dir = values.config_dir
         this.log_level = values.log_level
         this.kj_agent_version = values.kj_agent_version
+        this.supervisor_container = values.supervisor_container
     }
 
     /**
@@ -71,6 +80,7 @@ export class KJSettings {
             config_dir: KJSettings.optionalEnv('KJ_CONFIG_DIR') ?? '/etc/kj-agent',
             log_level: log_level_raw as KJLogLevel,
             kj_agent_version: pkg.version,
+            supervisor_container: KJSettings.optionalEnv('KJ_SUPERVISOR_CONTAINER'),
         })
     }
 

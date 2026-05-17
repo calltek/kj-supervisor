@@ -126,6 +126,51 @@ export class KJDocker {
     }
 
     /**
+     * Re-create a container preserving its mounts, env, command,
+     * labels, and network mode, but pointing at a different image
+     * tag. Used for the supervisor's own blue/green self-upgrade.
+     *
+     * The new container starts running immediately. The caller is
+     * responsible for the old one's shutdown.
+     */
+    async cloneContainerWithNewImage(opts: {
+        source_container: string
+        new_image_tag: string
+        new_name: string
+    }): Promise<string> {
+        this.logger.info(
+            {
+                source: opts.source_container,
+                image: opts.new_image_tag,
+                name: opts.new_name,
+            },
+            'cloning container with new image'
+        )
+
+        const source = await this.docker.getContainer(opts.source_container).inspect()
+
+        const created = await this.docker.createContainer({
+            Image: opts.new_image_tag,
+            name: opts.new_name,
+            Env: source.Config.Env,
+            Cmd: source.Config.Cmd ?? undefined,
+            Entrypoint: source.Config.Entrypoint ?? undefined,
+            Labels: source.Config.Labels,
+            HostConfig: {
+                Binds: source.HostConfig.Binds,
+                Mounts: source.HostConfig.Mounts,
+                RestartPolicy: source.HostConfig.RestartPolicy,
+                NetworkMode: source.HostConfig.NetworkMode,
+                GroupAdd: source.HostConfig.GroupAdd,
+            },
+        })
+
+        await created.start()
+        this.logger.info({ new_container_id: created.id }, 'clone started')
+        return created.id
+    }
+
+    /**
      * List every container labeled with kj-agent. Used by reconciliation
      * at server:hello time.
      */

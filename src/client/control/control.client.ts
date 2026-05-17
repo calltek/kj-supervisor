@@ -116,6 +116,22 @@ export class KJControlClient extends EventEmitter {
     }
 
     /**
+     * Subscribe to a control-driven push (no ack expected, e.g.
+     * supervisor:upgrade-required). For events that DO ack, use
+     * `onCommand`.
+     */
+    onPush<TPayload>(event: string, handler: (payload: TPayload) => void): void {
+        this.socket.on(event, (payload: TPayload) => {
+            try {
+                handler(payload)
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err)
+                this.logger.error({ event, err: message }, 'push handler threw')
+            }
+        })
+    }
+
+    /**
      * Subscribe to a control-driven command. The handler runs on every
      * event and its return value (or resolved promise) is sent back as
      * the ack. Errors thrown become INTERNAL_ERROR acks so a buggy
