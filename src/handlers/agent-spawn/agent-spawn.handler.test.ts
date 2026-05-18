@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import { AgentStreamManager } from '../../agent-stream/stream-manager'
 import { type KJContainerSummary } from '../../docker/client/client'
 import { KJLogger } from '../../logger'
 import type { AgentSpawnPayload, AgentStatusReport } from '../../protocol'
@@ -15,7 +16,13 @@ interface PullCall {
 
 class FakeDocker {
     public pulled: PullCall[] = []
-    public ran: Array<{ image_tag: string; name: string; labels: Record<string, string> }> = []
+    public ran: Array<{
+        image_tag: string
+        name: string
+        labels: Record<string, string>
+        env: Record<string, string>
+    }> = []
+    public attached: string[] = []
     public containers: KJContainerSummary[] = []
     public next_pull_error: Error | null = null
     public next_run_error: Error | null = null
@@ -33,11 +40,31 @@ class FakeDocker {
         image_tag: string
         name: string
         labels: Record<string, string>
+        env: Record<string, string>
     }): Promise<string> {
         if (this.next_run_error) throw this.next_run_error
         const id = `container-${this.ran.length + 1}`
-        this.ran.push({ image_tag: opts.image_tag, name: opts.name, labels: opts.labels })
+        this.ran.push({
+            image_tag: opts.image_tag,
+            name: opts.name,
+            labels: opts.labels,
+            env: opts.env,
+        })
         return id
+    }
+
+    async attachContainer(container_id: string): Promise<NodeJS.ReadWriteStream> {
+        this.attached.push(container_id)
+        const { PassThrough } = await import('node:stream')
+        return new PassThrough() as unknown as NodeJS.ReadWriteStream
+    }
+
+    demuxAttachStream(
+        _stream: NodeJS.ReadableStream,
+        _stdout: NodeJS.WritableStream,
+        _stderr: NodeJS.WritableStream
+    ): void {
+        // no-op for tests
     }
 
     async listKjContainers(): Promise<KJContainerSummary[]> {
@@ -57,12 +84,22 @@ function makePayload(overrides: Partial<AgentSpawnPayload> = {}): AgentSpawnPayl
         request_id: 'req-1',
         agent_id: 42,
         image_tag: 'alpine:latest',
+        session_id: '00000000-0000-0000-0000-000000000042',
+        oauth_token: 'test-oauth-token',
         env: { KJ_AGENT_ID: '42' },
         skills: [],
         memories: [],
         resources: { memory_mb: 128, cpu: 0.25 },
         ...overrides,
     }
+}
+
+function makeStreams(docker: FakeDocker, client: FakeClient): AgentStreamManager {
+    return new AgentStreamManager({
+        docker: docker as never,
+        client,
+        logger: silentLogger,
+    })
 }
 
 function statuses(client: FakeClient): AgentStatusReport[] {
@@ -100,6 +137,7 @@ describe('AgentSpawnHandler', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
             logger: silentLogger,
@@ -126,6 +164,7 @@ describe('AgentSpawnHandler', () => {
 
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
             logger: silentLogger,
@@ -145,6 +184,7 @@ describe('AgentSpawnHandler', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
             logger: silentLogger,
@@ -176,6 +216,7 @@ describe('AgentSpawnHandler', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
             logger: silentLogger,
@@ -194,6 +235,7 @@ describe('AgentSpawnHandler', () => {
 
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
             logger: silentLogger,
@@ -217,6 +259,7 @@ describe('AgentSpawnHandler', () => {
 
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
             logger: silentLogger,

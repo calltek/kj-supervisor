@@ -104,6 +104,12 @@ export class KJDocker {
     /**
      * Create + start a container. Returns its id. The caller is
      * responsible for any post-start verification (inspect, status push).
+     *
+     * The container is created with stdin open and stdout/stderr ready
+     * to attach: agents talk stream-json over stdio, so the supervisor
+     * uses `attachContainer` to read the JSON output and write user
+     * messages. `Tty:false` keeps stdout/stderr multiplexed; the
+     * caller passes the duplex through `docker.modem.demuxStream`.
      */
     async runContainer(opts: KJContainerRunOptions): Promise<string> {
         const envArray = Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
@@ -114,6 +120,12 @@ export class KJDocker {
             Env: envArray,
             Cmd: opts.cmd,
             Labels: opts.labels,
+            Tty: false,
+            OpenStdin: true,
+            StdinOnce: false,
+            AttachStdin: true,
+            AttachStdout: true,
+            AttachStderr: true,
             HostConfig: {
                 // Resource limits
                 Memory: opts.resources.memory_mb * 1024 * 1024,
@@ -133,6 +145,39 @@ export class KJDocker {
             'container started'
         )
         return container.id
+    }
+
+    /**
+     * Attach to a running container's stdio. Returns the raw duplex
+     * stream from the docker daemon; the caller is responsible for
+     * demultiplexing stdout/stderr (the streams are interleaved with
+     * an 8-byte frame header when `Tty:false`) using
+     * `demuxAttachStream` below.
+     */
+    async attachContainer(container_id: string): Promise<NodeJS.ReadWriteStream> {
+        const container = this.docker.getContainer(container_id)
+        const stream = (await container.attach({
+            stream: true,
+            stdin: true,
+            stdout: true,
+            stderr: true,
+            hijack: true,
+        })) as unknown as NodeJS.ReadWriteStream
+        return stream
+    }
+
+    /**
+     * Demultiplex a docker attach stream into stdout/stderr writable
+     * sinks. When the container runs without TTY, docker frames every
+     * payload with an 8-byte header that says which stream the bytes
+     * came from; `dockerode`'s modem knows how to unpack it.
+     */
+    demuxAttachStream(
+        stream: NodeJS.ReadableStream,
+        stdout: NodeJS.WritableStream,
+        stderr: NodeJS.WritableStream
+    ): void {
+        this.docker.modem.demuxStream(stream, stdout, stderr)
     }
 
     /** Get a container's basic state (running, exitCode, etc.). */

@@ -26,6 +26,13 @@ class FakeClient {
     }
 }
 
+class FakeStreams {
+    public detached: number[] = []
+    detach(agent_id: number): void {
+        this.detached.push(agent_id)
+    }
+}
+
 function statuses(client: FakeClient): AgentStatusReport[] {
     return client.pushes
         .filter((p) => p.event === 'agent:status')
@@ -51,6 +58,7 @@ describe('KJDockerEventsWatcher', () => {
         const tracker = new OperationTracker()
         const client = new FakeClient()
         const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
             docker: docker as never,
             tracker,
             status: new AgentStatusReporter(client, silentLogger),
@@ -77,6 +85,7 @@ describe('KJDockerEventsWatcher', () => {
         tracker.track('container-abc')
         const client = new FakeClient()
         const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
             docker: docker as never,
             tracker,
             status: new AgentStatusReporter(client, silentLogger),
@@ -95,6 +104,7 @@ describe('KJDockerEventsWatcher', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
             docker: docker as never,
             tracker: new OperationTracker(),
             status: new AgentStatusReporter(client, silentLogger),
@@ -123,6 +133,7 @@ describe('KJDockerEventsWatcher', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
             docker: docker as never,
             tracker: new OperationTracker(),
             status: new AgentStatusReporter(client, silentLogger),
@@ -144,6 +155,7 @@ describe('KJDockerEventsWatcher', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
             docker: docker as never,
             tracker: new OperationTracker(),
             status: new AgentStatusReporter(client, silentLogger),
@@ -164,6 +176,7 @@ describe('KJDockerEventsWatcher', () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
         const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
             docker: docker as never,
             tracker: new OperationTracker(),
             status: new AgentStatusReporter(client, silentLogger),

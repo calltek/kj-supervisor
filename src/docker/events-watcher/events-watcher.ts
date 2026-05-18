@@ -23,20 +23,30 @@ import type { OperationTracker } from '../operation-tracker/operation-tracker'
 import type { KJLogger } from '../../logger'
 import type { AgentStatusReport } from '../../protocol'
 import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 
 export interface KJDockerEventsWatcherDeps {
     docker: KJDocker
     tracker: OperationTracker
     status: AgentStatusReporter
+    streams: AgentStreamManager
     logger: KJLogger
 }
 
 const RECONNECT_DELAY_MS = 2_000
 
+/**
+ * Docker actions that mean the attach duplex is no longer usable. We
+ * detach the stream on any of these — supervisor-driven or external —
+ * so the stream manager doesn't leak a dead reference.
+ */
+const TERMINAL_ACTIONS: ReadonlySet<string> = new Set(['die', 'stop', 'kill', 'destroy'])
+
 export class KJDockerEventsWatcher {
     private readonly docker: KJDocker
     private readonly tracker: OperationTracker
     private readonly status: AgentStatusReporter
+    private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
 
     private stream: NodeJS.ReadableStream | null = null
@@ -47,6 +57,7 @@ export class KJDockerEventsWatcher {
         this.docker = deps.docker
         this.tracker = deps.tracker
         this.status = deps.status
+        this.streams = deps.streams
         this.logger = deps.logger.child({ component: 'docker-events' })
     }
 
@@ -136,6 +147,13 @@ export class KJDockerEventsWatcher {
 
         const agent_id = Number.parseInt(agent_id_raw, 10)
         if (!Number.isFinite(agent_id)) return
+
+        // Detach the stdio stream on any terminal action — whether the
+        // stop came from us or from outside, the docker attach duplex
+        // is gone and the stream manager must release the entry.
+        if (TERMINAL_ACTIONS.has(event.Action)) {
+            this.streams.detach(agent_id)
+        }
 
         if (this.tracker.isTracked(container_id)) {
             this.logger.debug(

@@ -18,22 +18,26 @@ import {
 } from '../../docker/client/client'
 import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
+import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 import type { KJLogger } from '../../logger'
 
 export interface AgentSpawnHandlerDeps {
     docker: KJDocker
     status: AgentStatusReporter
+    streams: AgentStreamManager
     logger: KJLogger
 }
 
 export class AgentSpawnHandler {
     private readonly docker: KJDocker
     private readonly status: AgentStatusReporter
+    private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
 
     constructor(deps: AgentSpawnHandlerDeps) {
         this.docker = deps.docker
         this.status = deps.status
+        this.streams = deps.streams
         this.logger = deps.logger.child({ component: 'agent-spawn' })
     }
 
@@ -146,7 +150,7 @@ export class AgentSpawnHandler {
             container_id = await this.docker.runContainer({
                 image_tag: payload.image_tag,
                 name: `kj-agent-${payload.agent_id}`,
-                env: payload.env,
+                env: this.buildContainerEnv(payload),
                 // Milestone 2: alpine sleep infinity-style smoke. Real agent
                 // images will have their own ENTRYPOINT and we drop Cmd.
                 cmd: payload.image_tag.startsWith('alpine') ? ['sleep', 'infinity'] : undefined,
@@ -168,6 +172,18 @@ export class AgentSpawnHandler {
             return
         }
 
+        // Attach to stdio so we start forwarding the agent's stream-json
+        // output and can later deliver `agent:input`. Failure here is
+        // best-effort logged: the container is alive, the operator can
+        // still see lifecycle status — they just won't see the agent's
+        // conversation until a reattach (TODO: trigger on the next docker
+        // event).
+        await this.streams.attach({
+            agent_id: payload.agent_id,
+            container_id,
+            session_id: payload.session_id,
+        })
+
         log.info({ container_id }, 'agent container running')
         this.status.push({
             agent_id: payload.agent_id,
@@ -175,6 +191,21 @@ export class AgentSpawnHandler {
             container_id,
             last_action_at: Date.now(),
         })
+    }
+
+    /**
+     * Merge the spawn payload's `env` with the dedicated session and
+     * OAuth fields, keeping the secret out of `payload.env` so the
+     * control never has to embed it in two places. Order matters: the
+     * dedicated fields win over anything the control might have
+     * accidentally duplicated.
+     */
+    private buildContainerEnv(payload: AgentSpawnPayload): Record<string, string> {
+        return {
+            ...payload.env,
+            KJ_SESSION_ID: payload.session_id,
+            CLAUDE_CODE_OAUTH_TOKEN: payload.oauth_token,
+        }
     }
 
     private async findExistingContainer(agent_id: number): Promise<string | null> {

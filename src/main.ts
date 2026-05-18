@@ -19,6 +19,7 @@ import {
     writeAgentTokenToDisk,
 } from './client/auth/auth'
 import { KJControlClient } from './client/control/control.client'
+import { AgentStreamManager } from './agent-stream/stream-manager'
 import {
     AGENT_METRICS_INTERVAL_MS,
     KJSettings,
@@ -28,11 +29,13 @@ import {
 import { KJDocker } from './docker/client/client'
 import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
+import { AgentInputHandler } from './handlers/agent-input/agent-input.handler'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
 import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
+    type AgentInputPayload,
     type AgentPausePayload,
     type AgentResumePayload,
     type AgentSpawnPayload,
@@ -104,19 +107,27 @@ async function main(): Promise<void> {
     const docker = new KJDocker(logger)
     const tracker = new OperationTracker()
     const statusReporter = new AgentStatusReporter(client, logger)
+    const streams = new AgentStreamManager({ docker, client, logger })
     const eventsWatcher = new KJDockerEventsWatcher({
         docker,
         tracker,
         status: statusReporter,
+        streams,
         logger,
     })
-    const spawnHandler = new AgentSpawnHandler({ docker, status: statusReporter, logger })
+    const spawnHandler = new AgentSpawnHandler({
+        docker,
+        status: statusReporter,
+        streams,
+        logger,
+    })
     const lifecycleHandler = new AgentLifecycleHandler({
         docker,
         tracker,
         status: statusReporter,
         logger,
     })
+    const inputHandler = new AgentInputHandler({ streams, logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,
         logger,
@@ -136,6 +147,9 @@ async function main(): Promise<void> {
     )
     client.onCommand<AgentResumePayload, ControlCommandAck>('agent:resume', (payload) =>
         lifecycleHandler.handleResume(payload)
+    )
+    client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) =>
+        inputHandler.handle(payload)
     )
 
     // Push event (not a command), no ack — handler returns void.
@@ -276,6 +290,7 @@ async function main(): Promise<void> {
         logger.info({ signal }, 'received shutdown signal')
         stopLoops()
         eventsWatcher.stop()
+        streams.detachAll()
         client.disconnect()
         process.exit(0)
     }
