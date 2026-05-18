@@ -5,6 +5,7 @@
  * in tests and easier to swap implementation later.
  */
 
+import net from 'node:net'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
@@ -154,16 +155,74 @@ export class KJDocker {
      * an 8-byte frame header when `Tty:false`) using
      * `demuxAttachStream` below.
      */
+    /**
+     * Attach to a container's stdio over the docker UNIX socket.
+     *
+     * We bypass dockerode here because Bun's `http.request` does not
+     * emit `'upgrade'` events reliably (the same call works under Node
+     * but hangs under Bun), and dockerode's attach relies on that
+     * event. Going straight to the socket with `net.connect` works on
+     * both runtimes and gives us the same multiplexed duplex (8-byte
+     * frame header for stdout/stderr) that `demuxAttachStream` already
+     * knows how to unpack.
+     */
     async attachContainer(container_id: string): Promise<NodeJS.ReadWriteStream> {
-        const container = this.docker.getContainer(container_id)
-        const stream = (await container.attach({
-            stream: true,
-            stdin: true,
-            stdout: true,
-            stderr: true,
-            hijack: true,
-        })) as unknown as NodeJS.ReadWriteStream
-        return stream
+        const socketPath = '/var/run/docker.sock'
+        const path = `/containers/${container_id}/attach?stream=1&stdin=1&stdout=1&stderr=1`
+        const request =
+            `POST ${path} HTTP/1.1\r\n` +
+            `Host: localhost\r\n` +
+            `Connection: Upgrade\r\n` +
+            `Upgrade: tcp\r\n` +
+            `Content-Type: application/vnd.docker.raw-stream\r\n` +
+            `Content-Length: 0\r\n` +
+            `\r\n`
+
+        return new Promise<NodeJS.ReadWriteStream>((resolve, reject) => {
+            const sock = net.connect(socketPath)
+            let header_buffer = ''
+            let upgraded = false
+
+            const timer = setTimeout(() => {
+                if (upgraded) return
+                sock.destroy(new Error('docker attach timed out after 10s'))
+            }, 10_000)
+
+            sock.once('error', (err) => {
+                clearTimeout(timer)
+                if (!upgraded) reject(err)
+            })
+
+            const onHeader = (chunk: Buffer): void => {
+                header_buffer += chunk.toString('utf8')
+                const end = header_buffer.indexOf('\r\n\r\n')
+                if (end < 0) return // need more bytes
+                const head = header_buffer.slice(0, end)
+                const remainder = Buffer.from(
+                    header_buffer.slice(end + 4),
+                    'binary' as BufferEncoding
+                )
+
+                const status_line = head.split('\r\n')[0] ?? ''
+                if (!status_line.includes('101')) {
+                    clearTimeout(timer)
+                    sock.destroy()
+                    reject(new Error(`docker attach refused: ${status_line || '<no status>'}`))
+                    return
+                }
+
+                upgraded = true
+                clearTimeout(timer)
+                sock.off('data', onHeader)
+                // Any payload that arrived in the same TCP segment as
+                // the HTTP headers must be replayed into the duplex.
+                if (remainder.length > 0) sock.unshift(remainder)
+                resolve(sock)
+            }
+
+            sock.on('data', onHeader)
+            sock.write(request)
+        })
     }
 
     /**

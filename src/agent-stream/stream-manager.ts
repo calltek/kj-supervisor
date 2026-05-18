@@ -75,6 +75,7 @@ export class AgentStreamManager {
             container_id: opts.container_id,
         })
 
+        log.info('attaching to container stdio…')
         let stream: NodeJS.ReadWriteStream
         try {
             stream = await this.docker.attachContainer(opts.container_id)
@@ -85,6 +86,7 @@ export class AgentStreamManager {
             )
             return
         }
+        log.info('attach duplex opened, wiring demux and parser')
 
         const stdout = new PassThrough()
         const stderr = new PassThrough()

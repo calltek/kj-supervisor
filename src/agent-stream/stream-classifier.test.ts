@@ -25,10 +25,7 @@ describe('classifyStreamEvent', () => {
 
     test('authentication_failed sibling field triggers agent:auth_required', () => {
         const c = ctx()
-        const result = classifyStreamEvent(
-            { type: 'assistant', error: 'authentication_failed' },
-            c
-        )
+        const result = classifyStreamEvent({ type: 'assistant', error: 'authentication_failed' }, c)
         expect(result.auth_required).toEqual({ agent_id: 42, timestamp: result.output.timestamp })
         // Does NOT also classify as a generic agent:error.
         expect(result.error).toBeUndefined()
