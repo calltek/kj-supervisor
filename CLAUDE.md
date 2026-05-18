@@ -5,10 +5,15 @@ una conexión WebSocket persistente con el control (`kj-backend`) y
 orquesta el ciclo de vida de los agentes Claude locales: levanta,
 detiene, pausa, reanuda y reporta el estado real.
 
-> **Estado actual**: repo recién creado. Sin código aún. La primera tarea
-> es el **Hito 1 — handshake mínimo** (ver §9). El protocolo está
-> totalmente especificado del lado control y testeado contra un cliente
-> simulado.
+> **Estado actual (2026-05-18)**: Hitos 1–5 vivos + **pipeline de
+> stream del agente** (Hito 6 implementado por adelantado, ver §9). El
+> supervisor mantiene la conexión, autentica con provisioning/agent
+> token, negocia versión de protocolo, ejecuta `agent:spawn`/`stop`/
+> `pause`/`resume` y, lo nuevo: hace `dockerode.attach` a cada
+> container del agente, parsea su salida stream-json y reenvía cada
+> evento al control como `agent:output`. También acepta `agent:input`
+> del control y lo escribe al stdin del container. Adiós `tmux
+> attach` para hablar con un agente.
 
 ---
 
@@ -39,13 +44,17 @@ el host:
                                           └────────────────────────────────┘
 ```
 
-**Tres responsabilidades**:
+**Cuatro responsabilidades**:
 
 1. **Mantener viva la conexión** con el control (auth, hello, ping).
 2. **Recibir comandos** versionados y ejecutarlos vía Docker
-   (spawn/stop/pause/resume).
-3. **Reportar** el estado real (push de `agent:status`, `agent:metrics`,
-   `agent:log`).
+   (`agent:spawn`/`stop`/`pause`/`resume`).
+3. **Reportar** el estado real (push de `agent:status`,
+   `agent:metrics`).
+4. **Hacer de relé bidireccional del stdio** de cada agente: leer su
+   stream-json y reenviar cada evento como `agent:output`,
+   `agent:auth_required` o `agent:error`; aceptar `agent:input` del
+   control y escribirlo al stdin del container.
 
 El supervisor **NO**:
 
@@ -148,9 +157,12 @@ Volúmenes por agente (creados al spawn):
               → reconcilia BD ↔ supervisor en background
 5. Supervisor → bucle de `health:ping` cada 30s
 6. Supervisor → recibe `agent:spawn` / `agent:stop` / `agent:pause` /
-                `agent:resume` y los ejecuta vía Docker
-7. Supervisor → push `agent:status`, `agent:metrics`, `agent:log` cuando
-                pase algo digno de reportar
+                `agent:resume` / `agent:input` y los ejecuta
+7. Supervisor → para cada container vivo: attach a stdio, parse
+                stream-json y push `agent:output` / `agent:auth_required`
+                / `agent:error`
+8. Supervisor → push `agent:status` (lifecycle) y `agent:metrics`
+                (loop por container)
 ```
 
 ### 4.2 Eventos a implementar
@@ -165,13 +177,16 @@ Volúmenes por agente (creados al spawn):
 | `supervisor:upgrade-required` | C → A push | blue/green swap (Hito 6) |
 | `protocol:error` | bidi push | log + disconnect |
 | **Versionados** (requieren versión común) | | |
-| `agent:spawn` | C → A ack | `docker pull` + `docker run` |
-| `agent:stop` | C → A ack | `docker stop`/`kill` |
+| `agent:spawn` | C → A ack | `docker pull` + `docker run` con `Tty:false` + `OpenStdin:true`, luego attach al stdio |
+| `agent:stop` | C → A ack | `docker stop`/`kill` (también detacha el stream) |
 | `agent:pause` | C → A ack | `docker pause` |
 | `agent:resume` | C → A ack | `docker unpause` |
+| `agent:input` | C → A ack | escribir línea `{"type":"user",...}\n` al stdin del container |
 | `agent:status` | A → C push | tras spawn / stop / health check |
 | `agent:metrics` | A → C push | loop por container |
-| `agent:log` | A → C push | drenar `docker logs` |
+| `agent:output` | A → C push | un evento stream-json del agente; seq monotónico por `agent_id` |
+| `agent:auth_required` | A → C push | OAuth token rechazado; el control abre approval HITL |
+| `agent:error` | A → C push | errores categorizados de `system/api_retry` (`rate_limit`, `billing_error`, …) |
 
 ---
 
@@ -226,50 +241,53 @@ diff <(cat src/protocol.ts) <(curl -s https://api.kujira.run/protocol)
 
 ---
 
-## 6. Estructura del repo (planeada)
+## 6. Estructura del repo (actual)
 
 ```
 kj-supervisor/
-├── CLAUDE.md                 ← este fichero
-├── README.md                 ← quickstart + scripts
+├── CLAUDE.md                              ← este fichero
+├── README.md                              ← quickstart + scripts
 ├── package.json
 ├── bunfig.toml
 ├── biome.json
 ├── tsconfig.json
-├── Dockerfile                ← multi-stage Alpine
-├── docker-compose.yml        ← dev local con backend en localhost:5050
+├── Dockerfile                             ← multi-stage Alpine
+├── install-supervisor.sh                  ← one-liner installer para el VPS
 ├── scripts/
-│   └── pull-protocol.ts      ← descarga protocol.ts del control
+│   └── pull-protocol.ts                   ← descarga protocol.ts del control
 └── src/
-    ├── main.ts               ← entry point: arranca client + handlers
-    ├── protocol.ts           ← generado, NO editar a mano
+    ├── main.ts                            ← wires everything together
+    ├── protocol.ts                        ← generado, NO editar a mano
+    ├── logger.ts
     ├── config/
-    │   └── settings.ts       ← variables de entorno + validación
+    │   └── settings.ts                    ← env + validación
     ├── client/
-    │   ├── control.client.ts ← conexión Socket.IO al control
-    │   ├── auth.ts           ← lectura/escritura del token de disco
-    │   └── reconnect.ts      ← backoff exponencial
-    ├── handlers/
-    │   ├── agent-spawn.handler.ts
-    │   ├── agent-stop.handler.ts
-    │   ├── agent-pause.handler.ts
-    │   ├── agent-resume.handler.ts
-    │   └── supervisor-upgrade.handler.ts
-    ├── reporters/
-    │   ├── health.reporter.ts          ← health:ping loop
-    │   ├── server-metrics.reporter.ts  ← server:metrics loop
-    │   ├── agent-status.reporter.ts    ← agent:status push helpers
-    │   ├── agent-metrics.reporter.ts   ← agent:metrics loop por agent vivo
-    │   └── agent-log.reporter.ts       ← drena docker logs
+    │   ├── auth/auth.ts                   ← bootstrap (provisioning ↔ agent_token)
+    │   └── control/control.client.ts      ← wrapper Socket.IO al control
     ├── docker/
-    │   ├── client.ts         ← wrapper sobre dockerode/CLI
-    │   ├── volumes.ts        ← crear/escribir volúmenes de agente
-    │   └── containers.ts     ← spawn/stop/pause/resume primitives
-    └── reconcile/
-        └── boot.ts           ← docker ps al arrancar, lista containers para server:hello
+    │   ├── client/client.ts               ← KJDocker: pull, run (con attach stdio), stop, pause, attach
+    │   ├── events-watcher/events-watcher.ts ← stream de docker events; detacha streams en die/stop/kill/destroy
+    │   └── operation-tracker/             ← marca operaciones supervisor-driven para que el watcher las ignore
+    ├── agent-stream/                      ← ★ pipeline del stdio de cada agente
+    │   ├── stream-manager.ts              ← Map<agent_id, attach-duplex>; attach/write/detach
+    │   ├── stream-parser.ts               ← NDJSON tolerante (recupera de SIGKILL que trunca la última línea)
+    │   └── stream-classifier.ts           ← mapea evento → agent:output [+ agent:auth_required | agent:error]
+    ├── handlers/
+    │   ├── agent-spawn/                   ← pull + run + attach al stream
+    │   ├── agent-lifecycle/               ← stop / pause / resume
+    │   ├── agent-input/                   ← ★ escribe input del operador al stdin
+    │   └── supervisor-upgrade/            ← blue/green swap del propio supervisor
+    └── reporters/
+        ├── health/                        ← health:ping loop
+        ├── server-metrics/                ← server:metrics loop
+        ├── agent-status/                  ← push helpers de agent:status
+        ├── agent-metrics/                 ← agent:metrics loop por container vivo
+        └── status-heartbeat/              ← heartbeat de SPAWNING durante el pull
 ```
 
-No es definitiva — irá ajustándose. Pero es buen norte para el Hito 1.
+Lo nuevo respecto al plan original es `src/agent-stream/` y
+`src/handlers/agent-input/` — el pipeline bidireccional con el stdio
+del container. El resto sigue la misma forma.
 
 ---
 
@@ -323,79 +341,109 @@ reconciliación + decisión humana.
 > El alcance de cada hito está pensado para ser commiteable, probable y
 > útil por sí solo. Mismo patrón que el kj-backend.
 
-### Hito 1 — Handshake mínimo
+### Hito 1 — Handshake mínimo ✅
 
-**Objetivo**: el supervisor conecta al control, autentica, mantiene viva
-la conexión con `health:ping`. **Sin Docker todavía**. Sin nada más.
+Pipe `pull-protocol`, settings, auth (provisioning ↔ agent_token),
+cliente Socket.IO al control, `server:hello`, persistencia del
+`agent_token` a disco, `health:ping` loop. Cubierto por tests unitarios
+del auth helper. Validado contra `kj-backend` en local.
 
-- `scripts/pull-protocol.ts` que descarga `protocol.ts`.
-- `src/config/settings.ts` con env vars validados.
-- `src/client/auth.ts` con lectura/escritura del token.
-- `src/client/control.client.ts` con Socket.IO + auth + reconexión.
-- `src/main.ts` arranca el cliente, escucha `control:ready`, emite
-  `server:hello { containers: [] }`, guarda `agent_token` si vino.
-- Loop de `health:ping` cada 30s.
-- Tests: unit del auth helper. Integración manual contra `localhost:5050`.
+### Hito 2 — Spawn de containers ✅
 
-**Validación**: con `kj-backend` corriendo en local y un Server creado
-desde el panel, el supervisor debe pasar el handshake, ver el server en
-ONLINE en BD, y seguir vivo indefinidamente.
+`agent:spawn` handler que pulls + runs vía dockerode. Push de
+`agent:status { SPAWNING → RUNNING }` con `container_id`. Labels
+`kj-agent` / `kj-agent-id` para discovery posterior. `agent:spawn` ack
+inmediato (recibido ≠ completado); el outcome real va por push.
 
-### Hito 2 — Spawn un container Alpine de prueba
+### Hito 3 — Stop / pause / resume + push de status ✅
 
-**Objetivo**: handler de `agent:spawn` que ejecuta `docker run`. La
-imagen no necesita ser real — puede ser `alpine:latest` con
-`sleep infinity` para validar el flujo Docker.
+Handlers de los tres eventos restantes + `agent-status.reporter` con
+push helpers para emitir transiciones de estado. `operation-tracker`
+diferencia operaciones supervisor-driven de eventos docker externos
+(operador con shell que hace `docker stop` manualmente).
 
-- `src/docker/client.ts` wrapper.
-- `src/docker/containers.ts` con `spawn`, `inspect`.
-- `src/handlers/agent-spawn.handler.ts` que ack inmediato + push
-  `agent:status { status: RUNNING, container_id }` cuando el container
-  está vivo.
-- Label `kj-agent` en cada container para descubrirlos luego.
+### Hito 4 — `server:metrics` y `agent:metrics` ✅
 
-### Hito 3 — Stop / pause / resume + push de status
+Reporter de host `/proc/loadavg` + `/proc/uptime`; reporter por agente
+via `docker inspect`. Hoy reporta `uptime_seconds`; `tokens_used` y
+`cost_micro` pendientes de extraer del `result` event del stream-json
+(ver §9 Hito 7).
 
-- Handlers de los 3 eventos restantes.
-- Cada uno mata/pausa el container y push del status final correspondiente.
+### Hito 5 — Reconciliación + supervisor upgrade ✅
 
-### Hito 4 — `server:metrics` y `agent:metrics`
+- **Reconcile**: al `ready` del client, el supervisor lista
+  `docker ps --label kj-agent`, mapea cada container a su `agent_id`
+  por el label `kj-agent-id` y manda el array en
+  `server:hello.containers`. El control resuelve orphans/ghosts.
+- **Upgrade**: handler de `supervisor:upgrade-required` que hace
+  `docker pull` del target image, levanta un container nuevo
+  (compartiendo el volumen `/etc/kj-supervisor`) y lo deja tomar el
+  relevo. El viejo se apaga cuando el nuevo emite su propio
+  `server:hello`.
 
-- Reporter de host: `/proc/loadavg` + `/proc/uptime`.
-- Reporter por agente: `docker stats --no-stream` para tokens/cost
-  (cuando exista esa info; por ahora solo uptime).
+### Hito 6 — Pipeline de stream del agente ✅ (hecho 2026-05-18)
 
-### Hito 5 — Reconciliación en el `server:hello`
+★ Pieza nueva, central para que el frontend pueda mostrar la
+conversación viva. Tres añadidos:
 
-- `docker ps --filter "label=kj-agent" -q` al boot.
-- Mapeo container ↔ agent_id desde el label `kj-agent-id=<n>` que
-  añadimos al spawn.
-- Mandar el array en `server:hello.containers`.
+- **`docker/client.ts`**: el `runContainer` ahora crea con
+  `Tty:false` + `OpenStdin:true` + `AttachStdin/Out/Err:true`. Métodos
+  nuevos `attachContainer(container_id)` y `demuxAttachStream(...)`.
+- **`agent-stream/`** (módulo nuevo):
+  - `stream-manager`: `Map<agent_id, attach-duplex>`. `attach(opts)`
+    abre el duplex, demuxa stdout/stderr, conecta el parser. `write(payload)`
+    serializa un user message como una línea NDJSON y la escribe a
+    stdin. `detach(agent_id)` cierra el duplex.
+  - `stream-parser`: NDJSON tolerante. Recupera de una última línea
+    truncada por SIGKILL; salta empty/invalid lines sin morir.
+  - `stream-classifier`: mapea cada evento a un `agent:output` y, si
+    aplica, también a `agent:auth_required` (token rechazado) o
+    `agent:error` (rate_limit / billing / server_error / …).
+- **`handlers/agent-input/`**: handler nuevo que entrega cada
+  `agent:input` al stdin del container correspondiente. Ack
+  `AGENT_NOT_RUNNING` si no hay stream vivo.
+- **`docker/events-watcher`** extendido: cualquier
+  `die`/`stop`/`kill`/`destroy` también detacha el stream, evitando
+  refs muertas.
 
-### Hito 6 — Auto-update del propio supervisor
+`agent-spawn.handler.ts` ahora inyecta `KJ_SESSION_ID` y
+`CLAUDE_CODE_OAUTH_TOKEN` al env del container y llama
+`streams.attach()` inmediatamente después del `docker start`.
 
-- Handler de `supervisor:upgrade-required`.
-- `docker pull <target_image_tag>`.
-- Blue/green swap del propio container con el volumen `/etc/kj-supervisor`
-  compartido.
-- La nueva instancia notifica al control "soy la nueva", la antigua se
-  apaga.
+### Hito 7 — Pendientes post-stream
+
+- **Extraer `usage` real**: el `result` event del stream-json trae
+  `total_cost_usd` y `usage.{input,output,cache_*}_tokens`. Hoy
+  `agent-metrics.reporter` los publica como `"0"`. Wiring listo, falta
+  parsear desde el classifier y persistir en `Agent.tokens_used` /
+  `Agent.cost_micro`.
+- **Re-attach tras reinicio del supervisor**: hoy si el supervisor
+  reinicia con containers vivos, el reconcile recupera los `agent_id`
+  pero **no reattacha** automáticamente — necesita el `session_id` y el
+  control no se lo está re-empujando. Solución limpia: nuevo
+  `agent:sync` del control que envíe `{ agent_id, session_id,
+  oauth_token }` para cada container que el supervisor ha listado en
+  el `server:hello`.
+- **Backpressure del stream**: si un agente verboso emite cientos de
+  `stream_event` por segundo y nadie está suscrito a `/operator`, hoy
+  el supervisor empuja igualmente y el control descarta. Optimización:
+  el control le puede decir al supervisor "para de empujar de este
+  `agent_id`" cuando la room esté vacía.
 
 ---
 
 ## 10. Cómo construir y probar localmente
-
-> A escribir mientras se implementa el Hito 1.
-
-Plan provisional:
 
 ```bash
 # Setup
 bun install
 bun run pull-protocol:dev   # descarga protocol.ts de localhost:5050
 
-# Dev
+# Dev sin Docker (handler tests rápidos)
 bun --watch src/main.ts
+
+# Tests
+bun test                    # 69 unit pasan al cierre de Hito 6
 
 # Build de imagen Docker
 docker build -t kj-supervisor:dev .
@@ -406,6 +454,27 @@ docker run --rm -it \
   -e KJ_PROVISIONING_TOKEN=kjprov_xxx \
   -e KJ_SUPERVISOR_CONTAINER=kj-supervisor \
   kj-supervisor:dev
+```
+
+### Probar el stream end-to-end
+
+Con un agente `kj-agent-base` ya pulleado y un OAuth token configurado
+en `KJ_DEFAULT_CLAUDE_OAUTH_TOKEN` en el `.env` del backend:
+
+```bash
+# 1. Spawn vía API HTTP del backend
+curl -X POST -H "Authorization: Bearer <JWT>" \
+  http://localhost:5050/org/<org_id>/agent/<agent_id>/start
+
+# 2. Conecta un cliente Socket.IO al namespace /operator del backend
+#    auth: { token: <mismo JWT> }
+#    emit 'agent:subscribe' { agent_id }
+#    listen 'agent:output' → verás los eventos stream-json de claude
+
+# 3. Manda un mensaje al agente
+#    emit 'agent:input' { agent_id, message: "Hola" }
+#    el supervisor lo escribirá al stdin del container; la respuesta
+#    viene como agent:output siguientes
 ```
 
 ---
