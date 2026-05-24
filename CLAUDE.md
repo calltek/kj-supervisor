@@ -410,20 +410,33 @@ conversación viva. Tres añadidos:
 `CLAUDE_CODE_OAUTH_TOKEN` al env del container y llama
 `streams.attach()` inmediatamente después del `docker start`.
 
-### Hito 7 — Pendientes post-stream
+### Hito 7 — Stream completo + métricas reales + agent:sync ✅ (hecho 2026-05-24)
 
-- **Extraer `usage` real**: el `result` event del stream-json trae
-  `total_cost_usd` y `usage.{input,output,cache_*}_tokens`. Hoy
-  `agent-metrics.reporter` los publica como `"0"`. Wiring listo, falta
-  parsear desde el classifier y persistir en `Agent.tokens_used` /
-  `Agent.cost_micro`.
-- **Re-attach tras reinicio del supervisor**: hoy si el supervisor
-  reinicia con containers vivos, el reconcile recupera los `agent_id`
-  pero **no reattacha** automáticamente — necesita el `session_id` y el
-  control no se lo está re-empujando. Solución limpia: nuevo
-  `agent:sync` del control que envíe `{ agent_id, session_id,
-  oauth_token }` para cada container que el supervisor ha listado en
-  el `server:hello`.
+- **Métricas event-driven**: `stream-classifier` extrae `usage` +
+  `total_cost_usd` del evento `result` y emite `agent:metrics` con
+  `tokens_delta` / `cost_delta_micro` (BigInt strings). El loop
+  periódico de `agent-metrics.reporter` sigue ticando pero solo para
+  refrescar `uptime_seconds` (deltas 0). El backend acumula con
+  `increment`, así el supervisor queda stateless: un restart no
+  pierde cuentas.
+- **`agent:sync`**: nuevo handler en `src/handlers/agent-sync/`. El
+  control lo emite justo después del `server:hello` / reconcile con
+  `{agent_id, container_id, session_id, oauth_token}` por cada
+  container vivo. `streams.attach(...)` se ejecuta en paralelo
+  (`Promise.allSettled`); failures individuales se warnean pero no
+  rompen el batch.
+- **Server self-reporting**: `server:hello` carga `cpu_cores`,
+  `ram_mb`, `os` extraídos por el supervisor; `server:metrics` añade
+  `cpu_percent` (delta entre snapshots) y `ram_percent`. El backend
+  los persiste en `Server` para que la lista del operador los muestre.
+
+### Hito 8 — Pendientes futuros
+
+- **Limpiar el flujo WS-provisioning muerto**: `auth.ts` y
+  `settings.ts` todavía exponen `KJ_PROVISIONING_TOKEN` y la rama
+  `provisioning` del handshake, pero el real ya va por HTTP-bundle.
+  Hay docenas de líneas zombi (typecheck no las marca porque siguen
+  consistentes consigo mismas).
 - **Backpressure del stream**: si un agente verboso emite cientos de
   `stream_event` por segundo y nadie está suscrito a `/operator`, hoy
   el supervisor empuja igualmente y el control descarta. Optimización:
