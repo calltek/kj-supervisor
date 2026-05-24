@@ -459,7 +459,7 @@ docker run --rm -it \
 ### Probar el stream end-to-end
 
 Con un agente `kj-agent-base` ya pulleado y un OAuth token configurado
-en `KJ_DEFAULT_CLAUDE_OAUTH_TOKEN` en el `.env` del backend:
+en el agente vía `PATCH /org/:org_id/agent/:id` (campo `claude_oauth_token`):
 
 ```bash
 # 1. Spawn vía API HTTP del backend
