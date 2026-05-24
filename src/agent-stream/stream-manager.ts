@@ -198,5 +198,8 @@ export class AgentStreamManager {
         if (classified.error) {
             this.client.push('agent:error', classified.error)
         }
+        if (classified.metrics) {
+            this.client.push('agent:metrics', classified.metrics)
+        }
     }
 }

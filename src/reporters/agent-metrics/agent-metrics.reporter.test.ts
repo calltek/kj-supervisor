@@ -62,8 +62,8 @@ describe('startAgentMetricsLoop', () => {
         const list = metrics(client)
         expect(list).toHaveLength(2)
         expect(list.map((m) => m.agent_id).sort()).toEqual([1, 2])
-        expect(list.every((m) => m.tokens_used === '0')).toBe(true)
-        expect(list.every((m) => m.cost_micro === '0')).toBe(true)
+        expect(list.every((m) => m.tokens_delta === '0')).toBe(true)
+        expect(list.every((m) => m.cost_delta_micro === '0')).toBe(true)
         // uptime should be roughly correct (60s and 5s).
         const byId = new Map(list.map((m) => [m.agent_id, m]))
         expect(byId.get(1)?.uptime_seconds).toBeGreaterThanOrEqual(55)

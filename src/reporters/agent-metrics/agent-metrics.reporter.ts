@@ -2,11 +2,11 @@
  * Periodic `agent:metrics` push for every running kj-agent container.
  * Fire-and-forget (no ack in the protocol).
  *
- * Today the supervisor only knows `uptime_seconds` — tokens_used and
- * cost_micro are reported as "0" because the inner agent process
- * doesn't expose a token counter yet. The fields are still emitted so
- * the control can persist a baseline and so the wire shape never
- * changes when token reporting lands.
+ * This loop only refreshes `uptime_seconds` — tokens and cost arrive
+ * event-driven from the stream classifier on each `result` event,
+ * which sends a delta to be accumulated server-side. The loop sends
+ * zero deltas so it never doubles-counts; it exists just so the
+ * uptime keeps ticking in the UI while the agent is idle.
  */
 
 import type { KJContainerSummary, KJDocker } from '../../docker/client/client'
@@ -59,8 +59,8 @@ export function startAgentMetricsLoop(opts: AgentMetricsReporterOptions): AgentM
 
                 const report: AgentMetricsReport = {
                     agent_id: c.agent_id,
-                    tokens_used: '0',
-                    cost_micro: '0',
+                    tokens_delta: '0',
+                    cost_delta_micro: '0',
                     uptime_seconds,
                 }
                 opts.client.push('agent:metrics', report)

@@ -67,4 +67,38 @@ describe('classifyStreamEvent', () => {
         expect(result.error).toBeUndefined()
         expect(result.auth_required).toBeUndefined()
     })
+
+    test('result event with usage emits agent:metrics with summed delta + cost in micros', () => {
+        const c = ctx()
+        const out = classifyStreamEvent(
+            {
+                type: 'result',
+                usage: {
+                    input_tokens: 100,
+                    output_tokens: 250,
+                    cache_creation_input_tokens: 50,
+                    cache_read_input_tokens: 1000,
+                },
+                total_cost_usd: 0.01234,
+            },
+            c
+        )
+        expect(out.metrics).toEqual({
+            agent_id: 42,
+            tokens_delta: '1400',
+            cost_delta_micro: '12340',
+        })
+    })
+
+    test('result event with zero usage emits no metrics (avoids no-op writes)', () => {
+        const c = ctx()
+        const out = classifyStreamEvent({ type: 'result', usage: {}, total_cost_usd: 0 }, c)
+        expect(out.metrics).toBeUndefined()
+    })
+
+    test('non-result events do not emit metrics', () => {
+        const c = ctx()
+        const out = classifyStreamEvent({ type: 'assistant', message: {} }, c)
+        expect(out.metrics).toBeUndefined()
+    })
 })
