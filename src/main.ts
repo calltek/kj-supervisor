@@ -9,7 +9,7 @@
  * identical to the cold-boot path.
  */
 
-import { hostname } from 'node:os'
+import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import {
     MissingCredentialsError,
@@ -197,6 +197,11 @@ async function main(): Promise<void> {
             protocol_version: PROTOCOL_VERSION,
             hostname: hostname(),
             containers: live_containers,
+            // Host specs — let the control persist them so the
+            // operator never has to type them on the create form.
+            cpu_cores: cpus().length,
+            ram_mb: Math.round(totalmem() / 1024 / 1024),
+            os: `${platform()} ${release()}`,
         }
 
         let ack: ServerHelloAck
