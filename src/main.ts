@@ -32,6 +32,7 @@ import { OperationTracker } from './docker/operation-tracker/operation-tracker'
 import { AgentInputHandler } from './handlers/agent-input/agent-input.handler'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
 import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
+import { AgentSyncHandler } from './handlers/agent-sync/agent-sync.handler'
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
@@ -40,6 +41,7 @@ import {
     type AgentResumePayload,
     type AgentSpawnPayload,
     type AgentStopPayload,
+    type AgentSyncPayload,
     type ContainerView,
     type ControlCommandAck,
     PROTOCOL_VERSION,
@@ -128,6 +130,7 @@ async function main(): Promise<void> {
         logger,
     })
     const inputHandler = new AgentInputHandler({ streams, logger })
+    const syncHandler = new AgentSyncHandler({ streams, logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,
         logger,
@@ -150,6 +153,9 @@ async function main(): Promise<void> {
     )
     client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) =>
         inputHandler.handle(payload)
+    )
+    client.onCommand<AgentSyncPayload, ControlCommandAck>('agent:sync', (payload) =>
+        syncHandler.handle(payload)
     )
 
     // Push event (not a command), no ack — handler returns void.
