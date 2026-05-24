@@ -60,16 +60,16 @@ export class AgentSyncHandler {
         let failures = 0
         for (let i = 0; i < results.length; i++) {
             const r = results[i]
-            if (r.status === 'rejected') {
-                failures++
-                this.logger.warn(
-                    {
-                        agent_id: entries[i].agent_id,
-                        err: r.reason instanceof Error ? r.reason.message : String(r.reason),
-                    },
-                    'agent:sync attach failed'
-                )
-            }
+            const entry = entries[i]
+            if (!r || !entry || r.status !== 'rejected') continue
+            failures++
+            this.logger.warn(
+                {
+                    agent_id: entry.agent_id,
+                    err: r.reason instanceof Error ? r.reason.message : String(r.reason),
+                },
+                'agent:sync attach failed'
+            )
         }
 
         this.logger.info(

@@ -16,7 +16,6 @@ import {
     resolveAuth,
     type SupervisorAuth,
     toHandshakeAuth,
-    writeAgentTokenToDisk,
 } from './client/auth/auth'
 import { KJControlClient } from './client/control/control.client'
 import { AgentStreamManager } from './agent-stream/stream-manager'
@@ -247,20 +246,9 @@ async function main(): Promise<void> {
             return
         }
 
-        if (ack.agent_token) {
-            try {
-                writeAgentTokenToDisk(settings.config_dir, ack.agent_token)
-                logger.info('agent_token persisted to disk')
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err)
-                logger.error(
-                    { error: message },
-                    'failed to persist agent_token — supervisor will not survive a restart'
-                )
-            }
-            // Future reconnects must use the agent_token, not the now-consumed provisioning_token.
-            client.setAuth({ agent_token: ack.agent_token })
-        }
+        // Provisioning over WS was removed when the install-script
+        // started exchanging the bundle over HTTP — there's nothing
+        // for the supervisor to persist from the hello ack any more.
 
         logger.info({ protocol_version: ack.protocol_version }, 'handshake complete')
 
