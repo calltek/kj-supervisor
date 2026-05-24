@@ -16,11 +16,7 @@
  */
 
 import type { KJLogger } from '../../logger'
-import type {
-    AgentSyncEntry,
-    AgentSyncPayload,
-    ControlCommandAck,
-} from '../../protocol'
+import type { AgentSyncEntry, AgentSyncPayload, ControlCommandAck } from '../../protocol'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 
 export interface AgentSyncHandlerDeps {
@@ -53,9 +49,7 @@ export class AgentSyncHandler {
         // Drive attaches in parallel — stream-manager.attach is idempotent
         // and isolated per agent, so there's no ordering concern. We
         // settle them all and log failures individually before acking.
-        const results = await Promise.allSettled(
-            entries.map((e) => this.attachOne(e))
-        )
+        const results = await Promise.allSettled(entries.map((e) => this.attachOne(e)))
 
         let failures = 0
         for (let i = 0; i < results.length; i++) {
