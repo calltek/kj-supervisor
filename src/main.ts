@@ -11,12 +11,7 @@
 
 import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
-import {
-    MissingCredentialsError,
-    resolveAuth,
-    type SupervisorAuth,
-    toHandshakeAuth,
-} from './client/auth/auth'
+import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
 import { KJControlClient } from './client/control/control.client'
 import { AgentStreamManager } from './agent-stream/stream-manager'
 import {
@@ -64,7 +59,6 @@ import {
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_MISSING,
     WS_ERROR_CODES.AUTH_INVALID,
-    WS_ERROR_CODES.PROVISIONING_TOKEN_EXPIRED,
 ])
 
 async function main(): Promise<void> {
@@ -80,26 +74,22 @@ async function main(): Promise<void> {
         'supervisor starting'
     )
 
-    let auth: SupervisorAuth
+    let agent_token: string
     try {
-        auth = resolveAuth({
-            config_dir: settings.config_dir,
-            provisioning_token: settings.provisioning_token,
-            agent_token_env: settings.agent_token_env,
-        })
+        agent_token = loadAgentToken(settings.config_dir)
     } catch (err) {
-        if (err instanceof MissingCredentialsError) {
+        if (err instanceof MissingAgentTokenError) {
             logger.error(err.message)
             process.exit(1)
         }
         throw err
     }
 
-    logger.info({ mode: auth.mode }, 'auth resolved')
+    logger.info('agent_token loaded from disk')
 
     const client = new KJControlClient({
         url: settings.control_url,
-        auth: toHandshakeAuth(auth),
+        auth: { agent_token },
         logger,
     })
 
@@ -245,10 +235,6 @@ async function main(): Promise<void> {
             logger.error({ ack }, 'server:hello rejected')
             return
         }
-
-        // Provisioning over WS was removed when the install-script
-        // started exchanging the bundle over HTTP — there's nothing
-        // for the supervisor to persist from the hello ack any more.
 
         logger.info({ protocol_version: ack.protocol_version }, 'handshake complete')
 

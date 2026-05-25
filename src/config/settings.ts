@@ -1,7 +1,8 @@
 /**
  * Environment variables, validated at boot. Throws if anything required
- * is missing or malformed. Token resolution lives in `client/auth.ts` —
- * this module only exposes raw env values.
+ * is missing or malformed. The persistent `agent_token` is NOT an env
+ * var — it lives on disk at `<config_dir>/token`, written by the
+ * install script. See `client/auth/auth.ts`.
  */
 
 import pkg from '../../package.json' with { type: 'json' }
@@ -25,8 +26,6 @@ const VALID_LOG_LEVELS: ReadonlySet<KJLogLevel> = new Set(['debug', 'info', 'war
 
 export class KJSettings {
     readonly control_url: string
-    readonly provisioning_token: string | null
-    readonly agent_token_env: string | null
     readonly config_dir: string
     readonly log_level: KJLogLevel
     readonly kj_agent_version: string
@@ -40,16 +39,12 @@ export class KJSettings {
 
     private constructor(values: {
         control_url: string
-        provisioning_token: string | null
-        agent_token_env: string | null
         config_dir: string
         log_level: KJLogLevel
         kj_agent_version: string
         supervisor_container: string | null
     }) {
         this.control_url = values.control_url
-        this.provisioning_token = values.provisioning_token
-        this.agent_token_env = values.agent_token_env
         this.config_dir = values.config_dir
         this.log_level = values.log_level
         this.kj_agent_version = values.kj_agent_version
@@ -75,8 +70,6 @@ export class KJSettings {
 
         return new KJSettings({
             control_url,
-            provisioning_token: KJSettings.optionalEnv('KJ_PROVISIONING_TOKEN'),
-            agent_token_env: KJSettings.optionalEnv('KJ_AGENT_TOKEN'),
             config_dir: KJSettings.optionalEnv('KJ_CONFIG_DIR') ?? '/etc/kj-supervisor',
             log_level: log_level_raw as KJLogLevel,
             kj_agent_version: pkg.version,

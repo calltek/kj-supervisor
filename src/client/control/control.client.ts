@@ -23,7 +23,7 @@ import type { KJLogger } from '../../logger'
 export interface ControlClientOptions {
     /** Base URL of the control, e.g. `http://localhost:5050`. */
     url: string
-    /** Initial handshake auth. Can be reassigned in-place after agent_token mint. */
+    /** Handshake auth — always `{ agent_token }` for this supervisor. */
     auth: Record<string, string>
     logger: KJLogger
 }
@@ -98,16 +98,6 @@ export class KJControlClient extends EventEmitter {
         // engine.close() drops the websocket without telling the Manager
         // it was a client-initiated close, so reconnection still kicks in.
         this.socket.io.engine?.close()
-    }
-
-    /**
-     * Replace the auth payload used for future reconnections. Call this
-     * after the control mints an agent_token so subsequent reconnects
-     * use it instead of the (now-consumed) provisioning_token.
-     */
-    setAuth(next: Record<string, string>): void {
-        // socket.io-client exposes auth as a mutable object.
-        ;(this.socket as unknown as { auth: Record<string, string> }).auth = next
     }
 
     /** Fire-and-forget push. Used for events the control doesn't ack. */

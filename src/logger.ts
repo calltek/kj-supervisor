@@ -8,15 +8,7 @@ import pino from 'pino'
 
 import type { KJLogLevel } from './config/settings'
 
-const REDACT_PATHS = [
-    'auth.provisioning_token',
-    'auth.agent_token',
-    'ack.agent_token',
-    'provisioning_token',
-    'agent_token',
-    '*.provisioning_token',
-    '*.agent_token',
-]
+const REDACT_PATHS = ['auth.agent_token', 'agent_token', '*.agent_token']
 
 type LogMethod = (objOrMsg: unknown, msg?: string) => void
 
