@@ -27,6 +27,7 @@ import { AgentInputHandler } from './handlers/agent-input/agent-input.handler'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
 import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
 import { AgentSyncHandler } from './handlers/agent-sync/agent-sync.handler'
+import { OAuthExchangeHandler } from './handlers/oauth-exchange/oauth-exchange.handler'
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
@@ -38,6 +39,8 @@ import {
     type AgentSyncPayload,
     type ContainerView,
     type ControlCommandAck,
+    type OAuthExchangeAck,
+    type OAuthExchangePayload,
     PROTOCOL_VERSION,
     type ServerHelloAck,
     type ServerHelloPayload,
@@ -120,6 +123,7 @@ async function main(): Promise<void> {
     })
     const inputHandler = new AgentInputHandler({ streams, logger })
     const syncHandler = new AgentSyncHandler({ streams, logger })
+    const oauthExchangeHandler = new OAuthExchangeHandler({ logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,
         logger,
@@ -145,6 +149,9 @@ async function main(): Promise<void> {
     )
     client.onCommand<AgentSyncPayload, ControlCommandAck>('agent:sync', (payload) =>
         syncHandler.handle(payload)
+    )
+    client.onCommand<OAuthExchangePayload, OAuthExchangeAck>('oauth:exchange', (payload) =>
+        oauthExchangeHandler.handle(payload)
     )
 
     // Push event (not a command), no ack — handler returns void.
