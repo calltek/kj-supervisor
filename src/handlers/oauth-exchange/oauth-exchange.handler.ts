@@ -27,11 +27,7 @@ import {
     CLAUDE_OAUTH_TOKEN_ENDPOINT,
     OAUTH_EXCHANGE_TIMEOUT_MS,
 } from '../../oauth/constants'
-import {
-    type OAuthExchangeAck,
-    type OAuthExchangePayload,
-    WS_ERROR_CODES,
-} from '../../protocol'
+import { type OAuthExchangeAck, type OAuthExchangePayload, WS_ERROR_CODES } from '../../protocol'
 
 interface AnthropicTokenResponse {
     access_token: string
@@ -57,10 +53,7 @@ interface AnthropicErrorResponse {
     error_description?: string
 }
 
-function extractErrorMessage(
-    parsed: AnthropicErrorResponse | null,
-    fallback: string
-): string {
+function extractErrorMessage(parsed: AnthropicErrorResponse | null, fallback: string): string {
     if (!parsed?.error) return parsed?.error_description ?? fallback
     if (typeof parsed.error === 'string') {
         return parsed.error_description ?? parsed.error

@@ -26,6 +26,13 @@ class FakeDocker {
     public containers: KJContainerSummary[] = []
     public next_pull_error: Error | null = null
     public next_run_error: Error | null = null
+    public image_exists_locally = false
+    public exists_calls: string[] = []
+
+    async imageExistsLocally(image_tag: string): Promise<boolean> {
+        this.exists_calls.push(image_tag)
+        return this.image_exists_locally
+    }
 
     async pullImage(
         image_tag: string,
