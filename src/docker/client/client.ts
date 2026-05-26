@@ -62,6 +62,30 @@ export class KJDocker {
     }
 
     /**
+     * Returns true when the daemon already has a local image with the
+     * given tag. Used by the spawn handler to skip the pull entirely
+     * when the image is cached — important for development (where the
+     * tag may not exist in the remote registry at all) and a nice-to-
+     * have in production (saves the registry round-trip on every
+     * spawn after the first).
+     */
+    async imageExistsLocally(image_tag: string): Promise<boolean> {
+        try {
+            await this.docker.getImage(image_tag).inspect()
+            return true
+        } catch (err) {
+            // dockerode throws on 404 with `statusCode: 404`. Any
+            // other error (daemon down, permissions) we re-treat as
+            // "not local" — the caller will then attempt a pull,
+            // which surfaces the same underlying problem with better
+            // error text.
+            const status = (err as { statusCode?: number }).statusCode
+            if (status === 404) return false
+            return false
+        }
+    }
+
+    /**
      * Pull an image from the registry. Resolves when the daemon has the
      * image; rejects on pull failure (network, auth, missing tag).
      *

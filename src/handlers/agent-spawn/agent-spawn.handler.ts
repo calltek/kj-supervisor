@@ -114,26 +114,37 @@ export class AgentSpawnHandler {
               }
             : undefined
 
-        try {
-            await this.docker.pullImage(
-                payload.image_tag,
-                (event) => {
-                    const summary = summarizePullEvent(event, payload.image_tag)
-                    if (summary) pullHeartbeat.update(summary)
-                },
-                pullAuth
-            )
-        } catch (err) {
-            pullHeartbeat.stop()
-            log.error({ err: errMessage(err) }, 'image pull failed')
-            this.status.push({
-                agent_id: payload.agent_id,
-                status: 'ERROR',
-                container_id: null,
-                last_action: `image pull failed: ${errMessage(err)}`,
-                last_action_at: Date.now(),
-            })
-            return
+        // Skip the pull when the image is already cached locally.
+        // Saves a round-trip in steady state, and is mandatory for
+        // dev workflows where the operator built the image directly
+        // (e.g. `docker build -t ...:dev-local .`) and there is no
+        // matching tag in the remote registry.
+        const cached = await this.docker.imageExistsLocally(payload.image_tag)
+        if (cached) {
+            log.info({ image_tag: payload.image_tag }, 'image cached locally; skipping pull')
+            pullHeartbeat.update(`using cached ${payload.image_tag}`)
+        } else {
+            try {
+                await this.docker.pullImage(
+                    payload.image_tag,
+                    (event) => {
+                        const summary = summarizePullEvent(event, payload.image_tag)
+                        if (summary) pullHeartbeat.update(summary)
+                    },
+                    pullAuth
+                )
+            } catch (err) {
+                pullHeartbeat.stop()
+                log.error({ err: errMessage(err) }, 'image pull failed')
+                this.status.push({
+                    agent_id: payload.agent_id,
+                    status: 'ERROR',
+                    container_id: null,
+                    last_action: `image pull failed: ${errMessage(err)}`,
+                    last_action_at: Date.now(),
+                })
+                return
+            }
         }
         pullHeartbeat.stop()
 
