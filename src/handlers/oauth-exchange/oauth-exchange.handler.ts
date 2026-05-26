@@ -99,7 +99,8 @@ export class OAuthExchangeHandler {
         // bodies without `state` with "Invalid request format". Split
         // ourselves; if the operator pasted just the code, fall back
         // to the state the control passed us (== session_id).
-        const [code, stateFromCode] = rawCode.split('#', 2)
+        const [codeHead, stateFromCode] = rawCode.split('#', 2)
+        const code = codeHead ?? rawCode
         const effectiveState = stateFromCode || state
 
         // JSON body, NOT application/x-www-form-urlencoded — the
