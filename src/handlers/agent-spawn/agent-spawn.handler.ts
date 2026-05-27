@@ -212,11 +212,20 @@ export class AgentSpawnHandler {
      * accidentally duplicated.
      */
     private buildContainerEnv(payload: AgentSpawnPayload): Record<string, string> {
-        return {
+        const env: Record<string, string> = {
             ...payload.env,
             KJ_SESSION_ID: payload.session_id,
-            CLAUDE_CODE_OAUTH_TOKEN: payload.oauth_token,
         }
+        // Inject the Claude credential under the env var that matches
+        // the token type. API_KEY uses ANTHROPIC_API_KEY (Console
+        // pay-per-use); everything else (including legacy payloads
+        // without token_type) defaults to CLAUDE_CODE_OAUTH_TOKEN.
+        if (payload.token_type === 'API_KEY') {
+            env.ANTHROPIC_API_KEY = payload.oauth_token
+        } else {
+            env.CLAUDE_CODE_OAUTH_TOKEN = payload.oauth_token
+        }
+        return env
     }
 
     private async findExistingContainer(agent_id: number): Promise<string | null> {
