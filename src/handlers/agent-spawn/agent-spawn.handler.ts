@@ -170,6 +170,13 @@ export class AgentSpawnHandler {
                     [KJ_LABEL_AGENT_ID]: String(payload.agent_id),
                 },
                 resources: payload.resources,
+                // Persistent /home/agent volume — keeps the claude
+                // transcript (.claude/projects/.../<session>.jsonl),
+                // skills, memories across stop+start. Docker creates the
+                // volume on first use. Skip for alpine smoke containers.
+                home_volume_name: payload.image_tag.startsWith('alpine')
+                    ? undefined
+                    : `kj-agent-${payload.agent_id}-home`,
             })
         } catch (err) {
             log.error({ err: errMessage(err) }, 'docker run failed')

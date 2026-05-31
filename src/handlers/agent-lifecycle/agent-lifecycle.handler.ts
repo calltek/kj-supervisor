@@ -17,6 +17,7 @@ import type { KJDocker } from '../../docker/client/client'
 import type { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
 import type { KJLogger } from '../../logger'
 import type {
+    AgentDeletePayload,
     AgentPausePayload,
     AgentResumePayload,
     AgentStatusReport,
@@ -224,6 +225,43 @@ export class AgentLifecycleHandler {
             container_id,
             last_action_at: Date.now(),
         })
+    }
+
+    /**
+     * Cleanup signal from the control after it deleted the agent from
+     * BD. We stop+remove the container if alive (idempotent — if it's
+     * already gone, ignore) and drop the persistent /home/agent named
+     * volume. Always acks `accepted: true` — the BD row is already gone
+     * so there's nothing to retry. Worst case the volume leaks; that
+     * surfaces in `docker volume ls`.
+     */
+    async handleDelete(payload: AgentDeletePayload): Promise<ControlCommandAck> {
+        const log = this.logger.child({
+            request_id: payload.request_id,
+            agent_id: payload.agent_id,
+        })
+        log.info('agent:delete received')
+
+        const volume_name = `kj-agent-${payload.agent_id}-home`
+
+        // Best-effort cleanup in the background; the ack goes out first.
+        ;(async () => {
+            try {
+                const containers = await this.docker.listKjContainers()
+                const match = containers.find((c) => c.agent_id === payload.agent_id)
+                if (match) {
+                    log.info({ container_id: match.container_id }, 'killing container before volume drop')
+                    await this.docker.stopContainer(match.container_id, { force: true }).catch(() => undefined)
+                    await this.docker.removeContainer(match.container_id)
+                }
+                await this.docker.removeVolume(volume_name)
+                log.info({ volume_name }, 'cleanup done')
+            } catch (err) {
+                log.warn({ err: errMessage(err) }, 'cleanup failed')
+            }
+        })()
+
+        return { ok: true, accepted: true }
     }
 
     // ──────────────────────────────────────────────────────────────────

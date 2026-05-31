@@ -21,6 +21,12 @@ export interface KJContainerRunOptions {
     cmd?: string[]
     labels: Record<string, string>
     resources: { memory_mb: number; cpu: number }
+    /**
+     * Named docker volume to mount at /home/agent for this container.
+     * Persists the agent's home (claude transcripts under .claude/,
+     * memories, skills) across stop+start. Created on demand if missing.
+     */
+    home_volume_name?: string
 }
 
 export interface KJContainerSummary {
@@ -139,6 +145,20 @@ export class KJDocker {
     async runContainer(opts: KJContainerRunOptions): Promise<string> {
         const envArray = Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
 
+        // Persistent /home/agent volume. Docker creates the named volume
+        // on first use if it doesn't exist, so we don't need a separate
+        // create step. The mount survives stop+start; only `agent:delete`
+        // removes it (see `removeHomeVolume`).
+        const mounts = opts.home_volume_name
+            ? [
+                  {
+                      Type: 'volume' as const,
+                      Source: opts.home_volume_name,
+                      Target: '/home/agent',
+                  },
+              ]
+            : undefined
+
         const container = await this.docker.createContainer({
             Image: opts.image_tag,
             name: opts.name,
@@ -161,6 +181,7 @@ export class KJDocker {
                 // Restart so the container survives docker daemon restarts but
                 // not its own crashes (the supervisor decides whether to relaunch).
                 RestartPolicy: { Name: 'unless-stopped' },
+                Mounts: mounts,
             },
         })
 
@@ -377,6 +398,19 @@ export class KJDocker {
         await this.docker
             .getContainer(container_id)
             .remove({ force: true })
+            .catch(() => undefined)
+    }
+
+    /**
+     * Remove a docker named volume. Called when the control deletes
+     * an agent — without this, every deleted agent leaves a dangling
+     * named volume behind. Silent on "no such volume" / "in use" so
+     * the caller doesn't have to special-case.
+     */
+    async removeVolume(name: string): Promise<void> {
+        await this.docker
+            .getVolume(name)
+            .remove()
             .catch(() => undefined)
     }
 }

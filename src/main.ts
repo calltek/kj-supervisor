@@ -31,6 +31,7 @@ import { OAuthExchangeHandler } from './handlers/oauth-exchange/oauth-exchange.h
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
+    type AgentDeletePayload,
     type AgentInputPayload,
     type AgentPausePayload,
     type AgentResumePayload,
@@ -143,6 +144,9 @@ async function main(): Promise<void> {
     )
     client.onCommand<AgentResumePayload, ControlCommandAck>('agent:resume', (payload) =>
         lifecycleHandler.handleResume(payload)
+    )
+    client.onCommand<AgentDeletePayload, ControlCommandAck>('agent:delete', (payload) =>
+        lifecycleHandler.handleDelete(payload)
     )
     client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) =>
         inputHandler.handle(payload)
