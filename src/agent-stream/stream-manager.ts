@@ -173,11 +173,12 @@ export class AgentStreamManager {
             )
         }
 
-        const envelope = {
+        const envelope: Record<string, unknown> = {
             type: 'input',
             conversation_session_id: payload.conversation_session_id ?? entry.session_id,
             message: payload.message,
         }
+        if (payload.contact_name) envelope.contact_name = payload.contact_name
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
