@@ -36,6 +36,15 @@ interface AgentStream {
     session_id: string
     stream: NodeJS.ReadWriteStream
     seq: number
+    /**
+     * Phase B routing table. Maps the conversation's `session_id`
+     * (UUID, the same one claude uses for `--resume`) to its
+     * `conversation_id` (the BD primary key). Populated when the
+     * supervisor receives `agent:input` so it can stamp `agent:output`
+     * envelopes with the correct conversation_id when they come back
+     * from the container.
+     */
+    conversation_id_by_session: Map<string, number>
 }
 
 export interface AgentStreamManagerDeps {
@@ -98,6 +107,7 @@ export class AgentStreamManager {
             session_id: opts.session_id,
             stream,
             seq: 0,
+            conversation_id_by_session: new Map(),
         }
         this.streams.set(opts.agent_id, entry)
 
@@ -108,7 +118,7 @@ export class AgentStreamManager {
         }
 
         const parser = new NDJSONStreamParser({
-            onEvent: (event) => this.dispatch(event, ctx),
+            onEvent: (event) => this.dispatch(event, ctx, entry),
             logger: this.logger,
         })
 
@@ -139,19 +149,36 @@ export class AgentStreamManager {
     }
 
     /**
-     * Send a user message into the agent. The transport schema is
-     * Claude Code's stream-json input shape; the message field of the
-     * AgentInputPayload becomes the assistant-visible content.
+     * Send a user message into the agent. Phase B: wraps the message
+     * in an `{type:"input", conversation_session_id, message}` envelope
+     * that kj-agent-base understands and routes to the right per-
+     * conversation claude process. The supervisor also keeps a
+     * session_id → conversation_id map so it can stamp every output
+     * the container emits with the routing key the backend needs.
+     *
+     * If conversation_session_id is absent the agent falls back to its
+     * default session (Phase A behaviour) — useful for old test paths.
      */
     write(payload: AgentInputPayload): { ok: boolean; reason?: string } {
         const entry = this.streams.get(payload.agent_id)
         if (!entry) return { ok: false, reason: 'no_stream' }
 
-        const line =
-            JSON.stringify({
-                type: 'user',
-                message: { role: 'user', content: payload.message },
-            }) + '\n'
+        // Remember the (session_id → conversation_id) mapping so we can
+        // tag agent:output events with conversation_id when the
+        // container emits them.
+        if (payload.conversation_session_id && payload.conversation_id !== undefined) {
+            entry.conversation_id_by_session.set(
+                payload.conversation_session_id,
+                payload.conversation_id
+            )
+        }
+
+        const envelope = {
+            type: 'input',
+            conversation_session_id: payload.conversation_session_id ?? entry.session_id,
+            message: payload.message,
+        }
+        const line = `${JSON.stringify(envelope)}\n`
 
         try {
             entry.stream.write(line)
@@ -189,9 +216,49 @@ export class AgentStreamManager {
         for (const id of [...this.streams.keys()]) this.detach(id)
     }
 
-    private dispatch(event: Record<string, unknown>, ctx: ClassifierContext): void {
-        const classified = classifyStreamEvent(event, ctx)
-        this.client.push('agent:output', classified.output)
+    private dispatch(
+        payload: Record<string, unknown>,
+        ctx: ClassifierContext,
+        entry: AgentStream
+    ): void {
+        // Phase B: kj-agent-base emits `{conversation_session_id, event}`
+        // envelopes. Unwrap and remember which conversation_id we
+        // should attach to the agent:output push.
+        //
+        // Phase A fallback: if there's no envelope (raw stream-json
+        // event), treat the payload itself as the event and route to
+        // the agent's default session.
+        let event: Record<string, unknown>
+        let conversation_session_id: string | undefined
+        if (
+            typeof payload.conversation_session_id === 'string' &&
+            payload.event !== undefined &&
+            typeof payload.event === 'object' &&
+            payload.event !== null
+        ) {
+            conversation_session_id = payload.conversation_session_id
+            event = payload.event as Record<string, unknown>
+        } else {
+            event = payload
+        }
+
+        const conversation_id = conversation_session_id
+            ? entry.conversation_id_by_session.get(conversation_session_id)
+            : undefined
+
+        // Patch the classifier context so the session_id stamped on the
+        // output report matches the conversation's session (not just
+        // the agent's default).
+        const ctxForEvent: ClassifierContext = conversation_session_id
+            ? { ...ctx, session_id: conversation_session_id }
+            : ctx
+
+        const classified = classifyStreamEvent(event, ctxForEvent)
+        const output =
+            conversation_id !== undefined
+                ? { ...classified.output, conversation_id }
+                : classified.output
+        this.client.push('agent:output', output)
         if (classified.auth_required) {
             this.client.push('agent:auth_required', classified.auth_required)
         }
