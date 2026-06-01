@@ -413,4 +413,166 @@ export class KJDocker {
             .remove()
             .catch(() => undefined)
     }
+
+    /**
+     * Seed a named volume with arbitrary files BEFORE the agent
+     * container starts. The supervisor uses this for SHORT_TERM
+     * memories: each entry is written under /home/agent/.claude/
+     * memories/ inside the volume so the agent finds them on first
+     * boot of the next spawn.
+     *
+     * Implementation: spawn a short-lived `alpine:3.20` helper that
+     * mounts the volume at /v and runs a tiny script. We pull the
+     * helper image once and reuse it; Alpine is ~5MB, negligible.
+     * The helper exits as soon as it's done writing — no long-lived
+     * sidecar.
+     *
+     * `files` is keyed by path relative to the mount point. Existing
+     * files at the same path are overwritten; nothing else in the
+     * volume is touched. `readonly` is honoured by chmod 0444; the
+     * directory containing the files stays writable so future seeds
+     * (e.g. a content update) can overwrite.
+     */
+    async seedVolumeFiles(opts: {
+        volume_name: string
+        target_dir: string // relative to /v, e.g. ".claude/memories"
+        files: Array<{ path: string; content: string; readonly?: boolean }>
+        /**
+         * When true, wipe the contents of `target_dir` before writing.
+         * Used by the spawn handler for `.claude/memories/` so files
+         * that were renamed or unassigned in BD don't survive as
+         * orphans in the volume. We delete the *contents*, not the
+         * directory itself, so its UID/permissions are preserved.
+         */
+        purge?: boolean
+    }): Promise<void> {
+        if (opts.files.length === 0 && !opts.purge) return
+
+        const helperImage = 'alpine:3.20'
+
+        // Make sure the helper image is available locally. cheaper than
+        // pulling every call (alpine layers are cached after the first).
+        const cached = await this.imageExistsLocally(helperImage)
+        if (!cached) {
+            await this.pullImage(helperImage, () => {})
+        }
+
+        // Encode each file as a heredoc the shell can run safely. Use
+        // base64 to avoid having to escape arbitrary markdown content
+        // (backticks, $, EOF markers, …) inside the heredoc.
+        const targetDir = opts.target_dir.replace(/^\/+/, '').replace(/\/+$/, '')
+        const lines: string[] = [
+            'set -e',
+            `mkdir -p "/v/${targetDir}"`,
+        ]
+        if (opts.purge) {
+            // Wipe contents (recursive) but keep the directory itself
+            // so its existing ownership/permissions stay intact.
+            // `find` is more portable than `rm -rf glob` for hidden
+            // files and avoids the "argument list too long" trap.
+            lines.push(`find "/v/${targetDir}" -mindepth 1 -delete`)
+        }
+        for (const f of opts.files) {
+            // The path may contain `/` for S3-style folder nesting
+            // (memory names like `comercial/oferta.md`). `mkdir -p`
+            // on every parent before writing keeps the helper simple
+            // and idempotent — Alpine's mkdir handles the no-op case.
+            const safeName = f.path.replace(/^\/+/, '')
+            const parent = safeName.includes('/')
+                ? safeName.slice(0, safeName.lastIndexOf('/'))
+                : ''
+            if (parent) {
+                lines.push(`mkdir -p "/v/${targetDir}/${parent}"`)
+            }
+            const b64 = Buffer.from(f.content, 'utf8').toString('base64')
+            // Remove first: previous seeds may have left the file as
+            // 0444 (readonly), which would make the next write fail
+            // with EACCES. `rm -f` no-ops when the file doesn't exist.
+            lines.push(`rm -f "/v/${targetDir}/${safeName}"`)
+            lines.push(`echo "${b64}" | base64 -d > "/v/${targetDir}/${safeName}"`)
+            if (f.readonly) {
+                lines.push(`chmod 0444 "/v/${targetDir}/${safeName}"`)
+            }
+        }
+        const script = lines.join('\n')
+
+        const container = await this.docker.createContainer({
+            Image: helperImage,
+            // No labels — these are throwaway, the reconcile must NOT
+            // ever pick them up as agent containers.
+            Cmd: ['sh', '-c', script],
+            HostConfig: {
+                // AutoRemove false: we want to inspect the logs on
+                // failure. We remove the container explicitly after
+                // wait().
+                AutoRemove: false,
+                Mounts: [
+                    {
+                        Type: 'volume',
+                        Source: opts.volume_name,
+                        Target: '/v',
+                    },
+                ],
+                // The agent's volume is owned by the agent user (UID
+                // 1000) on every directory it touches. The helper
+                // runs as root but the default CapDrop:ALL also
+                // removes CAP_DAC_OVERRIDE, which root needs to write
+                // into a directory it doesn't own. Keep that single
+                // capability so the helper can drop files anywhere
+                // inside /v while still being heavily sandboxed.
+                CapDrop: ['ALL'],
+                CapAdd: ['DAC_OVERRIDE'],
+                SecurityOpt: ['no-new-privileges'],
+            },
+        })
+        await container.start()
+        // wait() resolves with StatusCode when the container exits.
+        const result = await container.wait()
+        if (result.StatusCode !== 0) {
+            // Pull stdout+stderr before removing so the operator can
+            // see WHY the helper failed instead of a bare exit code.
+            let logsTxt = ''
+            try {
+                const logsBuf = await container.logs({
+                    stdout: true,
+                    stderr: true,
+                    follow: false,
+                })
+                logsTxt = Buffer.isBuffer(logsBuf)
+                    ? logsBuf.toString('utf8')
+                    : String(logsBuf)
+                // dockerode returns multiplexed frames when Tty:false.
+                // The 8-byte header per frame can leak into the string;
+                // we strip it on a best-effort basis.
+                // dockerode returns multiplexed frames when Tty:false.
+                // The 8-byte header per frame can leak into the string;
+                // we strip non-printable bytes (keep tab/lf and >= 0x20).
+                logsTxt = logsTxt
+                    .split('')
+                    .filter((c) => {
+                        const code = c.charCodeAt(0)
+                        return code === 9 || code === 10 || code >= 32
+                    })
+                    .join('')
+                    .trim()
+            } catch {
+                // ignore — we still throw with what we have.
+            }
+            await container.remove({ force: true }).catch(() => undefined)
+            throw new Error(
+                `seedVolumeFiles helper exited with code ${result.StatusCode} for volume ${opts.volume_name}: ${
+                    logsTxt || '(no logs captured)'
+                }`
+            )
+        }
+        await container.remove({ force: true }).catch(() => undefined)
+        this.logger.info(
+            {
+                volume: opts.volume_name,
+                target_dir: targetDir,
+                file_count: opts.files.length,
+            },
+            'seeded volume files'
+        )
+    }
 }

@@ -148,6 +148,73 @@ export class AgentSpawnHandler {
         }
         pullHeartbeat.stop()
 
+        // Seed SHORT_TERM memories onto the persistent volume BEFORE
+        // the agent container runs. The control sends every memory it
+        // wants the agent to start with in `payload.memories`; we drop
+        // each one under /home/agent/.claude/memories/<name>. Skipped
+        // entirely when the array is empty (no-op cost) and for alpine
+        // smoke containers (no volume to seed).
+        const homeVolume = payload.image_tag.startsWith('alpine')
+            ? undefined
+            : `kj-agent-${payload.agent_id}-home`
+        if (homeVolume) {
+            try {
+                this.status.push({
+                    agent_id: payload.agent_id,
+                    status: 'SPAWNING',
+                    last_action: `seeding ${payload.memories.length} memorie(s)`,
+                    last_action_at: Date.now(),
+                })
+                // Always purge .claude/memories/ first, even when the
+                // payload has zero memories — that's how we clean up
+                // after the operator unassigns / renames / deletes.
+                // The directory itself stays (preserves owner UID).
+                await this.docker.seedVolumeFiles({
+                    volume_name: homeVolume,
+                    target_dir: '.claude/memories',
+                    purge: true,
+                    files: payload.memories.map((m) => ({
+                        path: m.path,
+                        content: m.content,
+                        readonly: m.readonly,
+                    })),
+                })
+
+                // Also seed a CLAUDE.md "project memory" index at the
+                // agent's home root. Claude Code auto-discovers
+                // CLAUDE.md by walking up from cwd, so this is the
+                // cheapest way to make the agent aware of its
+                // assigned memories without modifying its system
+                // prompt or the wrapper.
+                const claudeMd = buildClaudeMdIndex(payload.memories)
+                await this.docker.seedVolumeFiles({
+                    volume_name: homeVolume,
+                    target_dir: '.',
+                    files: [
+                        {
+                            path: 'CLAUDE.md',
+                            content: claudeMd,
+                            // Writable so the operator can choose to
+                            // surface extra context later if needed,
+                            // but the auto-content is regenerated on
+                            // every spawn.
+                            readonly: false,
+                        },
+                    ],
+                })
+            } catch (err) {
+                log.error({ err: errMessage(err) }, 'memory seed failed')
+                this.status.push({
+                    agent_id: payload.agent_id,
+                    status: 'ERROR',
+                    container_id: null,
+                    last_action: `memory seed failed: ${errMessage(err)}`,
+                    last_action_at: Date.now(),
+                })
+                return
+            }
+        }
+
         // Quick beat so the panel knows we've moved past pull.
         this.status.push({
             agent_id: payload.agent_id,
@@ -174,9 +241,7 @@ export class AgentSpawnHandler {
                 // transcript (.claude/projects/.../<session>.jsonl),
                 // skills, memories across stop+start. Docker creates the
                 // volume on first use. Skip for alpine smoke containers.
-                home_volume_name: payload.image_tag.startsWith('alpine')
-                    ? undefined
-                    : `kj-agent-${payload.agent_id}-home`,
+                home_volume_name: homeVolume,
             })
         } catch (err) {
             log.error({ err: errMessage(err) }, 'docker run failed')
@@ -288,4 +353,51 @@ function summarizePullEvent(event: PullProgressEvent, image_tag: string): string
         return null // too chatty
     }
     return `pulling ${image_tag} — ${event.status}`
+}
+
+/**
+ * Build the CLAUDE.md index that ships with every seeded volume.
+ * Lists the memories the agent has on disk, points to their path,
+ * and tells the agent to read them as authoritative context for
+ * tone/policies/identity. Claude Code reads CLAUDE.md by walking
+ * up from `cwd` so this single file at /home/agent/CLAUDE.md is
+ * enough — no system prompt change required.
+ */
+function buildClaudeMdIndex(
+    memories: ReadonlyArray<{ path: string }>
+): string {
+    const lines: string[] = [
+        '# Kujira agent — memorias',
+        '',
+        'Esta organización te ha confiado un conjunto de **memorias** ' +
+            'que viven en `/home/agent/.claude/memories/`. Son ficheros ' +
+            'markdown que el operador escribe a mano para que tú tengas ' +
+            'siempre presente el tono, la identidad, las políticas y ' +
+            'cualquier información relevante de la org.',
+        '',
+        '## Reglas',
+        '',
+        '- **Léelas siempre antes de responder** algo importante, ' +
+            'aunque no las hayas leído nunca: pueden cambiar entre turnos.',
+        '- Trátalas como **fuente de verdad**: si una memoria contradice ' +
+            'lo que has aprendido durante el chat, gana la memoria.',
+        '- Si te preguntan por su contenido, léelas con la tool `Read` ' +
+            'y resume con tus palabras.',
+        '- Si no encuentras información sobre algo en las memorias, ' +
+            'dilo claramente — no inventes.',
+        '',
+        '## Memorias disponibles',
+        '',
+    ]
+    if (memories.length === 0) {
+        lines.push('_(Ninguna por ahora — la org aún no te ha asignado memorias.)_')
+    } else {
+        for (const m of memories.slice().sort((a, b) => a.path.localeCompare(b.path))) {
+            lines.push(
+                `- \`/home/agent/.claude/memories/${m.path}\``
+            )
+        }
+    }
+    lines.push('')
+    return lines.join('\n')
 }
