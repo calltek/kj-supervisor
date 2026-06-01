@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     // first and let the dispatcher close over it.
     let streams: AgentStreamManager
     const mcp = new McpDispatcher({
-        sendRequest: (agent_id, request_id, tool, args) =>
+        sendRequest: (agent_id, request_id, tool, args, contact_id) =>
             client.emitWithAck<McpRequestAck>(
                 'mcp:request',
                 {
@@ -122,11 +122,13 @@ async function main(): Promise<void> {
                     agent_id,
                     tool: tool as McpRequestPayload['tool'],
                     args,
+                    ...(contact_id !== undefined ? { contact_id } : {}),
                 },
                 15000
             ),
         writeToContainer: (agent_id: number, envelope: McpEnvelope) =>
             streams.writeMcp(agent_id, envelope),
+        resolveContactId: (agent_id: number) => streams.getActiveContactId(agent_id),
         logger,
     })
     streams = new AgentStreamManager({ docker, client, logger, mcp })

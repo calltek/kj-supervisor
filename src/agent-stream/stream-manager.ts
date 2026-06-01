@@ -50,6 +50,22 @@ interface AgentStream {
      * from the container.
      */
     conversation_id_by_session: Map<string, number>
+    /**
+     * Sibling routing table for the kj-mcp `user_*` tools: maps the
+     * conversation's session_id to the Contact.id the operator-gateway
+     * resolved when dispatching `agent:input`. The McpDispatcher reads
+     * the latest contact_id touched by the most recent input to stamp
+     * outbound `mcp:request` payloads.
+     */
+    contact_id_by_session: Map<string, number>
+    /**
+     * Last conversation session the supervisor wrote to this stream.
+     * The MCP dispatcher uses it to pick the contact_id to stamp on
+     * `mcp:request` calls coming back from the container — the agent
+     * doesn't know which contact it's talking to right now, the
+     * supervisor does.
+     */
+    last_active_session_id: string | null
 }
 
 export interface AgentStreamManagerDeps {
@@ -77,6 +93,23 @@ export class AgentStreamManager {
         this.client = deps.client
         this.logger = deps.logger.child({ component: 'agent-stream' })
         this.mcp = deps.mcp
+    }
+
+    /**
+     * Return the contact_id the most recent input for this agent was
+     * routed to, or undefined when no input has flowed through this
+     * stream yet (a freshly-spawned agent that has only received MCP
+     * tool calls from boot prompts, for example).
+     *
+     * The MCP dispatcher uses this to stamp `mcp:request` payloads
+     * coming back from the container — the agent itself never sees a
+     * contact id, the supervisor binds the call to the conversation it
+     * came from.
+     */
+    getActiveContactId(agent_id: number): number | undefined {
+        const entry = this.streams.get(agent_id)
+        if (!entry?.last_active_session_id) return undefined
+        return entry.contact_id_by_session.get(entry.last_active_session_id)
     }
 
     /**
@@ -146,6 +179,8 @@ export class AgentStreamManager {
             stream,
             seq: 0,
             conversation_id_by_session: new Map(),
+            contact_id_by_session: new Map(),
+            last_active_session_id: null,
         }
         this.streams.set(opts.agent_id, entry)
 
@@ -204,19 +239,29 @@ export class AgentStreamManager {
         // Remember the (session_id → conversation_id) mapping so we can
         // tag agent:output events with conversation_id when the
         // container emits them.
+        const sessionForInput = payload.conversation_session_id ?? entry.session_id
         if (payload.conversation_session_id && payload.conversation_id !== undefined) {
             entry.conversation_id_by_session.set(
                 payload.conversation_session_id,
                 payload.conversation_id
             )
         }
+        // Same idea for contact_id — but the MCP user_* tools pick the
+        // contact from `last_active_session_id` rather than mapping by
+        // a session id the agent never sees. Persist both so we can
+        // reconstruct intent after restarts.
+        if (payload.contact_id !== undefined) {
+            entry.contact_id_by_session.set(sessionForInput, payload.contact_id)
+        }
+        entry.last_active_session_id = sessionForInput
 
         const envelope: Record<string, unknown> = {
             type: 'input',
-            conversation_session_id: payload.conversation_session_id ?? entry.session_id,
+            conversation_session_id: sessionForInput,
             message: payload.message,
         }
         if (payload.contact_name) envelope.contact_name = payload.contact_name
+        if (payload.contact_id !== undefined) envelope.contact_id = payload.contact_id
         const line = `${JSON.stringify(envelope)}\n`
 
         try {

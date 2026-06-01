@@ -14,7 +14,7 @@ function silentLogger() {
         trace: noop,
         child: () => fakeLogger,
     }
-    return fakeLogger as unknown as Parameters<typeof McpDispatcher>[0]['logger']
+    return fakeLogger as unknown as ConstructorParameters<typeof McpDispatcher>[0]['logger']
 }
 
 describe('isMcpEnvelope', () => {
@@ -58,6 +58,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
+            resolveContactId: () => undefined,
             logger: silentLogger(),
         })
 
@@ -103,6 +104,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
+            resolveContactId: () => undefined,
             logger: silentLogger(),
         })
 
@@ -132,6 +134,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
+            resolveContactId: () => undefined,
             logger: silentLogger(),
         })
 
@@ -161,6 +164,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
+            resolveContactId: () => undefined,
             logger: silentLogger(),
         })
 
@@ -185,6 +189,7 @@ describe('McpDispatcher.forwardPushToContainer', () => {
                 writes.push(envelope)
                 return true
             },
+            resolveContactId: () => undefined,
             logger: silentLogger(),
         })
 
@@ -214,6 +219,7 @@ describe('McpDispatcher.forwardPushToContainer', () => {
         const dispatcher = new McpDispatcher({
             sendRequest: async () => ({ ok: true, data: {} }) satisfies McpRequestAck,
             writeToContainer: () => false,
+            resolveContactId: () => undefined,
             logger: silentLogger(),
         })
         // Just checks it doesn't throw.

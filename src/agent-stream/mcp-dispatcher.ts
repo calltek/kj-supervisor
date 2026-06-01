@@ -82,13 +82,21 @@ export interface McpDispatcherDeps {
         agent_id: number,
         request_id: string,
         tool: string,
-        args: Record<string, unknown>
+        args: Record<string, unknown>,
+        contact_id: number | undefined
     ) => Promise<McpRequestAck>
     /**
      * Write a line to the agent's container stdin. Used to forward the
      * mcp:response (and pushes) back into the container.
      */
     writeToContainer: (agent_id: number, envelope: McpEnvelope) => boolean
+    /**
+     * Resolve the contact_id the in-container MCP call belongs to.
+     * The agent doesn't tell us — the supervisor knows it from the
+     * most recent `agent:input` that flowed through that container.
+     * Returns undefined when no input has primed the stream yet.
+     */
+    resolveContactId: (agent_id: number) => number | undefined
     logger: KJLogger
 }
 
@@ -155,13 +163,15 @@ export class McpDispatcher {
         })
         log.debug('forwarding mcp request to control')
 
+        const contact_id = this.deps.resolveContactId(agent_id)
         let response: McpResponseEnvelope
         try {
             const ack = await this.deps.sendRequest(
                 agent_id,
                 request.request_id,
                 request.tool,
-                request.args
+                request.args,
+                contact_id
             )
             response = ack.ok
                 ? {
