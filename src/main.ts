@@ -13,6 +13,7 @@ import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
 import { KJControlClient } from './client/control/control.client'
+import { McpDispatcher, type McpEnvelope } from './agent-stream/mcp-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
 import {
     AGENT_METRICS_INTERVAL_MS,
@@ -40,6 +41,9 @@ import {
     type AgentSyncPayload,
     type ContainerView,
     type ControlCommandAck,
+    type McpRequestAck,
+    type McpRequestPayload,
+    type MemoryUpdatedPush,
     type OAuthExchangeAck,
     type OAuthExchangePayload,
     PROTOCOL_VERSION,
@@ -102,7 +106,30 @@ async function main(): Promise<void> {
     const docker = new KJDocker(logger)
     const tracker = new OperationTracker()
     const statusReporter = new AgentStatusReporter(client, logger)
-    const streams = new AgentStreamManager({ docker, client, logger })
+
+    // kj-mcp wiring: the dispatcher relays MCP traffic in both
+    // directions. Stream manager and dispatcher reference each other
+    // (manager hands incoming lines to dispatcher; dispatcher writes
+    // responses back via manager.writeMcp), so we declare the manager
+    // first and let the dispatcher close over it.
+    let streams: AgentStreamManager
+    const mcp = new McpDispatcher({
+        sendRequest: (agent_id, request_id, tool, args) =>
+            client.emitWithAck<McpRequestAck>(
+                'mcp:request',
+                {
+                    request_id,
+                    agent_id,
+                    tool: tool as McpRequestPayload['tool'],
+                    args,
+                },
+                15000
+            ),
+        writeToContainer: (agent_id: number, envelope: McpEnvelope) =>
+            streams.writeMcp(agent_id, envelope),
+        logger,
+    })
+    streams = new AgentStreamManager({ docker, client, logger, mcp })
     const eventsWatcher = new KJDockerEventsWatcher({
         docker,
         tracker,
@@ -161,6 +188,18 @@ async function main(): Promise<void> {
     // Push event (not a command), no ack — handler returns void.
     client.onPush<SupervisorUpgradeRequiredPayload>('supervisor:upgrade-required', (payload) => {
         void upgradeHandler.handle(payload)
+    })
+
+    // kj-mcp: memory mutations made on the control side land here. We
+    // forward them down the per-agent stdio multiplex so the
+    // in-container MCP can invalidate its cache and notify Claude
+    // Code. If the agent isn't running locally (paused / on a
+    // different server / never spawned) the dispatcher drops the
+    // push silently — next spawn picks up the fresh state via the
+    // spawn payload.
+    client.onPush<MemoryUpdatedPush>('memory:updated', (payload) => {
+        const { agent_id, ...rest } = payload
+        mcp.forwardPushToContainer(agent_id, 'memory:updated', rest)
     })
 
     let healthHandle: HealthLoopHandle | null = null

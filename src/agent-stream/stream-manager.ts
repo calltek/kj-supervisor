@@ -23,6 +23,11 @@ import { PassThrough } from 'node:stream'
 import type { KJDocker } from '../docker/client/client'
 import type { KJLogger } from '../logger'
 import type { AgentInputPayload } from '../protocol'
+import {
+    isMcpEnvelope,
+    type McpDispatcher,
+    type McpEnvelope,
+} from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
 
@@ -51,6 +56,13 @@ export interface AgentStreamManagerDeps {
     docker: KJDocker
     client: AgentStreamClient
     logger: KJLogger
+    /**
+     * Optional: receives MCP envelopes the container emits on its
+     * stdout. When absent (e.g. older test setups), MCP lines are
+     * dropped silently — the wrapper just stops talking to the MCP
+     * subprocess.
+     */
+    mcp?: McpDispatcher
 }
 
 export class AgentStreamManager {
@@ -58,11 +70,37 @@ export class AgentStreamManager {
     private readonly client: AgentStreamClient
     private readonly logger: KJLogger
     private readonly streams = new Map<number, AgentStream>()
+    private readonly mcp?: McpDispatcher
 
     constructor(deps: AgentStreamManagerDeps) {
         this.docker = deps.docker
         this.client = deps.client
         this.logger = deps.logger.child({ component: 'agent-stream' })
+        this.mcp = deps.mcp
+    }
+
+    /**
+     * Write an MCP envelope into the container's stdin. Used by the
+     * dispatcher to deliver `mcp:response` acks and `memory:updated`
+     * pushes. Returns false when no stream exists (container is gone
+     * or never spawned locally).
+     */
+    writeMcp(agent_id: number, envelope: McpEnvelope): boolean {
+        const entry = this.streams.get(agent_id)
+        if (!entry) return false
+        try {
+            entry.stream.write(`${JSON.stringify(envelope)}\n`)
+            return true
+        } catch (err) {
+            this.logger.warn(
+                {
+                    agent_id,
+                    err: err instanceof Error ? err.message : String(err),
+                },
+                'failed to write MCP envelope to container stdin'
+            )
+            return false
+        }
     }
 
     /**
@@ -222,6 +260,27 @@ export class AgentStreamManager {
         ctx: ClassifierContext,
         entry: AgentStream
     ): void {
+        // kj-mcp envelope: the wrapper tagged this line as belonging to
+        // the MCP subprocess, not Claude Code. Bypass the classifier
+        // entirely and hand it off to the dispatcher. When the
+        // dispatcher isn't wired (unit tests, older deployments) the
+        // line is dropped silently — the wrapper just stops getting
+        // responses for that request.
+        if (isMcpEnvelope(payload)) {
+            // Cast is safe — isMcpEnvelope just confirmed the marker.
+            // See note on the predicate's signature for the why.
+            const envelope = payload as unknown as McpEnvelope
+            if (this.mcp) {
+                this.mcp.onContainerLine(entry.agent_id, envelope)
+            } else {
+                this.logger.debug(
+                    { agent_id: entry.agent_id, kind: envelope.kind },
+                    'mcp envelope dropped — dispatcher not configured'
+                )
+            }
+            return
+        }
+
         // Phase B: kj-agent-base emits `{conversation_session_id, event}`
         // envelopes. Unwrap and remember which conversation_id we
         // should attach to the agent:output push.
