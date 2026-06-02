@@ -129,7 +129,8 @@ describe('McpDispatcher.onContainerLine', () => {
     test('on transport failure, writes a SUPERVISOR_TIMEOUT error response', async () => {
         const writes: McpEnvelope[] = []
         const dispatcher = new McpDispatcher({
-            sendRequest: () => Promise.reject(new Error('ack timeout for mcp:request after 15000ms')),
+            sendRequest: () =>
+                Promise.reject(new Error('ack timeout for mcp:request after 15000ms')),
             writeToContainer: (_agent_id, envelope) => {
                 writes.push(envelope)
                 return true
@@ -215,7 +216,7 @@ describe('McpDispatcher.forwardPushToContainer', () => {
         ])
     })
 
-    test('drops the push silently when the container isn\'t streaming locally', () => {
+    test("drops the push silently when the container isn't streaming locally", () => {
         const dispatcher = new McpDispatcher({
             sendRequest: async () => ({ ok: true, data: {} }) satisfies McpRequestAck,
             writeToContainer: () => false,

@@ -363,9 +363,7 @@ function summarizePullEvent(event: PullProgressEvent, image_tag: string): string
  * up from `cwd` so this single file at /home/agent/CLAUDE.md is
  * enough — no system prompt change required.
  */
-function buildClaudeMdIndex(
-    memories: ReadonlyArray<{ path: string }>
-): string {
+function buildClaudeMdIndex(memories: ReadonlyArray<{ path: string }>): string {
     const lines: string[] = [
         '# Kujira agent — memorias',
         '',
@@ -393,9 +391,7 @@ function buildClaudeMdIndex(
         lines.push('_(Ninguna por ahora — la org aún no te ha asignado memorias.)_')
     } else {
         for (const m of memories.slice().sort((a, b) => a.path.localeCompare(b.path))) {
-            lines.push(
-                `- \`/home/agent/.claude/memories/${m.path}\``
-            )
+            lines.push(`- \`/home/agent/.claude/memories/${m.path}\``)
         }
     }
     lines.push('')

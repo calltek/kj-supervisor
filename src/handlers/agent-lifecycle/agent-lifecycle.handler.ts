@@ -250,8 +250,13 @@ export class AgentLifecycleHandler {
                 const containers = await this.docker.listKjContainers()
                 const match = containers.find((c) => c.agent_id === payload.agent_id)
                 if (match) {
-                    log.info({ container_id: match.container_id }, 'killing container before volume drop')
-                    await this.docker.stopContainer(match.container_id, { force: true }).catch(() => undefined)
+                    log.info(
+                        { container_id: match.container_id },
+                        'killing container before volume drop'
+                    )
+                    await this.docker
+                        .stopContainer(match.container_id, { force: true })
+                        .catch(() => undefined)
                     await this.docker.removeContainer(match.container_id)
                 }
                 await this.docker.removeVolume(volume_name)

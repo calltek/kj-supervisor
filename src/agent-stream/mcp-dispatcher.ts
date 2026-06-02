@@ -134,7 +134,11 @@ export class McpDispatcher {
      * supervisor. Forward to the matching container's stdin so the MCP
      * subprocess can invalidate caches and notify Claude Code.
      */
-    forwardPushToContainer(agent_id: number, topic: string, payload: Record<string, unknown>): void {
+    forwardPushToContainer(
+        agent_id: number,
+        topic: string,
+        payload: Record<string, unknown>
+    ): void {
         const ok = this.deps.writeToContainer(agent_id, {
             kj_channel: 'mcp',
             kind: 'push',
@@ -152,10 +156,7 @@ export class McpDispatcher {
         }
     }
 
-    private async handleRequest(
-        agent_id: number,
-        request: McpRequestEnvelope
-    ): Promise<void> {
+    private async handleRequest(agent_id: number, request: McpRequestEnvelope): Promise<void> {
         const log = this.logger.child({
             agent_id,
             request_id: request.request_id,

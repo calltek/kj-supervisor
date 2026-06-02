@@ -23,11 +23,7 @@ import { PassThrough } from 'node:stream'
 import type { KJDocker } from '../docker/client/client'
 import type { KJLogger } from '../logger'
 import type { AgentInputPayload } from '../protocol'
-import {
-    isMcpEnvelope,
-    type McpDispatcher,
-    type McpEnvelope,
-} from './mcp-dispatcher'
+import { isMcpEnvelope, type McpDispatcher, type McpEnvelope } from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
 
