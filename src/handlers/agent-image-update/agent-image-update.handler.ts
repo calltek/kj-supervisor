@@ -101,11 +101,22 @@ export class AgentImageUpdateHandler {
         //    A second swap with no new bits is still useful: it
         //    forces a respawn (e.g. to pick up a new system prompt
         //    baked into the local rebuild).
+        const pullAuth = payload.registry_credentials
+            ? {
+                  username: payload.registry_credentials.username,
+                  password: payload.registry_credentials.password,
+                  serveraddress: payload.registry_credentials.registry,
+              }
+            : undefined
         try {
-            await this.docker.pullImage(payload.image_tag, (event) => {
-                const summary = summarizePullEvent(event, payload.image_tag)
-                if (summary) heartbeat.update(summary)
-            })
+            await this.docker.pullImage(
+                payload.image_tag,
+                (event) => {
+                    const summary = summarizePullEvent(event, payload.image_tag)
+                    if (summary) heartbeat.update(summary)
+                },
+                pullAuth
+            )
         } catch (err) {
             const cached = await this.docker
                 .imageExistsLocally(payload.image_tag)
