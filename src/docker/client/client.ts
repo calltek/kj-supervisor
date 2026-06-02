@@ -377,6 +377,19 @@ export class KJDocker {
             Cmd: config.Cmd ?? undefined,
             Entrypoint: config.Entrypoint ?? undefined,
             Labels: config.Labels,
+            // Mirror what runContainer sets when spawning fresh agents:
+            // the wrapper reads operator messages from process.stdin
+            // and writes claude's stream-json on stdout, so the new
+            // container MUST have stdin open + stdio attachable.
+            // Dropped silently before, which left the wrapper polling
+            // a stdin that never produced lines — heartbeats fine,
+            // input dead.
+            Tty: false,
+            OpenStdin: true,
+            StdinOnce: false,
+            AttachStdin: true,
+            AttachStdout: true,
+            AttachStderr: true,
             HostConfig: {
                 Binds: host.Binds,
                 Mounts: host.Mounts,
