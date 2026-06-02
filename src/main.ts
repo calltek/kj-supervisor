@@ -41,6 +41,7 @@ import {
     type AgentSpawnPayload,
     type AgentStopPayload,
     type AgentSyncPayload,
+    type ContactProfileUpdatedPush,
     type ContainerView,
     type ControlCommandAck,
     type McpRequestAck,
@@ -213,6 +214,16 @@ async function main(): Promise<void> {
     client.onPush<MemoryUpdatedPush>('memory:updated', (payload) => {
         const { agent_id, ...rest } = payload
         mcp.forwardPushToContainer(agent_id, 'memory:updated', rest)
+    })
+
+    // Same pattern for contact-profile: when the operator (or another
+    // caller on the control side) rewrote the per-(agent, contact)
+    // notes, the MCP server inside the container needs to know so
+    // Claude Code drops its cached `user_get` view and re-reads on
+    // the next turn.
+    client.onPush<ContactProfileUpdatedPush>('contact_profile:updated', (payload) => {
+        const { agent_id, ...rest } = payload
+        mcp.forwardPushToContainer(agent_id, 'contact_profile:updated', rest)
     })
 
     let healthHandle: HealthLoopHandle | null = null
