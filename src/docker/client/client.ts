@@ -335,6 +335,63 @@ export class KJDocker {
     }
 
     /**
+     * Recreate a container under the SAME name, reusing the source's
+     * env / labels / mounts / network but with whatever image the
+     * caller passes. The previous container is stopped + removed first
+     * (so the name is free for the new one). Used by the image-update
+     * handler to "swap in" a freshly-pulled image without leaking the
+     * env vars set by the original spawn payload.
+     *
+     * Unlike `cloneContainerWithNewImage`, this keeps the container
+     * name stable, which matters for callers that look up by name.
+     */
+    async recreateContainerWithImage(opts: {
+        source_container: string
+        new_image_tag: string
+        keep_name: string
+        force_stop?: boolean
+    }): Promise<string> {
+        this.logger.info(
+            {
+                source: opts.source_container,
+                image: opts.new_image_tag,
+                name: opts.keep_name,
+            },
+            'recreating container with image'
+        )
+
+        const source = await this.docker.getContainer(opts.source_container).inspect()
+        const config = source.Config
+        const host = source.HostConfig
+
+        // Stop + remove old first; the name has to be free before we
+        // can reuse it. Force is on by default — the operator already
+        // accepted the downtime by clicking the button.
+        await this.stopContainer(opts.source_container, { force: opts.force_stop ?? true })
+        await this.removeContainer(opts.source_container)
+
+        const created = await this.docker.createContainer({
+            Image: opts.new_image_tag,
+            name: opts.keep_name,
+            Env: config.Env,
+            Cmd: config.Cmd ?? undefined,
+            Entrypoint: config.Entrypoint ?? undefined,
+            Labels: config.Labels,
+            HostConfig: {
+                Binds: host.Binds,
+                Mounts: host.Mounts,
+                RestartPolicy: host.RestartPolicy,
+                NetworkMode: host.NetworkMode,
+                GroupAdd: host.GroupAdd,
+            },
+        })
+
+        await created.start()
+        this.logger.info({ new_container_id: created.id }, 'recreate started')
+        return created.id
+    }
+
+    /**
      * List every container labeled with kj-agent. Used by reconciliation
      * at server:hello time.
      */
@@ -461,10 +518,7 @@ export class KJDocker {
         // base64 to avoid having to escape arbitrary markdown content
         // (backticks, $, EOF markers, …) inside the heredoc.
         const targetDir = opts.target_dir.replace(/^\/+/, '').replace(/\/+$/, '')
-        const lines: string[] = [
-            'set -e',
-            `mkdir -p "/v/${targetDir}"`,
-        ]
+        const lines: string[] = ['set -e', `mkdir -p "/v/${targetDir}"`]
         if (opts.purge) {
             // Wipe contents (recursive) but keep the directory itself
             // so its existing ownership/permissions stay intact.
@@ -538,9 +592,7 @@ export class KJDocker {
                     stderr: true,
                     follow: false,
                 })
-                logsTxt = Buffer.isBuffer(logsBuf)
-                    ? logsBuf.toString('utf8')
-                    : String(logsBuf)
+                logsTxt = Buffer.isBuffer(logsBuf) ? logsBuf.toString('utf8') : String(logsBuf)
                 // dockerode returns multiplexed frames when Tty:false.
                 // The 8-byte header per frame can leak into the string;
                 // we strip it on a best-effort basis.
