@@ -77,6 +77,27 @@ class FakeDocker {
     async listKjContainers(): Promise<KJContainerSummary[]> {
         return this.containers
     }
+
+    /**
+     * The real KJDocker.seedVolumeFiles writes operator memories +
+     * CLAUDE.md into the agent's home volume before the container
+     * boots. The handler invokes it for any non-alpine image (alpine
+     * is the smoke-test escape hatch). The mock just records the call
+     * so we don't have to think about the volume seed in spawn tests.
+     */
+    public seeded: Array<{ volume_name: string; target_dir: string; files: unknown[] }> = []
+    async seedVolumeFiles(opts: {
+        volume_name: string
+        target_dir: string
+        purge?: boolean
+        files: unknown[]
+    }): Promise<void> {
+        this.seeded.push({
+            volume_name: opts.volume_name,
+            target_dir: opts.target_dir,
+            files: opts.files,
+        })
+    }
 }
 
 class FakeClient {
