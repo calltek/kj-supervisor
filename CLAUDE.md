@@ -430,6 +430,57 @@ conversación viva. Tres añadidos:
   `cpu_percent` (delta entre snapshots) y `ram_percent`. El backend
   los persiste en `Server` para que la lista del operador los muestre.
 
+### Hito 9 — agent:image:update + push contact_profile ✅ (hecho 2026-06-02/03)
+
+- **Nuevo evento `agent:image:update`** (control → supervisor).
+  Maneja dos escenarios bajo el mismo handler:
+  - Re-pull del mismo tag (operador pulsó "Forzar actualización"
+    porque GHCR re-buildeó la imagen).
+  - Bump a una versión nueva del catálogo (`Agent.image_id`
+    cambió primero en BD; el push lleva el nuevo `image_tag`).
+- **`AgentImageUpdateHandler`** en
+  `src/handlers/agent-image-update/`:
+  1. Ack inmediato `{ok: true, accepted: true}`.
+  2. Background: heartbeat "pulling…" + `docker pull` (con
+     `registry_credentials` opcionales que el control puede
+     mandar — patrón idéntico a `agent:spawn`).
+  3. Si el pull falla **y** `imageExistsLocally(tag) === true`,
+     continúa con el cache. Cubre dev (tags built localmente)
+     y producción con creds aún por configurar.
+  4. Según `restart_after` + estado previo:
+     - `restart_after=true` + container vivo → swap via
+       `recreateContainerWithImage` (preserva
+       Env/Mounts/Labels/RestartPolicy/NetworkMode/GroupAdd
+       **y** el stdio config: `OpenStdin/AttachStdin/AttachStdout
+       /AttachStderr/Tty=false`) → reattach stdio leyendo
+       `KJ_SESSION_ID` del Env del nuevo container.
+     - `restart_after=false` + container vivo → stop+remove,
+       status STOPPED, el operador arranca a mano.
+     - Sin container previo → solo refresh la cache, status STOPPED.
+  - 10 tests unitarios en
+    `agent-image-update.handler.test.ts` cubren los 4 caminos +
+    pull failure (con y sin cache) + recreate failure +
+    propagation de `registry_credentials` a `pullImage`.
+- **Bug nasty descubierto en producción**: la primera versión de
+  `recreateContainerWithImage` copiaba Env/Mounts/Labels pero
+  **olvidaba el stdio config**. Resultado: container nuevo con
+  stdin cerrado, wrapper hace `createInterface({input: process
+  .stdin})` y nunca recibe nada. Status RUNNING, heartbeats fine,
+  pero ninguna respuesta del agente. Fix: replicar el stdio
+  config de `runContainer` también en el recreate
+  (`Tty:false, OpenStdin:true, StdinOnce:false, AttachStdin:true,
+  AttachStdout:true, AttachStderr:true`).
+
+- **Nuevo push `contact_profile:updated`** (control → supervisor →
+  container MCP). Mismo patrón que `memory:updated`:
+  `client.onPush<ContactProfileUpdatedPush>(...) → mcp.forwardPushToContainer(...)`.
+  El payload lleva `agent_id` + `contact_id` + `content_hash` +
+  `updated_at`. El MCP bridge dentro del container solo lo loguea
+  hoy (ver follow-up sobre `resources` capability en kj-backend
+  CLAUDE.md). Funcionalmente el sistema ya está correcto porque
+  `user_get` siempre round-trippea a BD; este push es la señal
+  proactiva pendiente.
+
 ### Hito 8 — Pendientes futuros
 
 - **Limpiar el flujo WS-provisioning muerto**: `auth.ts` y
