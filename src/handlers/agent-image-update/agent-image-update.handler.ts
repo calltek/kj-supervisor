@@ -89,24 +89,44 @@ export class AgentImageUpdateHandler {
             initial_last_action: `pulling ${payload.image_tag}`,
         }).start()
 
-        // 1. Pull fresh from the registry. Skip the cache-only path —
-        //    the whole point of "update image" is to refresh.
+        // 1. Pull fresh from the registry — the whole point of this
+        //    handler is to refresh. If the pull fails AND the image is
+        //    already cached locally, we fall back to the cached copy
+        //    instead of bailing. Covers two real cases:
+        //      - dev workflows where the operator built the image
+        //        locally (`docker build -t …:dev-local`) and the tag
+        //        doesn't exist in the remote registry at all.
+        //      - private images where the supervisor doesn't have the
+        //        registry credentials wired yet (transitional).
+        //    A second swap with no new bits is still useful: it
+        //    forces a respawn (e.g. to pick up a new system prompt
+        //    baked into the local rebuild).
         try {
             await this.docker.pullImage(payload.image_tag, (event) => {
                 const summary = summarizePullEvent(event, payload.image_tag)
                 if (summary) heartbeat.update(summary)
             })
         } catch (err) {
-            heartbeat.stop()
-            log.error({ err: errMessage(err) }, 'image pull failed')
-            this.status.push({
-                agent_id: payload.agent_id,
-                status: existing ? 'ERROR' : 'STOPPED',
-                container_id: existing ?? null,
-                last_action: `image pull failed: ${errMessage(err)}`,
-                last_action_at: Date.now(),
-            })
-            return
+            const cached = await this.docker
+                .imageExistsLocally(payload.image_tag)
+                .catch(() => false)
+            if (!cached) {
+                heartbeat.stop()
+                log.error({ err: errMessage(err) }, 'image pull failed, no local cache')
+                this.status.push({
+                    agent_id: payload.agent_id,
+                    status: existing ? 'ERROR' : 'STOPPED',
+                    container_id: existing ?? null,
+                    last_action: `image pull failed: ${errMessage(err)}`,
+                    last_action_at: Date.now(),
+                })
+                return
+            }
+            log.warn(
+                { err: errMessage(err) },
+                'pull failed but image is cached locally, continuing with the cached copy'
+            )
+            heartbeat.update(`using cached ${payload.image_tag} (pull failed)`)
         }
         heartbeat.stop()
 
