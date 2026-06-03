@@ -194,24 +194,19 @@ describe('McpDispatcher.forwardPushToContainer', () => {
             logger: silentLogger(),
         })
 
-        dispatcher.forwardPushToContainer(42, 'memory:updated', {
-            memory_id: 7,
-            name: 'guia.md',
-            scope: 'SHORT_TERM',
-            action: 'updated',
+        // Generic forward mechanism — no live topic uses it today
+        // (memory:updated / contact_profile:updated were retired), but
+        // it stays for future push topics (e.g. Phase 4 channels).
+        dispatcher.forwardPushToContainer(42, 'example:push', {
+            foo: 'bar',
         })
 
         expect(writes).toEqual([
             {
                 kj_channel: 'mcp',
                 kind: 'push',
-                topic: 'memory:updated',
-                payload: {
-                    memory_id: 7,
-                    name: 'guia.md',
-                    scope: 'SHORT_TERM',
-                    action: 'updated',
-                },
+                topic: 'example:push',
+                payload: { foo: 'bar' },
             },
         ])
     })
@@ -224,11 +219,6 @@ describe('McpDispatcher.forwardPushToContainer', () => {
             logger: silentLogger(),
         })
         // Just checks it doesn't throw.
-        dispatcher.forwardPushToContainer(99, 'memory:updated', {
-            memory_id: 1,
-            name: 'x.md',
-            scope: 'SHORT_TERM',
-            action: 'deleted',
-        })
+        dispatcher.forwardPushToContainer(99, 'example:push', { foo: 'bar' })
     })
 })

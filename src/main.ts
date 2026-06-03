@@ -45,7 +45,6 @@ import {
     type ControlCommandAck,
     type McpRequestAck,
     type McpRequestPayload,
-    type MemoryUpdatedPush,
     type OAuthExchangeAck,
     type OAuthExchangePayload,
     PROTOCOL_VERSION,
@@ -203,23 +202,16 @@ async function main(): Promise<void> {
         void upgradeHandler.handle(payload)
     })
 
-    // kj-mcp: memory mutations made on the control side land here. We
-    // forward them down the per-agent stdio multiplex so the
-    // in-container MCP can invalidate its cache and notify Claude
-    // Code. If the agent isn't running locally (paused / on a
-    // different server / never spawned) the dispatcher drops the
-    // push silently — next spawn picks up the fresh state via the
-    // spawn payload.
-    client.onPush<MemoryUpdatedPush>('memory:updated', (payload) => {
-        const { agent_id, ...rest } = payload
-        mcp.forwardPushToContainer(agent_id, 'memory:updated', rest)
-    })
-
-    // NOTE: the `contact_profile:updated` push was removed 2026-06-03.
-    // The backend no longer emits it — the "operator edited the
-    // contact's notes, re-read them" signal is now a persisted SYSTEM
-    // message it prepends as a <system-reminder> to the next real
-    // agent:input. See kj-backend CLAUDE.md (contact-profile).
+    // NOTE: the `memory:updated` and `contact_profile:updated` pushes
+    // were removed 2026-06-03. Both were log-only end-to-end (the
+    // in-container MCP advertises only `tools`, so Claude Code never
+    // consumed the resource notification they were meant to drive). The
+    // backend no longer emits them — the "operator edited your memory/
+    // notes, re-read them" signal is now a persisted SYSTEM message it
+    // prepends as a <system-reminder> to the next real agent:input.
+    // Volume re-seed still rides on the spawn payload + sync flow.
+    // `forwardPushToContainer` stays on McpDispatcher for any future
+    // push topic but has no caller today.
 
     let healthHandle: HealthLoopHandle | null = null
     let serverMetricsHandle: ServerMetricsHandle | null = null

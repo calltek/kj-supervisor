@@ -15,8 +15,8 @@
  *   { "kj_channel": "mcp", "kind": "response", "request_id": "...",
  *     "ok": false, "error": { code, message, retryable } }
  *
- *   { "kj_channel": "mcp", "kind": "push", "topic": "memory:updated",
- *     "payload": { memory_id, name, scope, action, ... } }
+ *   { "kj_channel": "mcp", "kind": "push", "topic": "<topic>",
+ *     "payload": { ... } }   (no live topic today — see forward below)
  *
  * The `kj_channel` marker lets the wrapper inside the container
  * distinguish MCP-bound input from regular user input it forwards to
@@ -130,9 +130,10 @@ export class McpDispatcher {
     }
 
     /**
-     * Handle a `memory:updated` (or future) push the control sent the
-     * supervisor. Forward to the matching container's stdin so the MCP
-     * subprocess can invalidate caches and notify Claude Code.
+     * Forward a backend push to the matching container's stdin so the
+     * in-container MCP can react. No live topic uses this today
+     * (memory:updated / contact_profile:updated were retired 2026-06-03);
+     * kept generic for future push topics (Phase 4 channels).
      */
     forwardPushToContainer(
         agent_id: number,

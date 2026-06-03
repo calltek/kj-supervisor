@@ -110,9 +110,9 @@ export class AgentStreamManager {
 
     /**
      * Write an MCP envelope into the container's stdin. Used by the
-     * dispatcher to deliver `mcp:response` acks and `memory:updated`
-     * pushes. Returns false when no stream exists (container is gone
-     * or never spawned locally).
+     * dispatcher to deliver `mcp:response` acks (and any future push
+     * topics — none live today). Returns false when no stream exists
+     * (container is gone or never spawned locally).
      */
     writeMcp(agent_id: number, envelope: McpEnvelope): boolean {
         const entry = this.streams.get(agent_id)
