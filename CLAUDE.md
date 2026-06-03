@@ -471,15 +471,21 @@ conversación viva. Tres añadidos:
   (`Tty:false, OpenStdin:true, StdinOnce:false, AttachStdin:true,
   AttachStdout:true, AttachStderr:true`).
 
-- **Nuevo push `contact_profile:updated`** (control → supervisor →
-  container MCP). Mismo patrón que `memory:updated`:
-  `client.onPush<ContactProfileUpdatedPush>(...) → mcp.forwardPushToContainer(...)`.
-  El payload lleva `agent_id` + `contact_id` + `content_hash` +
-  `updated_at`. El MCP bridge dentro del container solo lo loguea
-  hoy (ver follow-up sobre `resources` capability en kj-backend
-  CLAUDE.md). Funcionalmente el sistema ya está correcto porque
-  `user_get` siempre round-trippea a BD; este push es la señal
-  proactiva pendiente.
+- **Push `contact_profile:updated`** (control → supervisor →
+  container MCP). Se implementó con el patrón de `memory:updated`
+  (`client.onPush<ContactProfileUpdatedPush>(...) →
+  mcp.forwardPushToContainer(...)`), pero **quedó obsoleto el
+  2026-06-03**: el aviso de "tus notas cambiaron" ya **no viaja por
+  este push**. El backend lo materializa como un mensaje SYSTEM
+  persistido en BD que antepone como `<system-reminder>` al próximo
+  `agent:input` real (ver `kj-backend/CLAUDE.md` y `kj-agent-base`
+  Hito 7 — por qué `resources` capability y la inyección de turno
+  por stdin se descartaron). El backend **ya no emite** este push,
+  así que el handler `onPush('contact_profile:updated')` del
+  supervisor queda **inerte**. Limpieza pendiente menor: borrar ese
+  handler + `ContactProfileUpdatedPush` del `protocol.ts` cuando se
+  toque la siguiente vez. El relay de `memory:updated` sigue vivo
+  (aún no migrado al patrón SYSTEM).
 
 ### Hito 8 — Pendientes futuros
 
