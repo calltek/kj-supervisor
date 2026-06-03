@@ -162,7 +162,7 @@ export class AgentSpawnHandler {
                 this.status.push({
                     agent_id: payload.agent_id,
                     status: 'SPAWNING',
-                    last_action: `seeding ${payload.memories.length} memorie(s)`,
+                    last_action: `seeding ${payload.memories.length} memorie(s), ${payload.skills.length} skill(s)`,
                     last_action_at: Date.now(),
                 })
                 // Always purge .claude/memories/ first, even when the
@@ -177,6 +177,28 @@ export class AgentSpawnHandler {
                         path: m.path,
                         content: m.content,
                         readonly: m.readonly,
+                    })),
+                })
+
+                // Seed skills the same way: each entry's `path` is
+                // already <name>/SKILL.md (the control synthesised the
+                // frontmatter), dropped under .claude/skills/ where
+                // Claude Code auto-discovers them. Purge first so an
+                // unassigned/renamed/archived skill disappears. NOTE:
+                // syncBuiltinSkills in the agent wrapper also writes
+                // under .claude/skills/ at boot (e.g. kj-mcp) — purge
+                // here only clears operator skills the supervisor owns;
+                // the wrapper re-lays its built-ins after. They don't
+                // collide as long as operator skill names never shadow a
+                // built-in (kj-mcp).
+                await this.docker.seedVolumeFiles({
+                    volume_name: homeVolume,
+                    target_dir: '.claude/skills',
+                    purge: true,
+                    files: payload.skills.map((s) => ({
+                        path: s.path,
+                        content: s.content,
+                        readonly: true,
                     })),
                 })
 
@@ -203,12 +225,12 @@ export class AgentSpawnHandler {
                     ],
                 })
             } catch (err) {
-                log.error({ err: errMessage(err) }, 'memory seed failed')
+                log.error({ err: errMessage(err) }, 'volume seed failed')
                 this.status.push({
                     agent_id: payload.agent_id,
                     status: 'ERROR',
                     container_id: null,
-                    last_action: `memory seed failed: ${errMessage(err)}`,
+                    last_action: `volume seed failed: ${errMessage(err)}`,
                     last_action_at: Date.now(),
                 })
                 return

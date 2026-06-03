@@ -317,6 +317,15 @@ El supervisor las escribe al volumen ANTES de levantar el container. El
 agente Claude **dentro** del container no habla con el backend — solo
 lee de su volumen local. Defensa en profundidad.
 
+**Estado (2026-06-03)**: `agent-spawn.handler` siembra **ambos**:
+`memories[]` → `.claude/memories/` y `skills[]` → `.claude/skills/`
+(cada skill ya llega como `<name>/SKILL.md` con su frontmatter
+sintetizado por el control; el supervisor solo lo deposita). Purga
+previa en los dos directorios para limpiar tras unassign/rename/
+archive. Nota: `syncBuiltinSkills` del wrapper re-escribe sus
+built-in (kj-mcp) al boot, **después** del purge — no colisionan
+mientras los nombres de skill de operador no choquen con un built-in.
+
 ### `agent_token` solo viaja una vez
 El control responde el `agent_token` en el ack de `server:hello` solo
 si el supervisor entró con `provisioning_token`. **Guárdalo a disco

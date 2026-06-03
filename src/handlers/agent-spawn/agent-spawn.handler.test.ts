@@ -257,6 +257,52 @@ describe('AgentSpawnHandler', () => {
         expect(docker.pulled[0]?.auth).toBeUndefined()
     })
 
+    test('seeds skills into .claude/skills before starting the container', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        await handler.handle(
+            makePayload({
+                // non-alpine image → real volume gets seeded.
+                image_tag: 'ghcr.io/calltek/kj-agent-base:latest',
+                skills: [
+                    { path: 'code-review/SKILL.md', content: '---\nname: code-review\n---\nbody' },
+                ],
+            })
+        )
+        await waitForFinalStatus(client, 'RUNNING')
+
+        const skillSeed = docker.seeded.find((s) => s.target_dir === '.claude/skills')
+        expect(skillSeed).toBeDefined()
+        expect(skillSeed?.files).toHaveLength(1)
+        expect((skillSeed?.files[0] as { path: string }).path).toBe('code-review/SKILL.md')
+    })
+
+    test('still purges .claude/skills when the payload has zero skills', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        // non-alpine image → real volume; skills: [] by default.
+        await handler.handle(makePayload({ image_tag: 'ghcr.io/calltek/kj-agent-base:latest' }))
+        await waitForFinalStatus(client, 'RUNNING')
+
+        const skillSeed = docker.seeded.find((s) => s.target_dir === '.claude/skills')
+        expect(skillSeed).toBeDefined()
+        expect(skillSeed?.files).toHaveLength(0)
+    })
+
     test('image pull failure pushes ERROR (ack still accepts)', async () => {
         const docker = new FakeDocker()
         docker.next_pull_error = new Error('manifest unknown')
