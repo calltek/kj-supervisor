@@ -471,21 +471,26 @@ conversación viva. Tres añadidos:
   (`Tty:false, OpenStdin:true, StdinOnce:false, AttachStdin:true,
   AttachStdout:true, AttachStderr:true`).
 
-- **Push `contact_profile:updated`** (control → supervisor →
-  container MCP). Se implementó con el patrón de `memory:updated`
-  (`client.onPush<ContactProfileUpdatedPush>(...) →
-  mcp.forwardPushToContainer(...)`), pero **quedó obsoleto el
-  2026-06-03**: el aviso de "tus notas cambiaron" ya **no viaja por
-  este push**. El backend lo materializa como un mensaje SYSTEM
-  persistido en BD que antepone como `<system-reminder>` al próximo
-  `agent:input` real (ver `kj-backend/CLAUDE.md` y `kj-agent-base`
-  Hito 7 — por qué `resources` capability y la inyección de turno
-  por stdin se descartaron). El backend **ya no emite** este push,
-  así que el handler `onPush('contact_profile:updated')` del
-  supervisor queda **inerte**. Limpieza pendiente menor: borrar ese
-  handler + `ContactProfileUpdatedPush` del `protocol.ts` cuando se
-  toque la siguiente vez. El relay de `memory:updated` sigue vivo
-  (aún no migrado al patrón SYSTEM).
+- **Pushes `contact_profile:updated` y `memory:updated` — obsoletos
+  (2026-06-03).** Ambos eran log-only end-to-end (el supervisor los
+  reenviaba al container vía `mcp.forwardPushToContainer` y el MCP
+  bridge solo los logueaba). El backend ya **no los emite**: el aviso
+  de "tu nota / memoria cambió, reléela" se materializa como un
+  mensaje SYSTEM persistido en BD que el backend antepone como
+  `<system-reminder>` al próximo `agent:input` real (ver
+  `kj-backend/CLAUDE.md` y `kj-agent-base` Hito 7 — por qué
+  `resources` capability y la inyección de turno por stdin se
+  descartaron). Estado en el supervisor:
+  - `contact_profile:updated`: handler `onPush` **eliminado** +
+    `ContactProfileUpdatedPush` fuera del `protocol.ts` (del
+    backend; la copia generada aquí se purga al próximo
+    `pull-protocol`).
+  - `memory:updated`: el handler `onPush('memory:updated')` sigue en
+    `main.ts` pero queda **inerte** (el backend no emite). Limpieza
+    pendiente menor: borrarlo + `MemoryUpdatedPush` en la siguiente
+    pasada del protocolo.
+  La invalidación real del volumen del container nunca dependió de
+  estos pushes — va por `Agent.sync_pending` + el ciclo de sync.
 
 ### Hito 8 — Pendientes futuros
 

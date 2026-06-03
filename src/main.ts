@@ -41,7 +41,6 @@ import {
     type AgentSpawnPayload,
     type AgentStopPayload,
     type AgentSyncPayload,
-    type ContactProfileUpdatedPush,
     type ContainerView,
     type ControlCommandAck,
     type McpRequestAck,
@@ -216,15 +215,11 @@ async function main(): Promise<void> {
         mcp.forwardPushToContainer(agent_id, 'memory:updated', rest)
     })
 
-    // Same pattern for contact-profile: when the operator (or another
-    // caller on the control side) rewrote the per-(agent, contact)
-    // notes, the MCP server inside the container needs to know so
-    // Claude Code drops its cached `user_get` view and re-reads on
-    // the next turn.
-    client.onPush<ContactProfileUpdatedPush>('contact_profile:updated', (payload) => {
-        const { agent_id, ...rest } = payload
-        mcp.forwardPushToContainer(agent_id, 'contact_profile:updated', rest)
-    })
+    // NOTE: the `contact_profile:updated` push was removed 2026-06-03.
+    // The backend no longer emits it — the "operator edited the
+    // contact's notes, re-read them" signal is now a persisted SYSTEM
+    // message it prepends as a <system-reminder> to the next real
+    // agent:input. See kj-backend CLAUDE.md (contact-profile).
 
     let healthHandle: HealthLoopHandle | null = null
     let serverMetricsHandle: ServerMetricsHandle | null = null
