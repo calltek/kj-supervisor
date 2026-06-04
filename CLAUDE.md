@@ -343,6 +343,34 @@ Si `agent:spawn` se manda durante una desconexión, no se acumula. Al
 reconectar, el operador (o el panel) reintenta. Lo cubre la
 reconciliación + decisión humana.
 
+### El mapa `session→conversation` se pre-siembra desde el control (2026-06-04)
+`AgentStreamManager` mapea el `session_id` de cada conversación a su
+`conversation_id` (BD) para estampar `agent:output` con la conversación
+correcta. Ese mapa se poblaba **solo** al recibir un `agent:input`, así
+que tras un respawn del agente o un restart del supervisor nacía vacío
+→ el `agent:output` salía sin `conversation_id` → el control caía a un
+routing por "la conversación más reciente" (y antes, peor: fan-out que
+duplicaba con >1 operador interno).
+
+Fix: `agent:spawn` y `agent:sync` ahora llevan `conversations[]`
+(`AgentConversationRoute[]` = session_id→conversation_id de las OPEN del
+agente). `attach()` siembra `conversation_id_by_session` con ellas, así
+el output va etiquetado desde el primer turno del run, sin esperar un
+input. (El handler de `agent:image:update` recrea el stream pero su
+payload no trae `conversations[]` — ese primer output cae al fallback
+del control; mejora menor pendiente.) Ver kj-backend §6 decisión
+2026-06-04 (canales) para la otra capa del fix.
+
+### Canales externos: el supervisor NO los toca (2026-06-04)
+El conector de cada transporte (Telegram/…) vive **en el backend**
+(`providers/channel-transport/`), no en el supervisor ni en un MCP
+vecino al agente. El agente envía/recibe por canales vía la tool MCP
+`channel_send` (sale por `mcp:request` como cualquier otra) y el
+webhook entrante llega directo al backend. El supervisor solo
+reenvía `mcp:request` y entrega el `agent:input` resultante — agnóstico
+al transporte. (Si la escala lo pide algún día, el conector podría
+moverse a un `kj-channel-core` MCP en el VPS; hoy centralizado.)
+
 ---
 
 ## 9. Hoja de ruta (6 hitos)
