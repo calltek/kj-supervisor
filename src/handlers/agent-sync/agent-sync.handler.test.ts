@@ -57,12 +57,14 @@ describe('AgentSyncHandler', () => {
                     container_id: 'c-1',
                     session_id: 'sess-1',
                     oauth_token: 'tok-1',
+                    conversations: [],
                 },
                 {
                     agent_id: 2,
                     container_id: 'c-2',
                     session_id: 'sess-2',
                     oauth_token: 'tok-2',
+                    conversations: [],
                 },
             ],
         }
@@ -93,12 +95,14 @@ describe('AgentSyncHandler', () => {
                     container_id: 'c-broken',
                     session_id: 'sess-1',
                     oauth_token: 'tok-1',
+                    conversations: [],
                 },
                 {
                     agent_id: 2,
                     container_id: 'c-ok',
                     session_id: 'sess-2',
                     oauth_token: 'tok-2',
+                    conversations: [],
                 },
             ],
         }
@@ -133,6 +137,7 @@ describe('AgentSyncHandler', () => {
                     container_id: 'c-1',
                     session_id: 'sess-1',
                     oauth_token: 'tok-1',
+                    conversations: [],
                 },
             ],
         })

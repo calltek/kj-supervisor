@@ -83,6 +83,7 @@ export class AgentSyncHandler {
             agent_id: entry.agent_id,
             container_id: entry.container_id,
             session_id: entry.session_id,
+            conversations: entry.conversations,
         })
     }
 }

@@ -140,6 +140,14 @@ export class AgentStreamManager {
         agent_id: number
         container_id: string
         session_id: string
+        /**
+         * OPEN conversation routes (session_id → conversation_id) from
+         * the control. Pre-seeds the routing map so agent:output gets
+         * stamped with the right conversation_id from the first turn,
+         * even before any agent:input this run. Optional/empty for old
+         * control versions or agents with no open conversations.
+         */
+        conversations?: ReadonlyArray<{ session_id: string; conversation_id: number }>
     }): Promise<void> {
         if (this.streams.has(opts.agent_id)) {
             this.logger.debug({ agent_id: opts.agent_id }, 'attach skipped — already streaming')
@@ -174,7 +182,9 @@ export class AgentStreamManager {
             session_id: opts.session_id,
             stream,
             seq: 0,
-            conversation_id_by_session: new Map(),
+            conversation_id_by_session: new Map(
+                (opts.conversations ?? []).map((c) => [c.session_id, c.conversation_id])
+            ),
             contact_id_by_session: new Map(),
             last_active_session_id: null,
         }

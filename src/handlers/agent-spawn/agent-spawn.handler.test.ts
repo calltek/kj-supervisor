@@ -117,6 +117,7 @@ function makePayload(overrides: Partial<AgentSpawnPayload> = {}): AgentSpawnPayl
         env: { KJ_AGENT_ID: '42' },
         skills: [],
         memories: [],
+        conversations: [],
         resources: { memory_mb: 128, cpu: 0.25 },
         ...overrides,
     }

@@ -287,6 +287,7 @@ export class AgentSpawnHandler {
             agent_id: payload.agent_id,
             container_id,
             session_id: payload.session_id,
+            conversations: payload.conversations,
         })
 
         log.info({ container_id }, 'agent container running')
