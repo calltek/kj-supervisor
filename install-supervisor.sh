@@ -24,6 +24,10 @@ SUPERVISOR_IMAGE="${KJ_SUPERVISOR_IMAGE:-ghcr.io/calltek/kj-supervisor:latest}"
 SUPERVISOR_CONTAINER="${KJ_SUPERVISOR_CONTAINER:-kj-supervisor}"
 CONFIG_DIR="${KJ_CONFIG_DIR:-/etc/kj-supervisor}"
 HANDSHAKE_TIMEOUT_SECONDS="${KJ_INSTALL_HANDSHAKE_TIMEOUT:-30}"
+# Where the `kujira` control CLI is fetched from (same host as this
+# installer). Override for staging/self-hosted mirrors.
+KJ_CLI_URL="${KJ_CLI_URL:-https://kujira.run/kujira}"
+KJ_CLI_PATH="${KJ_CLI_PATH:-/usr/local/bin/kujira}"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Logging helpers
@@ -150,6 +154,16 @@ else
     ok "$CONFIG_DIR already exists"
 fi
 
+# Persist the non-secret config the `kujira` CLI needs to operate the
+# container (start/recreate). The agent_token stays in its own file —
+# this one carries no secrets. Rewritten on every install so upgrades to
+# the image / control URL are picked up.
+printf 'KJ_CONTROL_URL=%s\nKJ_SUPERVISOR_IMAGE=%s\nKJ_SUPERVISOR_CONTAINER=%s\nKJ_CONFIG_DIR=%s\n' \
+    "$KJ_CONTROL_URL" "$SUPERVISOR_IMAGE" "$SUPERVISOR_CONTAINER" "$CONFIG_DIR" \
+    | $SUDO tee "$CONFIG_DIR/supervisor.env" >/dev/null
+$SUDO chmod 0600 "$CONFIG_DIR/supervisor.env"
+ok "Wrote $CONFIG_DIR/supervisor.env"
+
 # ──────────────────────────────────────────────────────────────────────────
 # 4. Pull image
 # ──────────────────────────────────────────────────────────────────────────
@@ -199,6 +213,20 @@ $SUDO docker run -d \
 ok "Container started"
 
 # ──────────────────────────────────────────────────────────────────────────
+# 5b. Install the `kujira` control CLI
+# ──────────────────────────────────────────────────────────────────────────
+
+log "Installing the kujira CLI to $KJ_CLI_PATH"
+if curl -fsSL "$KJ_CLI_URL" -o /tmp/kujira.$$ 2>/dev/null; then
+    $SUDO install -m 0755 /tmp/kujira.$$ "$KJ_CLI_PATH"
+    rm -f /tmp/kujira.$$
+    ok "Installed kujira CLI ($KJ_CLI_PATH)"
+else
+    warn "Could not fetch the kujira CLI from $KJ_CLI_URL — skipping."
+    warn "You can still operate the supervisor with raw docker commands."
+fi
+
+# ──────────────────────────────────────────────────────────────────────────
 # 6. Verify handshake
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -223,9 +251,12 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   Image:      $SUPERVISOR_IMAGE
   Config:     $CONFIG_DIR
 
-  Logs:       $SUDO docker logs -f $SUPERVISOR_CONTAINER
-  Stop:       $SUDO docker stop $SUPERVISOR_CONTAINER
-  Restart:    $SUDO docker restart $SUPERVISOR_CONTAINER
+  Manage it with the kujira CLI:
+    Status:    kujira status     (is it online?)
+    Logs:      kujira logs -f
+    Restart:   kujira restart
+    Stop:      kujira stop
+    Start:     kujira start
 ═══════════════════════════════════════════════════════════════════════════
 EOF
         exit 0

@@ -529,6 +529,44 @@ conversación viva. Tres añadidos:
   La invalidación real del volumen del container nunca dependió de
   estos pushes — va por `Agent.sync_pending` + el ciclo de sync.
 
+### Hito 10 — CLI `kujira` para operar el supervisor ✅ (hecho 2026-06-05)
+
+El supervisor se instala como container Docker (`docker run -d
+--restart unless-stopped`), pero el cliente no tenía un protocolo de
+operación: tocaba recordar comandos `docker` crudos, y "¿está online?"
+solo se sabía con `docker logs | grep 'handshake complete'` o mirando
+la BD del control. Ahora hay un CLI **`kujira`** (script bash en el
+repo, instalado en `/usr/local/bin/kujira` por el `install.sh`):
+
+- Verbos `start|stop|restart|enable|disable|status|logs` que envuelven
+  el container. `enable/disable` togglean `--restart` (auto-arranque al
+  boot del VPS, no es stop). `start` recrea el container si no existe.
+- **`status` certifica online de verdad**: container vivo + handshake
+  reciente con el control. Como el supervisor es WebSocket-only (sin
+  endpoint HTTP local), `status` analiza `docker logs` buscando el
+  ÚLTIMO marcador entre `handshake complete` (online) y `socket
+  disconnected`/`AUTH_INVALID`/`connect_error` (offline). Exit codes
+  deterministas: 0 online · 1 offline/connecting · 2 parado · 3 no
+  instalado.
+- **Config en `/etc/kj-supervisor/supervisor.env`** (system-wide, junto
+  al `token`), escrita por el `install.sh` con `KJ_CONTROL_URL`,
+  `KJ_SUPERVISOR_IMAGE`, `KJ_SUPERVISOR_CONTAINER`, `KJ_CONFIG_DIR`. Sin
+  secretos — el `agent_token` sigue en `/etc/kj-supervisor/token` (0600).
+  `kujira` la lee para recrear el container en `start`.
+- El `install.sh` descarga el CLI de `KJ_CLI_URL`
+  (`https://kujira.run/kujira` por defecto) — necesario porque el
+  instalador suele venir por `curl | sh` y no tiene el fichero en disco.
+  **Pendiente de despliegue**: publicar `kujira` en ese host junto al
+  `install-supervisor.sh`.
+- **Fragilidad conocida**: `status` depende de las frases-marcador de
+  los logs (`main.ts` / `control.client.ts`). Centralizadas en
+  constantes al inicio del CLI (`MARK_ONLINE`, `MARK_DISCONNECT`,
+  `MARK_AUTHFAIL`). Mejora futura: un health endpoint local en el
+  supervisor haría `status` infalible.
+
+Verificado en local con shellcheck limpio + container dummy (ONLINE/
+OFFLINE/STOPPED/NOT-INSTALLED + enable/disable/start/stop/logs).
+
 ### Hito 8 — Pendientes futuros
 
 - **Limpiar el flujo WS-provisioning muerto**: `auth.ts` y

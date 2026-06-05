@@ -19,7 +19,29 @@ curl -fsSL https://kujira.run/install-supervisor.sh | \
 
 El script detecta el OS, instala Docker si falta, crea
 `/etc/kj-supervisor/` y lanza el container `kj-supervisor` con la
-imagen `ghcr.io/calltek/kj-supervisor:latest`.
+imagen `ghcr.io/calltek/kj-supervisor:latest`. También instala el CLI
+`kujira` en `/usr/local/bin/` para operarlo.
+
+## Operación con `kujira`
+
+Tras instalar, el supervisor se gestiona con el CLI `kujira` (envoltorio
+fino sobre el container Docker — no hay que recordar comandos `docker`):
+
+| Comando | Qué hace |
+|---|---|
+| `kujira status` | ¿Está **online**? (container vivo + handshake con el control). Exit 0 online · 1 offline · 2 parado · 3 no instalado. |
+| `kujira start` | Arranca el supervisor (recrea el container si no existe). |
+| `kujira stop` | Lo para. |
+| `kujira restart` | Lo reinicia. |
+| `kujira enable` | Que arranque solo al reiniciar el VPS. |
+| `kujira disable` | Que **no** arranque al boot (sigue vivo hasta el próximo `stop`). |
+| `kujira logs [-f]` | Logs recientes (`-f` para seguir). |
+
+`kujira status` es la forma de **certificar que el supervisor está
+conectado al control**: lee el handshake de los logs del container (el
+supervisor es WebSocket-only, sin endpoint HTTP local). La config que
+usa vive en `/etc/kj-supervisor/supervisor.env` (la escribe el
+instalador; sin secretos — el `agent_token` sigue en su fichero aparte).
 
 ## Quickstart (dev local sin Docker)
 

@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# kujira — control CLI for the kj-supervisor on a client VPS.
+#
+# Thin wrapper over the supervisor's Docker container. The supervisor
+# itself runs as `docker run -d --restart unless-stopped` (set up by
+# install-supervisor.sh); this CLI gives the operator memorable verbs
+# instead of raw docker commands.
+#
+#   kujira start | stop | restart | enable | disable | status | logs
+#
+# Config lives in /etc/kj-supervisor/supervisor.env (written by the
+# installer). The agent_token stays in /etc/kj-supervisor/token and is
+# never read here.
+#
+# `status` exit codes (for scripting):
+#   0  online   — container running + handshake with the control
+#   1  offline  — running but not connected (connecting / auth error)
+#   2  stopped  — container exists but is not running
+#   3  absent   — container does not exist (run the installer)
+
+set -euo pipefail
+
+# ──────────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────────
+
+CONFIG_DIR_DEFAULT="/etc/kj-supervisor"
+ENV_FILE="${KJ_CONFIG_DIR:-$CONFIG_DIR_DEFAULT}/supervisor.env"
+
+# Defaults — overridden by supervisor.env when present.
+KJ_CONTROL_URL="${KJ_CONTROL_URL:-}"
+KJ_SUPERVISOR_IMAGE="${KJ_SUPERVISOR_IMAGE:-ghcr.io/calltek/kj-supervisor:latest}"
+KJ_SUPERVISOR_CONTAINER="${KJ_SUPERVISOR_CONTAINER:-kj-supervisor}"
+KJ_CONFIG_DIR="${KJ_CONFIG_DIR:-$CONFIG_DIR_DEFAULT}"
+
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+CONTAINER="$KJ_SUPERVISOR_CONTAINER"
+IMAGE="$KJ_SUPERVISOR_IMAGE"
+CONFIG_DIR="$KJ_CONFIG_DIR"
+CONTROL_URL="$KJ_CONTROL_URL"
+
+# Log markers — kept in sync with the supervisor (main.ts /
+# control.client.ts). `status` reads these from `docker logs` since the
+# supervisor exposes no local health endpoint (it's WebSocket-only).
+MARK_ONLINE="handshake complete"
+MARK_DISCONNECT="socket disconnected"
+MARK_AUTHFAIL="AUTH_INVALID\|AUTH_MISSING\|connect_error\|server:hello ack failed"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+if [ -t 1 ]; then
+    C_RESET=$'\033[0m'; C_RED=$'\033[1;31m'; C_GRN=$'\033[1;32m'
+    C_YEL=$'\033[1;33m'; C_BLU=$'\033[1;34m'; C_DIM=$'\033[2m'
+else
+    C_RESET=""; C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""
+fi
+
+err() { printf '%skujira:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+
+# Run docker, with sudo only when needed (root → none; otherwise sudo if
+# the daemon isn't reachable as the current user).
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && ! docker info >/dev/null 2>&1; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    fi
+fi
+d() { $SUDO docker "$@"; }
+
+require_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        err "docker is not installed. Run the installer first."
+        exit 3
+    fi
+}
+
+container_exists() { d inspect "$CONTAINER" >/dev/null 2>&1; }
+container_running() {
+    [ "$(d inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]
+}
+restart_policy() {
+    d inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER" 2>/dev/null
+}
+
+# Recreate the container from supervisor.env (mirrors the installer's
+# docker run). The token already lives on disk; no provisioning token is
+# injected — a re-run just reuses it.
+run_container() {
+    if [ -z "$CONTROL_URL" ]; then
+        err "KJ_CONTROL_URL is not set (missing or empty $ENV_FILE). Run the installer."
+        exit 3
+    fi
+    d run -d \
+        --name "$CONTAINER" \
+        --restart unless-stopped \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$CONFIG_DIR":/etc/kj-supervisor \
+        -e "KJ_CONTROL_URL=$CONTROL_URL" \
+        -e "KJ_SUPERVISOR_CONTAINER=$CONTAINER" \
+        "$IMAGE" >/dev/null
+}
+
+# ──────────────────────────────────────────────────────────────────────────
+# Verbs
+# ──────────────────────────────────────────────────────────────────────────
+
+cmd_start() {
+    require_docker
+    if container_exists; then
+        if container_running; then
+            printf '%s already running.\n' "$CONTAINER"
+            return 0
+        fi
+        d start "$CONTAINER" >/dev/null
+        printf '%s✓%s started %s\n' "$C_GRN" "$C_RESET" "$CONTAINER"
+    else
+        printf 'Container not found — creating %s from %s\n' "$CONTAINER" "$ENV_FILE"
+        run_container
+        printf '%s✓%s created and started %s\n' "$C_GRN" "$C_RESET" "$CONTAINER"
+    fi
+    printf "%sRun 'kujira status' to check the handshake with the control.%s\n" "$C_DIM" "$C_RESET"
+}
+
+cmd_stop() {
+    require_docker
+    container_exists || { err "container $CONTAINER does not exist."; exit 3; }
+    d stop "$CONTAINER" >/dev/null
+    printf '%s✓%s stopped %s\n' "$C_GRN" "$C_RESET" "$CONTAINER"
+}
+
+cmd_restart() {
+    require_docker
+    container_exists || { err "container $CONTAINER does not exist. Run 'kujira start'."; exit 3; }
+    d restart "$CONTAINER" >/dev/null
+    printf '%s✓%s restarted %s\n' "$C_GRN" "$C_RESET" "$CONTAINER"
+    printf "%sRun 'kujira status' to confirm it reconnected.%s\n" "$C_DIM" "$C_RESET"
+}
+
+cmd_enable() {
+    require_docker
+    container_exists || { err "container $CONTAINER does not exist. Run 'kujira start'."; exit 3; }
+    d update --restart unless-stopped "$CONTAINER" >/dev/null
+    printf '%s✓%s %s will start automatically on boot.\n' "$C_GRN" "$C_RESET" "$CONTAINER"
+}
+
+cmd_disable() {
+    require_docker
+    container_exists || { err "container $CONTAINER does not exist."; exit 3; }
+    d update --restart no "$CONTAINER" >/dev/null
+    printf '%s✓%s %s will NOT start on boot (still running until you stop it).\n' "$C_YEL" "$C_RESET" "$CONTAINER"
+}
+
+cmd_logs() {
+    require_docker
+    container_exists || { err "container $CONTAINER does not exist."; exit 3; }
+    if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--follow" ]; then
+        d logs -f --tail 100 "$CONTAINER"
+    else
+        d logs --tail 100 "$CONTAINER"
+    fi
+}
+
+cmd_status() {
+    require_docker
+    if ! container_exists; then
+        printf '%s● NOT INSTALLED%s — container %s does not exist.\n' "$C_RED" "$C_RESET" "$CONTAINER"
+        printf '  Run the installer (install-supervisor.sh) to set it up.\n'
+        exit 3
+    fi
+
+    local policy uptime enabled_str
+    policy="$(restart_policy)"
+    case "$policy" in
+        unless-stopped|always) enabled_str="enabled (auto-start on boot)" ;;
+        *)                     enabled_str="disabled (no auto-start)" ;;
+    esac
+
+    if ! container_running; then
+        printf '%s● STOPPED%s — %s exists but is not running.\n' "$C_YEL" "$C_RESET" "$CONTAINER"
+        printf '  %-12s %s\n' "Auto-start:" "$enabled_str"
+        printf "  Run 'kujira start' to bring it up.\n"
+        exit 2
+    fi
+
+    # Running. Decide online vs offline from the log markers: find the
+    # most recent connection-defining line. ONLINE iff the last such line
+    # is the handshake (no later disconnect/auth error).
+    local logs last
+    logs="$(d logs --tail 200 "$CONTAINER" 2>&1 || true)"
+    last="$(printf '%s\n' "$logs" | grep -nE "$MARK_ONLINE|$MARK_DISCONNECT|$MARK_AUTHFAIL" | tail -1 || true)"
+
+    # Container uptime (best-effort, no external deps).
+    uptime="$(d inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null | cut -dT -f1,2 | tr 'T' ' ' | cut -d. -f1)"
+
+    print_common() {
+        printf '  %-12s %s\n' "Container:" "$CONTAINER"
+        printf '  %-12s %s\n' "Image:" "$IMAGE"
+        printf '  %-12s %s\n' "Control:" "${CONTROL_URL:-<unknown>}"
+        printf '  %-12s %s\n' "Started:" "${uptime:-?} (UTC)"
+        printf '  %-12s %s\n' "Auto-start:" "$enabled_str"
+    }
+
+    if printf '%s' "$last" | grep -q "$MARK_ONLINE"; then
+        printf '%s● ONLINE%s — connected to the control and handshaked.\n' "$C_GRN" "$C_RESET"
+        print_common
+        exit 0
+    elif [ -n "$last" ]; then
+        printf '%s● OFFLINE%s — running but not connected to the control.\n' "$C_RED" "$C_RESET"
+        print_common
+        printf '  %-12s %s\n' "Last event:" "$(printf '%s' "$last" | sed 's/^[0-9]*://' | tail -c 120)"
+        printf "  %sCheck 'kujira logs' (auth token / control URL / network).%s\n" "$C_DIM" "$C_RESET"
+        exit 1
+    else
+        # Running but no marker yet — likely still booting/connecting.
+        printf '%s● CONNECTING%s — started, waiting for the handshake.\n' "$C_YEL" "$C_RESET"
+        print_common
+        printf "  %sRe-run 'kujira status' in a few seconds, or watch 'kujira logs -f'.%s\n" "$C_DIM" "$C_RESET"
+        exit 1
+    fi
+}
+
+usage() {
+    cat <<EOF
+${C_BLU}kujira${C_RESET} — control the kj-supervisor on this machine.
+
+Usage: kujira <command>
+
+Commands:
+  start            Start the supervisor (creates the container if missing).
+  stop             Stop the supervisor.
+  restart          Restart the supervisor.
+  enable           Start automatically on boot (restart=unless-stopped).
+  disable          Don't start on boot (keeps running until you stop it).
+  status           Show whether it's online (connected to the control).
+  logs [-f]        Show recent logs (-f to follow).
+  version          Show the CLI / image reference.
+  help             This help.
+
+Config: $ENV_FILE
+EOF
+}
+
+cmd_version() {
+    printf 'kujira CLI · container=%s · image=%s\n' "$CONTAINER" "$IMAGE"
+}
+
+# ──────────────────────────────────────────────────────────────────────────
+# Dispatch
+# ──────────────────────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+    start)            cmd_start ;;
+    stop)             cmd_stop ;;
+    restart)          cmd_restart ;;
+    enable)           cmd_enable ;;
+    disable)          cmd_disable ;;
+    status)           cmd_status ;;
+    logs)             shift; cmd_logs "$@" ;;
+    version|--version|-v) cmd_version ;;
+    help|--help|-h)   usage ;;
+    *)                err "unknown command: $1"; echo; usage; exit 64 ;;
+esac
