@@ -162,7 +162,7 @@ export class AgentSpawnHandler {
                 this.status.push({
                     agent_id: payload.agent_id,
                     status: 'SPAWNING',
-                    last_action: `seeding ${payload.memories.length} memorie(s), ${payload.skills.length} skill(s)`,
+                    last_action: `seeding ${payload.memories.length} memorie(s), ${payload.skills.length} skill(s), ${(payload.mcp_servers ?? []).length} mcp(s)`,
                     last_action_at: Date.now(),
                 })
                 // Always purge .claude/memories/ first, even when the
@@ -200,6 +200,26 @@ export class AgentSpawnHandler {
                         content: s.content,
                         readonly: true,
                     })),
+                })
+
+                // Materialise the assigned external MCP servers to
+                // .kj/mcp-servers.json. We write the raw list (NOT a
+                // .mcp.json) — agent-base owns the merge with the
+                // built-in kj-mcp and knows its local port. Always
+                // written (even as []) so an unassign clears it. env
+                // values arrive decrypted; the file lives only in the
+                // agent's own volume.
+                const mcpServers = payload.mcp_servers ?? []
+                await this.docker.seedVolumeFiles({
+                    volume_name: homeVolume,
+                    target_dir: '.kj',
+                    files: [
+                        {
+                            path: 'mcp-servers.json',
+                            content: JSON.stringify(mcpServers, null, 2),
+                            readonly: true,
+                        },
+                    ],
                 })
 
                 // Also seed a CLAUDE.md "project memory" index at the

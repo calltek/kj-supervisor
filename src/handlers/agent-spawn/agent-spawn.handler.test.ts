@@ -304,6 +304,61 @@ describe('AgentSpawnHandler', () => {
         expect(skillSeed?.files).toHaveLength(0)
     })
 
+    test('materialises mcp_servers into .kj/mcp-servers.json', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        await handler.handle(
+            makePayload({
+                image_tag: 'ghcr.io/calltek/kj-agent-base:latest',
+                mcp_servers: [
+                    {
+                        name: 'github',
+                        transport: 'STDIO',
+                        command: 'npx',
+                        args: ['-y', '@modelcontextprotocol/server-github'],
+                        env: { GITHUB_TOKEN: 'ghp_decrypted' },
+                    },
+                ],
+            })
+        )
+        await waitForFinalStatus(client, 'RUNNING')
+
+        const mcpSeed = docker.seeded.find((s) => s.target_dir === '.kj')
+        expect(mcpSeed).toBeDefined()
+        const file = mcpSeed?.files[0] as { path: string; content: string }
+        expect(file.path).toBe('mcp-servers.json')
+        const parsed = JSON.parse(file.content) as Array<{ name: string }>
+        expect(parsed).toHaveLength(1)
+        expect(parsed[0].name).toBe('github')
+    })
+
+    test('writes an empty .kj/mcp-servers.json when no servers are assigned', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        // non-alpine image → real volume; mcp_servers omitted by default.
+        await handler.handle(makePayload({ image_tag: 'ghcr.io/calltek/kj-agent-base:latest' }))
+        await waitForFinalStatus(client, 'RUNNING')
+
+        const mcpSeed = docker.seeded.find((s) => s.target_dir === '.kj')
+        expect(mcpSeed).toBeDefined()
+        const file = mcpSeed?.files[0] as { content: string }
+        expect(JSON.parse(file.content)).toEqual([])
+    })
+
     test('image pull failure pushes ERROR (ack still accepts)', async () => {
         const docker = new FakeDocker()
         docker.next_pull_error = new Error('manifest unknown')
