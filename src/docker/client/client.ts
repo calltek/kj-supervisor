@@ -561,6 +561,15 @@ export class KJDocker {
                 lines.push(`chmod 0444 "/v/${targetDir}/${safeName}"`)
             }
         }
+        // The helper runs as root, so everything it creates (the target
+        // dir tree + the files) ends up root:root. But the agent runs as
+        // UID 1000 (`bun`) and must be able to WRITE inside these dirs —
+        // e.g. the wrapper's syncBuiltinSkills() copies image skills into
+        // .claude/skills/ at boot. Without this chown that fails with
+        // EACCES and the base skills/context never land. Chown the whole
+        // target tree to 1000:1000 (readonly files keep their 0444 mode —
+        // ownership and permission bits are independent).
+        lines.push(`chown -R 1000:1000 "/v/${targetDir}"`)
         const script = lines.join('\n')
 
         const container = await this.docker.createContainer({
@@ -584,11 +593,12 @@ export class KJDocker {
                 // 1000) on every directory it touches. The helper
                 // runs as root but the default CapDrop:ALL also
                 // removes CAP_DAC_OVERRIDE, which root needs to write
-                // into a directory it doesn't own. Keep that single
-                // capability so the helper can drop files anywhere
-                // inside /v while still being heavily sandboxed.
+                // into a directory it doesn't own, and CAP_CHOWN, which
+                // it needs to hand the seeded tree back to UID 1000 so
+                // the agent can write into it (syncBuiltinSkills). Keep
+                // just those two so the helper stays heavily sandboxed.
                 CapDrop: ['ALL'],
-                CapAdd: ['DAC_OVERRIDE'],
+                CapAdd: ['DAC_OVERRIDE', 'CHOWN'],
                 SecurityOpt: ['no-new-privileges'],
             },
         })
