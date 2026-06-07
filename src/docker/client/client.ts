@@ -578,6 +578,49 @@ export class KJDocker {
      * directory containing the files stays writable so future seeds
      * (e.g. a content update) can overwrite.
      */
+    /**
+     * Ensure the ROOT of a named volume is owned by UID 1000 (`bun`).
+     *
+     * A named volume is created root:root the first time it's mounted, which
+     * shadows the image's build-time `chown bun:bun /home/agent`. Without
+     * this, the agent (UID 1000) can't mkdir /home/agent/conv/<session> at
+     * runtime → the session cwd never exists → `claude` fails with ENOENT
+     * (posix_spawn) and the agent goes silent. Per-seed chowns only fix the
+     * subdirs they touch, not the root, and don't run at all for agents with
+     * nothing to seed — so this runs unconditionally at spawn.
+     *
+     * Non-recursive: it only fixes the root dir's ownership. The seeded
+     * subtrees keep their own (the seed helper chowns each targetDir), so we
+     * don't disturb the 0444 readonly files.
+     */
+    async ensureVolumeOwnership(volume_name: string): Promise<void> {
+        const helperImage = 'alpine:3.20'
+        const cached = await this.imageExistsLocally(helperImage)
+        if (!cached) await this.pullImage(helperImage, () => {})
+
+        const container = await this.docker.createContainer({
+            Image: helperImage,
+            Cmd: ['sh', '-c', 'chown 1000:1000 /v'],
+            HostConfig: {
+                Binds: [`${volume_name}:/v`],
+                AutoRemove: false,
+                CapAdd: ['CHOWN'],
+            },
+        })
+        try {
+            await container.start()
+            const result = await container.wait()
+            if (result.StatusCode !== 0) {
+                this.logger.warn(
+                    { volume_name, code: result.StatusCode },
+                    'ensureVolumeOwnership helper exited non-zero (agent may hit EACCES)'
+                )
+            }
+        } finally {
+            await container.remove({ force: true }).catch(() => {})
+        }
+    }
+
     async seedVolumeFiles(opts: {
         volume_name: string
         target_dir: string // relative to /v, e.g. ".claude/memories"

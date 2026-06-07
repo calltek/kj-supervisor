@@ -98,6 +98,12 @@ class FakeDocker {
             files: opts.files,
         })
     }
+
+    // Records the spawn's pre-seed `chown 1000:1000 /v` on the home volume.
+    public ownedVolumes: string[] = []
+    async ensureVolumeOwnership(volume_name: string): Promise<void> {
+        this.ownedVolumes.push(volume_name)
+    }
 }
 
 class FakeClient {

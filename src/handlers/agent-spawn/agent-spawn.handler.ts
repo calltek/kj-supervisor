@@ -165,6 +165,12 @@ export class AgentSpawnHandler {
                     last_action: `seeding ${payload.memories.length} memorie(s), ${payload.skills.length} skill(s), ${(payload.mcp_servers ?? []).length} mcp(s)`,
                     last_action_at: Date.now(),
                 })
+                // First: hand the volume root to UID 1000. A named volume is
+                // created root:root, shadowing the image's chown, so without
+                // this the agent can't mkdir its session cwd at runtime and
+                // `claude` dies with ENOENT (silent agent). Must run before
+                // the seeds and unconditionally.
+                await this.docker.ensureVolumeOwnership(homeVolume)
                 // Always purge .claude/memories/ first, even when the
                 // payload has zero memories — that's how we clean up
                 // after the operator unassigns / renames / deletes.
