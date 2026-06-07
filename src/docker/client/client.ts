@@ -6,7 +6,6 @@
  */
 
 import net from 'node:net'
-import { Writable } from 'node:stream'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
@@ -308,9 +307,12 @@ export class KJDocker {
             Cmd: ['/bin/sh', '-c', opts.command],
             AttachStdout: true,
             AttachStderr: true,
-            Tty: false,
+            // Tty:true merges stdout+stderr into a single RAW stream (no 8-byte
+            // multiplex frames), so we read bytes directly — no demux, and no
+            // "(HTTP code 101) unexpected" from mishandling the hijacked socket.
+            Tty: true,
         })
-        const stream = await exec.start({ hijack: true, stdin: false })
+        const stream = (await exec.start({ Tty: true })) as NodeJS.ReadableStream
 
         return await new Promise((resolve, reject) => {
             const chunks: Buffer[] = []
@@ -318,33 +320,25 @@ export class KJDocker {
             let truncated = false
             let settled = false
 
-            // Demux the multiplexed stdout/stderr frames into one buffer.
-            const stdout = new Writable({
-                write: (chunk: Buffer, _enc, cb) => {
-                    if (size < maxBytes) {
-                        const room = maxBytes - size
-                        chunks.push(chunk.subarray(0, room))
-                        if (chunk.length > room) truncated = true
-                        size += Math.min(chunk.length, room)
-                    } else {
-                        truncated = true
-                    }
-                    cb()
-                },
-            })
-            this.docker.modem.demuxStream(stream, stdout, stdout)
+            const collect = (): string => Buffer.concat(chunks).toString('utf8')
 
             const timer = setTimeout(() => {
                 if (settled) return
                 settled = true
-                // Best-effort: there's no exec-kill, but ending the stream
-                // and acking TIMEOUT is enough for the control to react.
-                stream.destroy()
+                ;(stream as unknown as { destroy?: () => void }).destroy?.()
                 resolve({ exit_code: -1, output: collect(), truncated, timedOut: true })
             }, opts.timeout_ms)
 
-            const collect = (): string => Buffer.concat(chunks).toString('utf8')
-
+            stream.on('data', (chunk: Buffer) => {
+                if (size >= maxBytes) {
+                    truncated = true
+                    return
+                }
+                const room = maxBytes - size
+                chunks.push(chunk.subarray(0, room))
+                if (chunk.length > room) truncated = true
+                size += Math.min(chunk.length, room)
+            })
             stream.on('end', () => {
                 if (settled) return
                 settled = true
@@ -361,7 +355,7 @@ export class KJDocker {
                     )
                     .catch(reject)
             })
-            stream.on('error', (err) => {
+            stream.on('error', (err: Error) => {
                 if (settled) return
                 settled = true
                 clearTimeout(timer)
