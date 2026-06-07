@@ -6,6 +6,7 @@
  */
 
 import net from 'node:net'
+import { Writable } from 'node:stream'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
@@ -287,6 +288,86 @@ export class KJDocker {
     /** Get a container's basic state (running, exitCode, etc.). */
     async inspect(container_id: string): Promise<Docker.ContainerInspectInfo> {
         return this.docker.getContainer(container_id).inspect()
+    }
+
+    /**
+     * Run a one-shot command inside a container (`docker exec`) and return its
+     * merged stdout/stderr + exit code. Runs as `/bin/sh -c "<command>"` so a
+     * full shell line works. Captures up to `maxOutputBytes` and truncates the
+     * rest. Kills the exec and resolves `timedOut: true` past `timeout_ms`.
+     */
+    async exec(opts: {
+        container_id: string
+        command: string
+        timeout_ms: number
+        maxOutputBytes?: number
+    }): Promise<{ exit_code: number; output: string; truncated: boolean; timedOut: boolean }> {
+        const maxBytes = opts.maxOutputBytes ?? 64 * 1024
+        const container = this.docker.getContainer(opts.container_id)
+        const exec = await container.exec({
+            Cmd: ['/bin/sh', '-c', opts.command],
+            AttachStdout: true,
+            AttachStderr: true,
+            Tty: false,
+        })
+        const stream = await exec.start({ hijack: true, stdin: false })
+
+        return await new Promise((resolve, reject) => {
+            const chunks: Buffer[] = []
+            let size = 0
+            let truncated = false
+            let settled = false
+
+            // Demux the multiplexed stdout/stderr frames into one buffer.
+            const stdout = new Writable({
+                write: (chunk: Buffer, _enc, cb) => {
+                    if (size < maxBytes) {
+                        const room = maxBytes - size
+                        chunks.push(chunk.subarray(0, room))
+                        if (chunk.length > room) truncated = true
+                        size += Math.min(chunk.length, room)
+                    } else {
+                        truncated = true
+                    }
+                    cb()
+                },
+            })
+            this.docker.modem.demuxStream(stream, stdout, stdout)
+
+            const timer = setTimeout(() => {
+                if (settled) return
+                settled = true
+                // Best-effort: there's no exec-kill, but ending the stream
+                // and acking TIMEOUT is enough for the control to react.
+                stream.destroy()
+                resolve({ exit_code: -1, output: collect(), truncated, timedOut: true })
+            }, opts.timeout_ms)
+
+            const collect = (): string => Buffer.concat(chunks).toString('utf8')
+
+            stream.on('end', () => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                exec
+                    .inspect()
+                    .then((info) =>
+                        resolve({
+                            exit_code: info.ExitCode ?? 0,
+                            output: collect(),
+                            truncated,
+                            timedOut: false,
+                        })
+                    )
+                    .catch(reject)
+            })
+            stream.on('error', (err) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                reject(err)
+            })
+        })
     }
 
     /**

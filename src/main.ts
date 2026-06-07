@@ -24,6 +24,7 @@ import {
 import { KJDocker } from './docker/client/client'
 import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
+import { AgentExecHandler } from './handlers/agent-exec/agent-exec.handler'
 import { AgentImageUpdateHandler } from './handlers/agent-image-update/agent-image-update.handler'
 import { AgentInputHandler } from './handlers/agent-input/agent-input.handler'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
@@ -34,6 +35,8 @@ import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervis
 import { KJLogger } from './logger'
 import {
     type AgentDeletePayload,
+    type AgentExecAck,
+    type AgentExecPayload,
     type AgentImageUpdatePayload,
     type AgentInputPayload,
     type AgentPausePayload,
@@ -159,6 +162,7 @@ async function main(): Promise<void> {
         logger,
     })
     const inputHandler = new AgentInputHandler({ streams, logger })
+    const execHandler = new AgentExecHandler({ docker, logger })
     const syncHandler = new AgentSyncHandler({ streams, logger })
     const oauthExchangeHandler = new OAuthExchangeHandler({ logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
@@ -189,6 +193,9 @@ async function main(): Promise<void> {
     )
     client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) =>
         inputHandler.handle(payload)
+    )
+    client.onCommand<AgentExecPayload, AgentExecAck>('agent:exec', (payload) =>
+        execHandler.handle(payload)
     )
     client.onCommand<AgentSyncPayload, ControlCommandAck>('agent:sync', (payload) =>
         syncHandler.handle(payload)
