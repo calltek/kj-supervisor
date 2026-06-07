@@ -343,8 +343,7 @@ export class KJDocker {
                 if (settled) return
                 settled = true
                 clearTimeout(timer)
-                exec
-                    .inspect()
+                exec.inspect()
                     .then((info) =>
                         resolve({
                             exit_code: info.ExitCode ?? 0,

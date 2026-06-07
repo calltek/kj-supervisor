@@ -7,11 +7,7 @@
 
 import type { KJDocker } from '../../docker/client/client'
 import type { KJLogger } from '../../logger'
-import {
-    type AgentExecAck,
-    type AgentExecPayload,
-    WS_ERROR_CODES,
-} from '../../protocol'
+import { type AgentExecAck, type AgentExecPayload, WS_ERROR_CODES } from '../../protocol'
 
 // Output handed back to the control is truncated — the cron service truncates
 // again before storing/feeding to the agent, but keep the wire payload bounded.

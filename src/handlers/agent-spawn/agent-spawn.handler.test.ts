@@ -342,7 +342,7 @@ describe('AgentSpawnHandler', () => {
         expect(file.path).toBe('mcp-servers.json')
         const parsed = JSON.parse(file.content) as Array<{ name: string }>
         expect(parsed).toHaveLength(1)
-        expect(parsed[0].name).toBe('github')
+        expect(parsed[0]?.name).toBe('github')
     })
 
     test('writes an empty .kj/mcp-servers.json when no servers are assigned', async () => {
