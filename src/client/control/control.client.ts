@@ -19,6 +19,7 @@ import { io, type Socket } from 'socket.io-client'
 
 import type { WsErrorPayload } from '../../protocol'
 import type { KJLogger } from '../../logger'
+import { CommandDedup, requestIdOf } from './command-dedup'
 
 export interface ControlClientOptions {
     /** Base URL of the control, e.g. `http://localhost:5050`. */
@@ -31,6 +32,10 @@ export interface ControlClientOptions {
 export class KJControlClient extends EventEmitter {
     private readonly socket: Socket
     private readonly logger: KJLogger
+    // Idempotency across ALL onCommand handlers: a repeated request_id
+    // (the control's outbox retrying a lost-ack command) replays the
+    // first ack instead of re-running the handler. See command-dedup.ts.
+    private readonly dedup = new CommandDedup()
 
     constructor(opts: ControlClientOptions) {
         super()
@@ -132,8 +137,21 @@ export class KJControlClient extends EventEmitter {
         handler: (payload: TPayload) => Promise<TAck> | TAck
     ): void {
         this.socket.on(event, async (payload: TPayload, ack?: (response: unknown) => void) => {
+            // Idempotency: if this request_id already ran, replay its ack
+            // and DON'T re-execute the handler (a retried at-least-once
+            // command must not double-spawn / double-deliver).
+            const request_id = requestIdOf(payload)
+            if (request_id) {
+                const prior = this.dedup.seen(request_id)
+                if (prior) {
+                    this.logger.debug({ event, request_id }, 'duplicate command — replaying ack')
+                    if (ack) ack(prior.ack)
+                    return
+                }
+            }
             try {
                 const result = await handler(payload)
+                if (request_id) this.dedup.remember(request_id, result)
                 if (ack) ack(result)
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err)

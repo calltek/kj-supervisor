@@ -352,6 +352,25 @@ Hito 9.
 > (solo recrea el container preservando el volumen). El reseed a disco
 > ocurre en `agent:spawn` o vía `agent:skills_changed`.
 
+### Idempotencia de comandos — dedup por `request_id` (2026-06-10)
+Todo comando C→A lleva un `request_id` obligatorio. El supervisor
+**deduplica** sobre él en `src/client/control/command-dedup.ts`: un wrapper
+en `onCommand` (control.client.ts) recuerda el **ack** de la 1ª ejecución
+por `request_id` (LRU 2k entradas + TTL 5 min, in-memory) y, ante un
+`request_id` repetido, **re-ackea SIN re-ejecutar el handler**. Así un
+reintento de un comando `at-least-once` (cuando el control reenvíe porque
+perdió el ack pero el comando ya corrió) **no doble-spawnea / doble-
+entrega**. In-memory a propósito: la ventana solo cubre el horizonte de
+reintento; tras un reinicio del supervisor el mapa nace vacío, pero el
+`agent:sync` del reconnect reconcilia el estado → sin drift. 7 unit tests
+en `command-dedup.test.ts`.
+
+El **contrato de entrega** (qué comandos son best-effort vs deben llegar)
+vive en `EVENT_DELIVERY` del `protocol.ts` (lado backend, fuente de
+verdad). El **motor outbox** que explota este dedup (persistir+reintentar
+los `at-least-once`) es **tarea futura del control** — el supervisor ya
+está listo. Ver kj-backend §6 decisión 2026-06-10.
+
 ### `agent_token` solo viaja una vez
 El control responde el `agent_token` en el ack de `server:hello` solo
 si el supervisor entró con `provisioning_token`. **Guárdalo a disco
