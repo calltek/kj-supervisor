@@ -41,6 +41,7 @@ import {
     type AgentInputPayload,
     type AgentPausePayload,
     type AgentResumePayload,
+    type AgentSkillsChangedPayload,
     type AgentSpawnPayload,
     type AgentStopPayload,
     type AgentSyncPayload,
@@ -207,6 +208,42 @@ async function main(): Promise<void> {
     // Push event (not a command), no ack — handler returns void.
     client.onPush<SupervisorUpgradeRequiredPayload>('supervisor:upgrade-required', (payload) => {
         void upgradeHandler.handle(payload)
+    })
+
+    // Skills hot-reload: the operator (re)assigned/edited a skill on a
+    // RUNNING agent. Re-seed `.claude/skills/` on the volume (purge +
+    // rewrite, exactly like spawn) then tell the wrapper to recycle its
+    // claude pool. No container restart, no conversation loss; busy
+    // sessions finish their turn first (wrapper-side). Best-effort: if
+    // the agent isn't running locally, the next spawn seeds it anyway.
+    client.onPush<AgentSkillsChangedPayload>('agent:skills_changed', (payload) => {
+        void (async () => {
+            const log = logger.child({ agent_id: payload.agent_id, component: 'skills-changed' })
+            try {
+                const homeVolume = `kj-agent-${payload.agent_id}-home`
+                await docker.ensureVolumeOwnership(homeVolume)
+                await docker.seedVolumeFiles({
+                    volume_name: homeVolume,
+                    target_dir: '.claude/skills',
+                    purge: true,
+                    files: payload.skills.map((s) => ({
+                        path: s.path,
+                        content: s.content,
+                        readonly: true,
+                    })),
+                })
+                const delivered = streams.writeControl(payload.agent_id, { type: 'skills_changed' })
+                log.info(
+                    { skills: payload.skills.length, delivered },
+                    'skills re-seeded; pool recycle signalled to wrapper'
+                )
+            } catch (err) {
+                log.warn(
+                    { err: err instanceof Error ? err.message : String(err) },
+                    'skills hot-reload failed — next spawn will seed the fresh set'
+                )
+            }
+        })()
     })
 
     // NOTE: the `memory:updated` and `contact_profile:updated` pushes

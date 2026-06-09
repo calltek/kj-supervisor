@@ -133,6 +133,32 @@ export class AgentStreamManager {
     }
 
     /**
+     * Write a control envelope (NOT an MCP envelope, NOT stream-json
+     * input) into the container's stdin. The wrapper's stdin dispatcher
+     * recognises these by their `type` field. Used for `skills_changed`
+     * (skills hot-reload) — a fire-and-forget signal to recycle the
+     * claude pool so a fresh skill catalog is picked up. Returns false
+     * when no stream exists (container gone / never spawned locally).
+     */
+    writeControl(agent_id: number, envelope: { type: string; [k: string]: unknown }): boolean {
+        const entry = this.streams.get(agent_id)
+        if (!entry) return false
+        try {
+            entry.stream.write(`${JSON.stringify(envelope)}\n`)
+            return true
+        } catch (err) {
+            this.logger.warn(
+                {
+                    agent_id,
+                    err: err instanceof Error ? err.message : String(err),
+                },
+                'failed to write control envelope to container stdin'
+            )
+            return false
+        }
+    }
+
+    /**
      * Attach to a container's stdio. Idempotent: a second call for the
      * same agent_id is a no-op (we already have a stream).
      */
