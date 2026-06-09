@@ -326,6 +326,32 @@ archive. Nota: `syncBuiltinSkills` del wrapper re-escribe sus
 built-in (kj-mcp) al boot, **después** del purge — no colisionan
 mientras los nombres de skill de operador no choquen con un built-in.
 
+### Hot-reload de skills sin restart (`agent:skills_changed`, 2026-06-09)
+Cuando el **operador** (re)asigna/edita/archiva una skill de un agente
+**RUNNING**, el control empuja el push `agent:skills_changed`
+(`{ agent_id, skills[] }`, el set vivo completo). El handler en `main.ts`
+(`onPush`):
+1. Re-siembra `.claude/skills/` en el volumen con `seedVolumeFiles`
+   (`purge:true` + rewrite — **idéntico** al seed de spawn; el payload
+   se construye con el mismo `buildSkillsPayload` del backend, así que
+   los SKILL.md son byte-a-byte iguales a los del spawn).
+2. Manda al stdin del container un envelope **de control**
+   `{type:'skills_changed'}` vía el nuevo
+   `AgentStreamManager.writeControl` (NO es un envelope MCP ni
+   stream-json input; el wrapper lo reconoce por su `type`).
+El wrapper recicla su pool de procesos Claude para que relean el
+catálogo de skills (lo lee una vez al boot). **Sin restart de
+container, sin perder la conversación** (`--resume`); las sesiones
+ocupadas terminan su turno antes de reciclarse (lado wrapper). Es
+**best-effort**: si el agente no tiene stream vivo localmente, el push
+se descarta y el próximo `agent:spawn` siembra el set fresco igual.
+Detalle de la cadena en kj-backend §6 decisión 2026-06-09 y agent-base
+Hito 9.
+
+> **No obvio**: `agent:image:update` **NO** re-siembra skills/memorias
+> (solo recrea el container preservando el volumen). El reseed a disco
+> ocurre en `agent:spawn` o vía `agent:skills_changed`.
+
 ### `agent_token` solo viaja una vez
 El control responde el `agent_token` en el ack de `server:hello` solo
 si el supervisor entró con `provisioning_token`. **Guárdalo a disco
