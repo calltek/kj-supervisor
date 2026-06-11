@@ -352,6 +352,31 @@ Hito 9.
 > (solo recrea el container preservando el volumen). El reseed a disco
 > ocurre en `agent:spawn` o vía `agent:skills_changed`.
 
+### Pull de imagen: tags mutables siempre se re-pullean (2026-06-11)
+El `agent:spawn` saltaba el pull si la imagen ya existía localmente **por
+nombre de tag**, sin mirar el registry. Bug en prod: un rebuild de
+`base:latest` en CI no llegaba al VPS — un agente nuevo reusaba la copia
+cacheada vieja y arrancaba la imagen antigua (sin `--skip-permissions` →
+Claude colgado, **ni respuesta ni error**).
+
+Fix en `image-tag.ts` (`isMutableTag`): el cache solo se respeta para tags
+**inmutables**.
+- **Mutables** (`:latest`, `:dev`, `:main`, `:edge`, `:nightly`, `:stable`,
+  `:canary`, y sin-tag → `latest`) → **pull en cada spawn** (barato si ya
+  está al día: solo chequea el manifest, no re-baja capas).
+- **Inmutables** (`:0.1.0`, `:sha-…`) y **locales** (`:dev-local`, `:local`,
+  nunca en un registry) → cache-first como antes.
+- Un tag mutable sin match en el registry (un `:latest` construido en local)
+  → si el pull falla, **fallback a la cache** → los flujos dev siguen.
+- Maneja bien el puerto del registry (`localhost:5000/img:tag` → el tag es
+  `tag`, no `5000`).
+El handler `agent:image:update` YA pulleaba-primero (por eso `update-image`
+arregló Cypher a mano); esto alinea el spawn. 5 unit tests.
+
+> **Operativa**: para refrescar un `:latest` en un agente ya corriendo sin
+> esperar a un respawn, `update-image` lo fuerza. Para los agentes nuevos,
+> el spawn ya re-pullea los mutables solo.
+
 ### Idempotencia de comandos — dedup por `request_id` (2026-06-10)
 Todo comando C→A lleva un `request_id` obligatorio. El supervisor
 **deduplica** sobre él en `src/client/control/command-dedup.ts`: un wrapper
