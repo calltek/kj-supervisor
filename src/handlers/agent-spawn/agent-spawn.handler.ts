@@ -20,6 +20,7 @@ import type { AgentStatusReporter } from '../../reporters/agent-status/agent-sta
 import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 import type { KJLogger } from '../../logger'
+import { isMutableTag } from './image-tag'
 
 export interface AgentSpawnHandlerDeps {
     docker: KJDocker
@@ -114,14 +115,27 @@ export class AgentSpawnHandler {
               }
             : undefined
 
-        // Skip the pull when the image is already cached locally.
-        // Saves a round-trip in steady state, and is mandatory for
-        // dev workflows where the operator built the image directly
-        // (e.g. `docker build -t ...:dev-local .`) and there is no
-        // matching tag in the remote registry.
+        // Decide whether to trust the local cache or pull fresh.
+        //
+        // MUTABLE tags (:latest, :dev, :main, …) are rewritten in place by
+        // CI — a cached copy goes stale silently. For those we MUST pull so
+        // a registry rebuild reaches the VPS (the prod bug: a cached
+        // base:latest never refreshed, the agent booted the old image and
+        // hung). The pull of an already-current image is cheap (manifest
+        // check, no layer re-download).
+        //
+        // IMMUTABLE tags (:0.1.0, :sha-…) and LOCALLY-BUILT images
+        // (:dev-local, :local — never in a registry) keep the old
+        // behaviour: a cached copy IS the source of truth, skip the pull.
+        // For a mutable tag with no registry match (a locally-built
+        // :latest), the pull fails and we fall back to the cache below.
         const cached = await this.docker.imageExistsLocally(payload.image_tag)
-        if (cached) {
-            log.info({ image_tag: payload.image_tag }, 'image cached locally; skipping pull')
+        const mutable = isMutableTag(payload.image_tag)
+        if (cached && !mutable) {
+            log.info(
+                { image_tag: payload.image_tag },
+                'image cached locally (immutable tag); skipping pull'
+            )
             pullHeartbeat.update(`using cached ${payload.image_tag}`)
         } else {
             try {
@@ -134,16 +148,29 @@ export class AgentSpawnHandler {
                     pullAuth
                 )
             } catch (err) {
-                pullHeartbeat.stop()
-                log.error({ err: errMessage(err) }, 'image pull failed')
-                this.status.push({
-                    agent_id: payload.agent_id,
-                    status: 'ERROR',
-                    container_id: null,
-                    last_action: `image pull failed: ${errMessage(err)}`,
-                    last_action_at: Date.now(),
-                })
-                return
+                // Pull failed. If we have a local copy, use it — this is
+                // the dev case (a locally-built :latest / mutable tag with
+                // no registry match) and the long-standing fallback for a
+                // registry hiccup on an already-cached image. Only hard-
+                // fail when there's nothing on disk to run.
+                if (cached) {
+                    log.warn(
+                        { image_tag: payload.image_tag, err: errMessage(err) },
+                        'image pull failed; falling back to cached copy'
+                    )
+                    pullHeartbeat.update(`using cached ${payload.image_tag} (pull failed)`)
+                } else {
+                    pullHeartbeat.stop()
+                    log.error({ err: errMessage(err) }, 'image pull failed')
+                    this.status.push({
+                        agent_id: payload.agent_id,
+                        status: 'ERROR',
+                        container_id: null,
+                        last_action: `image pull failed: ${errMessage(err)}`,
+                        last_action_at: Date.now(),
+                    })
+                    return
+                }
             }
         }
         pullHeartbeat.stop()
