@@ -313,7 +313,9 @@ export class KJDocker {
                 if (!status_line.includes('101')) {
                     clearTimeout(timer)
                     sock.destroy()
-                    reject(new Error(`docker stdin attach refused: ${status_line || '<no status>'}`))
+                    reject(
+                        new Error(`docker stdin attach refused: ${status_line || '<no status>'}`)
+                    )
                     return
                 }
                 upgraded = true
