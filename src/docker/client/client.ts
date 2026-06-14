@@ -271,6 +271,63 @@ export class KJDocker {
     }
 
     /**
+     * Attach to a container's STDIN only, returning the writable socket.
+     * Used by `seedVolumeFiles` to feed a large `sh -s` script over the
+     * stream instead of through Cmd (which would hit ARG_MAX). Same raw
+     * socket-upgrade dance as `attachContainer`, but stdin-only — we
+     * don't read the helper's output here (the caller pulls logs via
+     * `container.logs()` after it exits).
+     */
+    async attachContainerStdin(container_id: string): Promise<NodeJS.WritableStream> {
+        const socketPath = '/var/run/docker.sock'
+        const path = `/containers/${container_id}/attach?stream=1&stdin=1`
+        const request =
+            `POST ${path} HTTP/1.1\r\n` +
+            `Host: localhost\r\n` +
+            `Connection: Upgrade\r\n` +
+            `Upgrade: tcp\r\n` +
+            `Content-Type: application/vnd.docker.raw-stream\r\n` +
+            `Content-Length: 0\r\n` +
+            `\r\n`
+
+        return new Promise<NodeJS.WritableStream>((resolve, reject) => {
+            const sock = net.connect(socketPath)
+            let header_buffer = ''
+            let upgraded = false
+
+            const timer = setTimeout(() => {
+                if (upgraded) return
+                sock.destroy(new Error('docker stdin attach timed out after 10s'))
+            }, 10_000)
+
+            sock.once('error', (err) => {
+                clearTimeout(timer)
+                if (!upgraded) reject(err)
+            })
+
+            const onHeader = (chunk: Buffer): void => {
+                header_buffer += chunk.toString('utf8')
+                const end = header_buffer.indexOf('\r\n\r\n')
+                if (end < 0) return
+                const status_line = header_buffer.slice(0, end).split('\r\n')[0] ?? ''
+                if (!status_line.includes('101')) {
+                    clearTimeout(timer)
+                    sock.destroy()
+                    reject(new Error(`docker stdin attach refused: ${status_line || '<no status>'}`))
+                    return
+                }
+                upgraded = true
+                clearTimeout(timer)
+                sock.off('data', onHeader)
+                resolve(sock)
+            }
+
+            sock.on('data', onHeader)
+            sock.write(request)
+        })
+    }
+
+    /**
      * Demultiplex a docker attach stream into stdout/stderr writable
      * sinks. When the container runs without TTY, docker frames every
      * payload with an 8-byte header that says which stream the bytes
@@ -693,7 +750,17 @@ export class KJDocker {
             Image: helperImage,
             // No labels — these are throwaway, the reconcile must NOT
             // ever pick them up as agent containers.
-            Cmd: ['sh', '-c', script],
+            //
+            // The script is fed over STDIN (`sh -s`), NOT through Cmd.
+            // A spawn payload with many memories/skills encodes each
+            // file as inline base64; the whole script can run into
+            // hundreds of KB. Passing that as a process argument hits
+            // the kernel's ARG_MAX and exec fails with code 255
+            // ("argument list too long"). STDIN has no such limit.
+            Cmd: ['sh', '-s'],
+            OpenStdin: true,
+            StdinOnce: true,
+            AttachStdin: true,
             HostConfig: {
                 // AutoRemove false: we want to inspect the logs on
                 // failure. We remove the container explicitly after
@@ -719,7 +786,21 @@ export class KJDocker {
                 SecurityOpt: ['no-new-privileges'],
             },
         })
+        // Attach to STDIN BEFORE starting so the helper's `sh -s`
+        // doesn't hit EOF on an empty stream. We write the script and
+        // close stdin (StdinOnce makes the container's stdin close when
+        // we do), then the shell runs it and exits.
+        const stdin = await this.attachContainerStdin(container.id)
         await container.start()
+        await new Promise<void>((resolve, reject) => {
+            stdin.write(script, (err) => {
+                if (err) {
+                    reject(err)
+                    return
+                }
+                stdin.end(resolve)
+            })
+        })
         // wait() resolves with StatusCode when the container exits.
         const result = await container.wait()
         if (result.StatusCode !== 0) {
