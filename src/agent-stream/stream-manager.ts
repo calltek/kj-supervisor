@@ -292,6 +292,10 @@ export class AgentStreamManager {
             conversation_session_id: sessionForInput,
             message: payload.message,
         }
+        // Attachments: forward the content blocks verbatim. The wrapper sets
+        // the claude stdin `content` to this array (image/document media the
+        // model can SEE) instead of the plain message string.
+        if (payload.content_blocks?.length) envelope.content_blocks = payload.content_blocks
         if (payload.contact_name) envelope.contact_name = payload.contact_name
         if (payload.contact_id !== undefined) envelope.contact_id = payload.contact_id
         const line = `${JSON.stringify(envelope)}\n`
