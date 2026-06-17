@@ -459,6 +459,10 @@ export class KJDocker {
                 RestartPolicy: source.HostConfig.RestartPolicy,
                 NetworkMode: source.HostConfig.NetworkMode,
                 GroupAdd: source.HostConfig.GroupAdd,
+                // Preserve the source's resource limits (KUJI-42) — don't
+                // silently drop them on the blue/green clone.
+                Memory: source.HostConfig.Memory,
+                NanoCpus: source.HostConfig.NanoCpus,
             },
         })
 
@@ -483,6 +487,11 @@ export class KJDocker {
         new_image_tag: string
         keep_name: string
         force_stop?: boolean
+        // KUJI-42: re-apply the container limits the control sized. Without
+        // this the recreate dropped Memory/NanoCpus and left the container
+        // unbounded → a runaway tool (Playwright/Chromium) could OOM the host.
+        // Falls back to whatever the source container had if absent.
+        resources?: { memory_mb: number; cpu: number }
     }): Promise<string> {
         this.logger.info(
             {
@@ -529,6 +538,13 @@ export class KJDocker {
                 RestartPolicy: host.RestartPolicy,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,
+                // Re-apply the resource limits (KUJI-42). The control's value
+                // wins; otherwise preserve what the source had (never silently
+                // leave it unbounded again).
+                Memory: opts.resources ? opts.resources.memory_mb * 1024 * 1024 : host.Memory,
+                NanoCpus: opts.resources
+                    ? Math.round(opts.resources.cpu * 1_000_000_000)
+                    : host.NanoCpus,
             },
         })
 

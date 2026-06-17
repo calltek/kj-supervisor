@@ -210,6 +210,9 @@ export class AgentImageUpdateHandler {
                 source_container: existing,
                 new_image_tag: payload.image_tag,
                 keep_name: `kj-agent-${payload.agent_id}`,
+                // Re-apply the control's server-aware limits (KUJI-42) so the
+                // recreate doesn't leave the container unbounded.
+                resources: payload.resources,
             })
         } catch (err) {
             swapHeartbeat.stop()
