@@ -298,6 +298,10 @@ export class AgentStreamManager {
         if (payload.content_blocks?.length) envelope.content_blocks = payload.content_blocks
         if (payload.contact_name) envelope.contact_name = payload.contact_name
         if (payload.contact_id !== undefined) envelope.contact_id = payload.contact_id
+        // Bounded, contact-scoped recent history (KUJI-36). The wrapper
+        // prepends it as opening context ONLY when it starts the session
+        // FRESH (cold wake) instead of --resume-ing the full transcript.
+        if (payload.recent_context) envelope.recent_context = payload.recent_context
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
