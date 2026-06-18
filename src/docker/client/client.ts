@@ -6,6 +6,7 @@
  */
 
 import net from 'node:net'
+import os from 'node:os'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
@@ -618,6 +619,28 @@ export class KJDocker {
             .getContainer(container_id)
             .remove({ force: true })
             .catch(() => undefined)
+    }
+
+    /**
+     * Our OWN container name. Docker sets a container's hostname to its short
+     * id by default (we never override it), so `os.hostname()` is our id; we
+     * inspect it to get the name. Used by the blue/green self-upgrade to tell
+     * whether we're the fresh clone (`kj-supervisor-new-*`) that still has to
+     * remove the old container + rename itself to the canonical name. Returns
+     * null outside Docker (dev) or if the lookup fails.
+     */
+    async getOwnContainerName(): Promise<string | null> {
+        try {
+            const info = await this.docker.getContainer(os.hostname()).inspect()
+            return info.Name.replace(/^\//, '')
+        } catch {
+            return null
+        }
+    }
+
+    /** Rename a container (dockerode `rename`). Used to finish the blue/green swap. */
+    async renameContainer(id_or_name: string, new_name: string): Promise<void> {
+        await this.docker.getContainer(id_or_name).rename({ name: new_name })
     }
 
     /**

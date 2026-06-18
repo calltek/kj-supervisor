@@ -37,110 +37,67 @@ function payload(target = TARGET) {
     return { target_image_tag: target, reason: 'protocol version mismatch' }
 }
 
+function makeHandler(docker: FakeDocker, supervisor_container: string | null = 'kj-supervisor') {
+    return new SupervisorUpgradeHandler({
+        docker: docker as never,
+        logger: silentLogger,
+        supervisor_container,
+    })
+}
+
 describe('SupervisorUpgradeHandler', () => {
     test('refuses to act without KJ_SUPERVISOR_CONTAINER', async () => {
         const docker = new FakeDocker()
-        let exited = false
-        const handler = new SupervisorUpgradeHandler({
-            docker: docker as never,
-            logger: silentLogger,
-            supervisor_container: null,
-            exit_fn: () => {
-                exited = true
-            },
-            handover_grace_ms: 1,
-        })
-
-        await handler.handle(payload())
-        // Allow the grace timer to fire if it had been scheduled.
-        await new Promise((r) => setTimeout(r, 10))
-
+        await makeHandler(docker, null).handle(payload())
         expect(docker.pulled).toEqual([])
         expect(docker.clones).toEqual([])
-        expect(exited).toBe(false)
     })
 
-    test('happy path: pulls, clones, schedules exit', async () => {
+    test('happy path: pulls + clones, and does NOT exit (the clone finishes the swap)', async () => {
         const docker = new FakeDocker()
-        const exit_calls: number[] = []
-        const handler = new SupervisorUpgradeHandler({
-            docker: docker as never,
-            logger: silentLogger,
-            supervisor_container: 'kj-supervisor',
-            exit_fn: (code) => {
-                exit_calls.push(code)
-            },
-            handover_grace_ms: 5,
-        })
-
-        await handler.handle(payload())
+        // process.exit would kill the test runner — assert it is never called.
+        const realExit = process.exit
+        let exited = false
+        // @ts-expect-error override for the test
+        process.exit = () => {
+            exited = true
+        }
+        try {
+            await makeHandler(docker).handle(payload())
+        } finally {
+            process.exit = realExit
+        }
 
         expect(docker.pulled).toEqual([TARGET])
         expect(docker.clones).toHaveLength(1)
         expect(docker.clones[0]?.source).toBe('kj-supervisor')
         expect(docker.clones[0]?.image).toBe(TARGET)
         expect(docker.clones[0]?.name).toMatch(/^kj-supervisor-new-\d+$/)
-
-        // Wait past the grace period.
-        await new Promise((r) => setTimeout(r, 25))
-        expect(exit_calls).toEqual([0])
+        // The OLD supervisor must keep running — the clone removes it on its
+        // first handshake (a self-exit would get revived by unless-stopped).
+        expect(exited).toBe(false)
     })
 
-    test('pull failure aborts without spawning anything or exiting', async () => {
+    test('pull failure aborts without cloning', async () => {
         const docker = new FakeDocker()
         docker.next_pull_error = new Error('registry timed out')
-        let exited = false
-        const handler = new SupervisorUpgradeHandler({
-            docker: docker as never,
-            logger: silentLogger,
-            supervisor_container: 'kj-supervisor',
-            exit_fn: () => {
-                exited = true
-            },
-            handover_grace_ms: 1,
-        })
-
-        await handler.handle(payload())
-        await new Promise((r) => setTimeout(r, 10))
-
+        await makeHandler(docker).handle(payload())
         expect(docker.clones).toEqual([])
-        expect(exited).toBe(false)
     })
 
-    test('clone failure aborts without exiting', async () => {
+    test('clone failure aborts cleanly (old keeps running)', async () => {
         const docker = new FakeDocker()
         docker.next_clone_error = new Error('image not pulled')
-        let exited = false
-        const handler = new SupervisorUpgradeHandler({
-            docker: docker as never,
-            logger: silentLogger,
-            supervisor_container: 'kj-supervisor',
-            exit_fn: () => {
-                exited = true
-            },
-            handover_grace_ms: 1,
-        })
-
-        await handler.handle(payload())
-        await new Promise((r) => setTimeout(r, 10))
-
+        await makeHandler(docker).handle(payload())
         expect(docker.pulled).toEqual([TARGET])
-        expect(exited).toBe(false)
+        expect(docker.clones).toEqual([])
     })
 
     test('ignores duplicate events while one upgrade is in flight', async () => {
         const docker = new FakeDocker()
-        const handler = new SupervisorUpgradeHandler({
-            docker: docker as never,
-            logger: silentLogger,
-            supervisor_container: 'kj-supervisor',
-            exit_fn: () => undefined,
-            handover_grace_ms: 60_000, // long, so the in_progress flag stays set
-        })
-
+        const handler = makeHandler(docker)
         await handler.handle(payload())
         await handler.handle(payload('ghcr.io/different:1.6.0'))
-
         expect(docker.pulled).toEqual([TARGET])
         expect(docker.clones).toHaveLength(1)
     })

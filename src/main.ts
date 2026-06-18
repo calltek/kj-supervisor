@@ -272,6 +272,10 @@ async function main(): Promise<void> {
     let healthHandle: HealthLoopHandle | null = null
     let serverMetricsHandle: ServerMetricsHandle | null = null
     let agentMetricsHandle: AgentMetricsHandle | null = null
+    // Blue/green self-upgrade: a fresh clone (`kj-supervisor-new-*`) finishes
+    // the swap on its first handshake (remove the old + rename to canonical).
+    // Runs at most once; until it succeeds we retry on each handshake.
+    let blueGreenSwapDone = false
 
     const stopLoops = (): void => {
         healthHandle?.stop()
@@ -354,6 +358,44 @@ async function main(): Promise<void> {
         }
 
         logger.info({ protocol_version: ack.protocol_version }, 'handshake complete')
+
+        // Blue/green self-upgrade completion: if we're the fresh clone (our
+        // container name differs from the canonical KJ_SUPERVISOR_CONTAINER),
+        // now that we've handshaked (so the control's tracker points at US),
+        // force-remove the old container and rename ourselves to the canonical
+        // name. Done BEFORE agent:sync attaches, so there's no double-attach.
+        if (!blueGreenSwapDone) {
+            const canonical = settings.supervisor_container
+            if (!canonical) {
+                blueGreenSwapDone = true // can't be a clone without it
+            } else {
+                let ownName: string | null = null
+                try {
+                    ownName = await docker.getOwnContainerName()
+                } catch {
+                    ownName = null
+                }
+                if (!ownName || ownName === canonical) {
+                    blueGreenSwapDone = true // not a clone / already canonical
+                } else {
+                    try {
+                        logger.info(
+                            { own: ownName, canonical },
+                            'upgrade clone handshaked — completing blue/green swap'
+                        )
+                        await docker.removeContainer(canonical) // force-remove old (no revival)
+                        await docker.renameContainer(ownName, canonical) // become canonical
+                        blueGreenSwapDone = true
+                        logger.info('blue/green swap complete — now the canonical supervisor')
+                    } catch (err) {
+                        logger.error(
+                            { err: err instanceof Error ? err.message : String(err) },
+                            'blue/green swap failed; will retry on next handshake'
+                        )
+                    }
+                }
+            }
+        }
 
         healthHandle = startHealthLoop({
             client,

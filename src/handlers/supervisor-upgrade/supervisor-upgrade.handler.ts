@@ -31,26 +31,12 @@ export interface SupervisorUpgradeHandlerDeps {
     logger: KJLogger
     /** Container name of the running supervisor (env). */
     supervisor_container: string | null
-    /**
-     * Called when the handler decides the swap succeeded. Defaults to
-     * process.exit(0). Override in tests.
-     */
-    exit_fn?: (code: number) => void
-    /**
-     * Delay before the old supervisor shuts down, giving the new
-     * container time to authenticate and take over. Defaults to 30s.
-     */
-    handover_grace_ms?: number
 }
-
-const DEFAULT_HANDOVER_GRACE_MS = 30_000
 
 export class SupervisorUpgradeHandler {
     private readonly docker: KJDocker
     private readonly logger: KJLogger
     private readonly supervisor_container: string | null
-    private readonly exit_fn: (code: number) => void
-    private readonly handover_grace_ms: number
 
     private in_progress = false
 
@@ -58,8 +44,6 @@ export class SupervisorUpgradeHandler {
         this.docker = deps.docker
         this.logger = deps.logger.child({ component: 'supervisor-upgrade' })
         this.supervisor_container = deps.supervisor_container
-        this.exit_fn = deps.exit_fn ?? ((code) => process.exit(code))
-        this.handover_grace_ms = deps.handover_grace_ms ?? DEFAULT_HANDOVER_GRACE_MS
     }
 
     async handle(payload: SupervisorUpgradeRequiredPayload): Promise<void> {
@@ -113,18 +97,18 @@ export class SupervisorUpgradeHandler {
         }
 
         log.info(
-            { new_container_id, grace_ms: this.handover_grace_ms },
-            'new supervisor started — handing over and exiting'
+            { new_container_id },
+            'new supervisor started — it will remove us + take the canonical name once it handshakes'
         )
 
-        // 3. Hand over: let the new instance handshake while we keep
-        //    serving any in-flight requests. After the grace period we
-        //    exit; the control's OnlineSupervisorTracker has already
-        //    swapped to the newer connection by then.
-        setTimeout(() => {
-            log.info('handover grace elapsed, exiting')
-            this.exit_fn(0)
-        }, this.handover_grace_ms)
+        // 3. We DON'T exit. The fresh clone, once it handshakes, force-removes
+        //    THIS container (overriding the restart policy — `exit(0)` does
+        //    NOT, `unless-stopped` relaunches a self-exited container → two
+        //    supervisors, the old fork-bomb shape) and renames itself to the
+        //    canonical name. We keep serving in the meantime, so there's no
+        //    "supervisor offline" gap that would flip agents to ERROR. If the
+        //    clone fails to boot, we just keep running — safe, recoverable.
+        //    `in_progress` stays true so a duplicate event doesn't re-clone.
     }
 }
 
