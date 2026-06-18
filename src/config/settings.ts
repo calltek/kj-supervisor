@@ -14,8 +14,10 @@ import pkg from '../../package.json' with { type: 'json' }
  */
 export const PING_INTERVAL_MS = 30_000
 
-/** server:metrics cadence — load avg + uptime of the host VPS. */
-export const SERVER_METRICS_INTERVAL_MS = 60_000
+/** server:metrics cadence — load avg + uptime of the host VPS. 15s so the
+ * panel's CPU/RAM/load feels live (the WS push is instant; this is the source
+ * cadence). A short sampling window also clears transient spikes faster. */
+export const SERVER_METRICS_INTERVAL_MS = 15_000
 
 /** agent:metrics cadence — uptime + tokens/cost per running agent. */
 export const AGENT_METRICS_INTERVAL_MS = 60_000
