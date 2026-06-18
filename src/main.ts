@@ -25,6 +25,7 @@ import { KJDocker } from './docker/client/client'
 import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
 import { AgentExecHandler } from './handlers/agent-exec/agent-exec.handler'
+import { AgentBackupHandler } from './handlers/agent-backup/agent-backup.handler'
 import { AgentImageUpdateHandler } from './handlers/agent-image-update/agent-image-update.handler'
 import { AgentInputHandler } from './handlers/agent-input/agent-input.handler'
 import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycle.handler'
@@ -34,10 +35,14 @@ import { OAuthExchangeHandler } from './handlers/oauth-exchange/oauth-exchange.h
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
+    type AgentBackupAck,
+    type AgentBackupPayload,
     type AgentDeletePayload,
     type AgentExecAck,
     type AgentExecPayload,
     type AgentImageUpdatePayload,
+    type AgentRestoreAck,
+    type AgentRestorePayload,
     type AgentInputPayload,
     type AgentPausePayload,
     type AgentResumePayload,
@@ -165,6 +170,7 @@ async function main(): Promise<void> {
     const inputHandler = new AgentInputHandler({ streams, logger })
     const execHandler = new AgentExecHandler({ docker, logger })
     const syncHandler = new AgentSyncHandler({ streams, logger })
+    const backupHandler = new AgentBackupHandler({ docker, status: statusReporter, logger })
     const oauthExchangeHandler = new OAuthExchangeHandler({ logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,
@@ -200,6 +206,12 @@ async function main(): Promise<void> {
     )
     client.onCommand<AgentSyncPayload, ControlCommandAck>('agent:sync', (payload) =>
         syncHandler.handle(payload)
+    )
+    client.onCommand<AgentBackupPayload, AgentBackupAck>('agent:backup', (payload) =>
+        backupHandler.handleBackup(payload)
+    )
+    client.onCommand<AgentRestorePayload, AgentRestoreAck>('agent:restore', (payload) =>
+        backupHandler.handleRestore(payload)
     )
     client.onCommand<OAuthExchangePayload, OAuthExchangeAck>('oauth:exchange', (payload) =>
         oauthExchangeHandler.handle(payload)

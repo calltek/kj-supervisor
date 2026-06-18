@@ -866,4 +866,118 @@ export class KJDocker {
             'seeded volume files'
         )
     }
+
+    /**
+     * Run a throwaway alpine helper with the agent's volume mounted at /v and
+     * a short shell script. Returns the exit code + (de-framed) logs. Mirrors
+     * the sandboxing of `seedVolumeFiles`. The script is passed via Cmd (it's
+     * short and secret-free — URLs travel as env vars so they don't show up in
+     * `docker inspect`).
+     */
+    private async runVolumeHelper(opts: {
+        volume_name: string
+        script: string
+        env?: string[]
+        readonly?: boolean
+    }): Promise<{ code: number; logs: string }> {
+        const helperImage = 'alpine:3.20'
+        if (!(await this.imageExistsLocally(helperImage)))
+            await this.pullImage(helperImage, () => {})
+
+        const container = await this.docker.createContainer({
+            Image: helperImage,
+            Cmd: ['sh', '-c', opts.script],
+            Env: opts.env,
+            HostConfig: {
+                AutoRemove: false,
+                Mounts: [
+                    {
+                        Type: 'volume',
+                        Source: opts.volume_name,
+                        Target: '/v',
+                        ReadOnly: !!opts.readonly,
+                    },
+                ],
+                CapDrop: ['ALL'],
+                CapAdd: ['DAC_OVERRIDE', 'CHOWN'],
+                SecurityOpt: ['no-new-privileges'],
+            },
+        })
+        try {
+            await container.start()
+            const result = await container.wait()
+            const logsBuf = await container
+                .logs({ stdout: true, stderr: true, follow: false })
+                .catch(() => Buffer.from(''))
+            return { code: result.StatusCode, logs: stripDockerFrames(logsBuf) }
+        } finally {
+            await container.remove({ force: true }).catch(() => undefined)
+        }
+    }
+
+    /**
+     * Tar the agent's /home/agent volume (gzip) and PUT it straight to a
+     * pre-signed R2 URL — the bytes never touch the control. The volume is
+     * mounted read-only; the tarball is staged in the helper's /tmp (host
+     * overlay) so curl can send a Content-Length. Returns the uploaded size.
+     */
+    async backupVolume(volume_name: string, upload_url: string): Promise<{ size_bytes: number }> {
+        const script = [
+            'set -e',
+            'apk add --no-cache curl >/dev/null 2>&1',
+            'tar -C /v -czf /tmp/b.tgz .',
+            'SZ=$(stat -c %s /tmp/b.tgz)',
+            'curl -fsS -X PUT -H "Content-Type: application/octet-stream" --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
+            'echo "KJ_BACKUP_SIZE=$SZ"',
+        ].join('\n')
+        const { code, logs } = await this.runVolumeHelper({
+            volume_name,
+            script,
+            env: [`KJ_UPLOAD_URL=${upload_url}`],
+            readonly: true,
+        })
+        if (code !== 0) throw new Error(`backup helper exited ${code}: ${logs.slice(-400)}`)
+        const m = logs.match(/KJ_BACKUP_SIZE=(\d+)/)
+        return { size_bytes: m ? Number(m[1]) : 0 }
+    }
+
+    /**
+     * Download a backup tarball from a pre-signed R2 URL and extract it onto
+     * the agent's volume, REPLACING its contents (wipe + extract). The caller
+     * must stop the container first (a running agent holds the volume). Hands
+     * the root back to UID 1000 so the agent can write at boot.
+     */
+    async restoreVolume(volume_name: string, download_url: string): Promise<void> {
+        const script = [
+            'set -e',
+            'apk add --no-cache curl >/dev/null 2>&1',
+            'curl -fsS "$KJ_DOWNLOAD_URL" -o /tmp/b.tgz',
+            'find /v -mindepth 1 -delete',
+            'tar -C /v -xzf /tmp/b.tgz',
+            'chown 1000:1000 /v',
+        ].join('\n')
+        const { code, logs } = await this.runVolumeHelper({
+            volume_name,
+            script,
+            env: [`KJ_DOWNLOAD_URL=${download_url}`],
+        })
+        if (code !== 0) throw new Error(`restore helper exited ${code}: ${logs.slice(-400)}`)
+    }
+}
+
+/**
+ * dockerode returns multiplexed stdout/stderr frames when Tty:false — each
+ * carries an 8-byte header that leaks into the string. Strip non-printable
+ * bytes (keep tab/lf + >= 0x20), best-effort.
+ */
+function stripDockerFrames(buf: Buffer | string): string {
+    const s = Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf)
+    return s
+        .split('')
+        .filter((c) => {
+            const code = c.charCodeAt(0)
+            return code === 9 || code === 10 || code >= 32
+        })
+        .join('')
+        .trim()
 }
