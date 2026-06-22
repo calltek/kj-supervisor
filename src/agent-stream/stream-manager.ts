@@ -302,6 +302,9 @@ export class AgentStreamManager {
         // prepends it as opening context ONLY when it starts the session
         // FRESH (cold wake) instead of --resume-ing the full transcript.
         if (payload.recent_context) envelope.recent_context = payload.recent_context
+        // Fire-and-forget (webhook): the wrapper reaps this session fast after
+        // the turn instead of keeping it warm. Pure passthrough.
+        if (payload.ephemeral) envelope.ephemeral = true
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
