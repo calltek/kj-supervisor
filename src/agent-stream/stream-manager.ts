@@ -305,6 +305,9 @@ export class AgentStreamManager {
         // Fire-and-forget (webhook): the wrapper reaps this session fast after
         // the turn instead of keeping it warm. Pure passthrough.
         if (payload.ephemeral) envelope.ephemeral = true
+        // Per-conversation model (KUJI-39): the wrapper starts/recycles this
+        // session's claude with `--model <this>`. Pure passthrough.
+        if (payload.model) envelope.model = payload.model
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
