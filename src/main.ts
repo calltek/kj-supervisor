@@ -376,7 +376,20 @@ async function main(): Promise<void> {
                     ownName = null
                 }
                 if (!ownName || ownName === canonical) {
+                    logger.info(
+                        { own: ownName, canonical },
+                        'not an upgrade clone (own name absent or already canonical) — no swap'
+                    )
                     blueGreenSwapDone = true // not a clone / already canonical
+                } else if (!(await docker.containerExists(ownName))) {
+                    // KJ_OWN_CONTAINER is stale: we already completed a swap and
+                    // were renamed to `canonical`, but the env still holds the old
+                    // temp name. Swapping again would force-remove ourselves.
+                    logger.info(
+                        { own: ownName, canonical },
+                        'stale own-name (already swapped to canonical) — no swap'
+                    )
+                    blueGreenSwapDone = true
                 } else {
                     try {
                         logger.info(

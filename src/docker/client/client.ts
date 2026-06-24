@@ -5,11 +5,32 @@
  * in tests and easier to swap implementation later.
  */
 
+import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
+
+/**
+ * Our own container id, read from /proc — works under `--network host` where
+ * os.hostname() is the HOST name, not the container id (incident 2026-06-24).
+ * cgroup v1 puts `/docker/<id>` in /proc/self/cgroup; cgroup v2 puts the id in
+ * the bind-mount paths of /proc/self/mountinfo (…/containers/<id>/hostname).
+ * Returns the 64-hex id or null (e.g. running outside Docker in dev).
+ */
+function readOwnContainerId(): string | null {
+    const re = /\b[0-9a-f]{64}\b/
+    for (const path of ['/proc/self/mountinfo', '/proc/self/cgroup']) {
+        try {
+            const m = fs.readFileSync(path, 'utf8').match(re)
+            if (m) return m[0]
+        } catch {
+            /* not on Linux / no procfs — try the next, then give up */
+        }
+    }
+    return null
+}
 
 /** Labels we attach to every container we spawn so we can reconcile later. */
 export const KJ_LABEL = 'kj-agent'
@@ -447,10 +468,20 @@ export class KJDocker {
 
         const source = await this.docker.getContainer(opts.source_container).inspect()
 
+        // Tell the clone its OWN container name so it can complete the blue/green
+        // swap reliably. We can't depend on os.hostname() inside the clone: under
+        // `--network host` (the whole Linux fleet) the container hostname is the
+        // HOST's name, not the container id, so getContainer(os.hostname()) 404s
+        // and the clone wrongly concludes it isn't a clone → never swaps → two
+        // supervisors survive (incident 2026-06-24). Strip any stale value
+        // inherited from the source (which may itself have been a clone).
+        const env = (source.Config.Env ?? []).filter((e) => !e.startsWith('KJ_OWN_CONTAINER='))
+        env.push(`KJ_OWN_CONTAINER=${opts.new_name}`)
+
         const created = await this.docker.createContainer({
             Image: opts.new_image_tag,
             name: opts.new_name,
-            Env: source.Config.Env,
+            Env: env,
             Cmd: source.Config.Cmd ?? undefined,
             Entrypoint: source.Config.Entrypoint ?? undefined,
             Labels: source.Config.Labels,
@@ -630,6 +661,27 @@ export class KJDocker {
      * null outside Docker (dev) or if the lookup fails.
      */
     async getOwnContainerName(): Promise<string | null> {
+        // 1. Preferred: the name the clone was created with, injected as an env
+        //    var by cloneContainerWithNewImage (the fast, explicit path).
+        const fromEnv = process.env.KJ_OWN_CONTAINER?.trim()
+        if (fromEnv) return fromEnv
+        // 2. Our own container id from /proc, then inspect it for the name. This
+        //    works under `--network host` (the Linux fleet), where os.hostname()
+        //    returns the HOST name, not the container id (incident 2026-06-24).
+        //    Crucially this makes the swap self-complete even on the FIRST
+        //    upgrade to this fix — the clone (new image) is created by the OLD
+        //    cloner without the env var, so it must fall back to /proc.
+        const ownId = readOwnContainerId()
+        if (ownId) {
+            try {
+                const info = await this.docker.getContainer(ownId).inspect()
+                return info.Name.replace(/^\//, '')
+            } catch {
+                /* fall through */
+            }
+        }
+        // 3. Bridge networking / dev: the container hostname defaults to the
+        //    short container id, which inspect resolves to the real name.
         try {
             const info = await this.docker.getContainer(os.hostname()).inspect()
             return info.Name.replace(/^\//, '')
@@ -641,6 +693,22 @@ export class KJDocker {
     /** Rename a container (dockerode `rename`). Used to finish the blue/green swap. */
     async renameContainer(id_or_name: string, new_name: string): Promise<void> {
         await this.docker.getContainer(id_or_name).rename({ name: new_name })
+    }
+
+    /**
+     * Whether a container with this exact name exists. Used by the blue/green
+     * swap to confirm we're still the temp-named clone BEFORE removing the
+     * canonical — guards against a stale KJ_OWN_CONTAINER (after a swap+rename,
+     * the env still holds the old temp name; on a restart that would otherwise
+     * make us force-remove ourselves). Returns false on any lookup error.
+     */
+    async containerExists(name: string): Promise<boolean> {
+        try {
+            await this.docker.getContainer(name).inspect()
+            return true
+        } catch {
+            return false
+        }
     }
 
     /**
