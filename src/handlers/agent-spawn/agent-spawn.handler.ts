@@ -54,22 +54,47 @@ export class AgentSpawnHandler {
         })
         log.info({ image_tag: payload.image_tag }, 'agent:spawn received')
 
-        // 1. Guard against duplicates. The control sees the same agent_id as
-        //    RUNNING already; this is its own race or a stale retry.
+        // 1. Guard against an existing container for this agent. listKjContainers
+        //    uses `all:true`, so the match may be a LIVE container (state drift —
+        //    the control thinks it's stopped) OR a DEAD leftover from a crash
+        //    (claude exited; the container lingers as `exited`). Branch on which:
+        //      - live → reject with ALREADY_RUNNING + the container_id; the
+        //        control adopts it (reconciles to RUNNING) instead of erroring
+        //        (KJ-48).
+        //      - dead → remove it and fall through to a fresh spawn, so a
+        //        crashed agent's leftover never wedges Start.
         const existing = await this.findExistingContainer(payload.agent_id).catch((err) => {
             log.error({ err: errMessage(err) }, 'failed to list containers; spawn aborted')
             return undefined
         })
         if (existing) {
-            log.warn({ container_id: existing }, 'agent already has a container — rejecting')
-            return ackError(
-                'ALREADY_RUNNING',
-                `agent ${payload.agent_id} already has a container`,
-                false,
-                {
-                    container_id: existing,
-                }
+            const alive = await this.isContainerAlive(existing, log)
+            if (alive) {
+                log.warn(
+                    { container_id: existing },
+                    'agent already has a LIVE container — rejecting (control adopts)'
+                )
+                return ackError(
+                    'ALREADY_RUNNING',
+                    `agent ${payload.agent_id} already has a container`,
+                    false,
+                    {
+                        container_id: existing,
+                    }
+                )
+            }
+            log.warn(
+                { container_id: existing },
+                'removing dead leftover container before a fresh spawn'
             )
+            await this.docker
+                .removeContainer(existing)
+                .catch((err) =>
+                    log.warn(
+                        { err: errMessage(err) },
+                        'failed to remove dead container; proceeding to spawn anyway'
+                    )
+                )
         }
 
         // 2. Kick off the actual spawn in background so the ack can return now.
@@ -380,6 +405,25 @@ export class AgentSpawnHandler {
         const containers = await this.docker.listKjContainers()
         const match = containers.find((c) => c.agent_id === agent_id)
         return match ? match.container_id : null
+    }
+
+    /**
+     * Is the container alive (running) or a dead leftover (exited/created/dead)?
+     * Used to decide whether to adopt it (live → ALREADY_RUNNING) or remove it
+     * and respawn (dead). On any inspect failure, assume alive — never risk a
+     * double-spawn over an unreadable state.
+     */
+    private async isContainerAlive(container_id: string, log: KJLogger): Promise<boolean> {
+        try {
+            const info = await this.docker.inspect(container_id)
+            return info.State?.Running === true
+        } catch (err) {
+            log.warn(
+                { err: errMessage(err), container_id },
+                'inspect failed; treating container as alive'
+            )
+            return true
+        }
     }
 }
 

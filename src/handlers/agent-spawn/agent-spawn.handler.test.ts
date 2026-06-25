@@ -78,6 +78,23 @@ class FakeDocker {
         return this.containers
     }
 
+    // Container-state probe for the spawn duplicate guard (KJ-48). Defaults to
+    // "running" so an existing container is treated as alive unless a test
+    // overrides it. `next_inspect_error` exercises the inspect-failure path.
+    public inspect_running = true
+    public next_inspect_error: Error | null = null
+    public inspected: string[] = []
+    async inspect(container_id: string): Promise<{ State: { Running: boolean } }> {
+        this.inspected.push(container_id)
+        if (this.next_inspect_error) throw this.next_inspect_error
+        return { State: { Running: this.inspect_running } }
+    }
+
+    public removed: string[] = []
+    async removeContainer(container_id: string): Promise<void> {
+        this.removed.push(container_id)
+    }
+
     /**
      * The real KJDocker.seedVolumeFiles writes operator memories +
      * CLAUDE.md into the agent's home volume before the container
@@ -194,9 +211,10 @@ describe('AgentSpawnHandler', () => {
         })
     })
 
-    test('rejects when a container for the agent_id already exists', async () => {
+    test('rejects with ALREADY_RUNNING when a LIVE container already exists', async () => {
         const docker = new FakeDocker()
         docker.containers = [{ container_id: 'existing-abc', agent_id: 42 }]
+        docker.inspect_running = true // the container is alive → adopt, don't respawn
 
         const client = new FakeClient()
         const handler = new AgentSpawnHandler({
@@ -211,9 +229,34 @@ describe('AgentSpawnHandler', () => {
         if (ack.ok) throw new Error('unreachable')
         expect(ack.error.code as string).toBe('ALREADY_RUNNING')
         expect(ack.error.retryable).toBe(false)
+        expect(ack.error.details?.container_id).toBe('existing-abc')
 
-        // No pull, no run, no SPAWNING push.
+        // No pull, no run, and the live container is left untouched.
         expect(docker.pulled).toEqual([])
+        expect(docker.removed).toEqual([])
+    })
+
+    test('removes a DEAD leftover container and spawns fresh (KJ-48)', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'dead-xyz', agent_id: 42 }]
+        docker.inspect_running = false // exited leftover from a crash → remove + respawn
+
+        const client = new FakeClient()
+        const handler = new AgentSpawnHandler({
+            streams: makeStreams(docker, client),
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        const ack = await handler.handle(makePayload())
+        // Not rejected: the dead container is removed and the spawn proceeds.
+        expect(ack.ok).toBe(true)
+        expect(docker.removed).toEqual(['dead-xyz'])
+
+        // Let the background spawn run; it should pull/run a new container.
+        await new Promise((r) => setTimeout(r, 50))
+        expect(docker.ran.length).toBe(1)
     })
 
     test('propagates registry_credentials to pullImage when provided', async () => {
