@@ -381,6 +381,9 @@ export class KJDocker {
         command: string
         timeout_ms: number
         maxOutputBytes?: number
+        // Extra env vars for THIS exec only (KJ-38: a SCRIPT cron's injected
+        // credentials). Merged on top of the container env; never persisted.
+        env?: Record<string, string>
     }): Promise<{ exit_code: number; output: string; truncated: boolean; timedOut: boolean }> {
         const maxBytes = opts.maxOutputBytes ?? 64 * 1024
         const container = this.docker.getContainer(opts.container_id)
@@ -388,6 +391,9 @@ export class KJDocker {
             Cmd: ['/bin/sh', '-c', opts.command],
             AttachStdout: true,
             AttachStderr: true,
+            Env: opts.env
+                ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
+                : undefined,
             // Tty:true merges stdout+stderr into a single RAW stream (no 8-byte
             // multiplex frames), so we read bytes directly — no demux, and no
             // "(HTTP code 101) unexpected" from mishandling the hijacked socket.

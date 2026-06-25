@@ -47,6 +47,8 @@ export class AgentExecHandler {
                 command: payload.command,
                 timeout_ms: payload.timeout_ms ?? 60_000,
                 maxOutputBytes: MAX_OUTPUT_BYTES,
+                // Per-exec env (KJ-38): a SCRIPT cron's injected credentials.
+                env: payload.env,
             })
             this.logger.info(
                 {
