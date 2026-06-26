@@ -542,6 +542,15 @@ export class KJDocker {
         const config = source.Config
         const host = source.HostConfig
 
+        // Carry over the runtime env (KJ_*, HOME, oauth, model, MCP, …) but DROP
+        // PATH: it is provided by the IMAGE, never by spawn, so on an image swap
+        // we want the NEW image's PATH, not the old one frozen in the source
+        // container's Config.Env. Without this, an image that adds dirs to PATH
+        // (e.g. ~/.local/bin for agent-installed tools, KJ-1) would never reach
+        // a recreated container — the stale PATH shadows the new one. New image
+        // ENV PATH wins because docker merges it when no PATH is provided here.
+        const env = (config.Env ?? []).filter((e) => !e.startsWith('PATH='))
+
         // Stop + remove old first; the name has to be free before we
         // can reuse it. Force is on by default — the operator already
         // accepted the downtime by clicking the button.
@@ -551,7 +560,7 @@ export class KJDocker {
         const created = await this.docker.createContainer({
             Image: opts.new_image_tag,
             name: opts.keep_name,
-            Env: config.Env,
+            Env: env,
             Cmd: config.Cmd ?? undefined,
             Entrypoint: config.Entrypoint ?? undefined,
             Labels: config.Labels,

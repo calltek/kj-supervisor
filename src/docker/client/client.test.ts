@@ -23,6 +23,9 @@ class FakeDocker {
             },
             rename: async () => undefined,
             start: async () => undefined,
+            stop: async () => undefined,
+            kill: async () => undefined,
+            remove: async () => undefined,
         }
     }
 
@@ -76,6 +79,49 @@ describe('cloneContainerWithNewImage', () => {
             'KJ_OWN_CONTAINER=kj-supervisor-new-123',
         ])
         expect(fake.createdSpec.name).toBe('kj-supervisor-new-123')
+    })
+})
+
+describe('recreateContainerWithImage', () => {
+    test('keeps runtime env but drops PATH so the new image PATH wins', async () => {
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-7'] = {
+            Config: {
+                Env: [
+                    'PATH=/old/image/path:/usr/bin',
+                    'KJ_AGENT_ID=7',
+                    'HOME=/home/agent',
+                    'CLAUDE_CODE_OAUTH_TOKEN=secret',
+                ],
+                Cmd: null,
+                Entrypoint: null,
+                Labels: {},
+            },
+            HostConfig: {
+                Binds: [],
+                Mounts: [],
+                RestartPolicy: { Name: 'unless-stopped' },
+                NetworkMode: 'host',
+                GroupAdd: [],
+                Memory: 0,
+                NanoCpus: 0,
+            },
+        }
+
+        const docker = makeDocker(fake)
+        await docker.recreateContainerWithImage({
+            source_container: 'kj-agent-7',
+            new_image_tag: 'ghcr.io/calltek/kj-agent-flex:0.2.0',
+            keep_name: 'kj-agent-7',
+        })
+
+        const env: string[] = fake.createdSpec.Env
+        // Runtime env preserved…
+        expect(env).toContain('KJ_AGENT_ID=7')
+        expect(env).toContain('HOME=/home/agent')
+        expect(env).toContain('CLAUDE_CODE_OAUTH_TOKEN=secret')
+        // …but the stale image PATH is gone (docker merges the new image's ENV).
+        expect(env.some((e) => e.startsWith('PATH='))).toBe(false)
     })
 })
 
