@@ -35,6 +35,7 @@ const silentLogger = KJLogger.create('error')
 
 interface InspectInfo {
     Config?: { Env?: string[] | null }
+    State?: { Running?: boolean }
 }
 
 class FakeDocker {
@@ -282,6 +283,57 @@ describe('AgentImageUpdateHandler', () => {
         const final = statuses(client).at(-1)
         expect(final?.container_id).toBe('c-new')
         expect(final?.last_action).toContain('running on ghcr.io/calltek/kj-agent-base:dev-local')
+    })
+
+    test('graceful drain (KJ-22): sends drain, waits for exit, then swaps', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        docker.recreate_returns = 'c-new'
+        // The wrapper "exits" immediately → the drain poll sees it gone.
+        docker.next_inspect = { State: { Running: false } }
+        const client = new FakeClient()
+
+        const controls: Array<{ agent_id: number; envelope: unknown }> = []
+        const fakeStreams = {
+            writeControl: (agent_id: number, envelope: unknown) => {
+                controls.push({ agent_id, envelope })
+                return true // a live stream IS attached → drain runs
+            },
+            detach: () => {},
+        }
+        const handler = new AgentImageUpdateHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            streams: fakeStreams as never,
+            logger: silentLogger,
+        })
+
+        await handler.handle(makePayload({ restart_after: true }))
+        await waitForFinalStatus(client, 'RUNNING')
+
+        // The drain envelope was sent, then the swap happened.
+        expect(controls).toEqual([{ agent_id: 42, envelope: { type: 'drain' } }])
+        expect(docker.recreated).toHaveLength(1)
+    })
+
+    test('no live stream → drain skipped, swap proceeds anyway', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        const client = new FakeClient()
+        const fakeStreams = {
+            writeControl: () => false, // nothing attached
+            detach: () => {},
+        }
+        const handler = new AgentImageUpdateHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            streams: fakeStreams as never,
+            logger: silentLogger,
+        })
+
+        await handler.handle(makePayload({ restart_after: true }))
+        await waitForFinalStatus(client, 'RUNNING')
+        expect(docker.recreated).toHaveLength(1)
     })
 
     test('pull failure + cached locally → fallback, swap proceeds', async () => {

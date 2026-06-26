@@ -32,6 +32,16 @@ import type { AgentImageUpdatePayload, ControlCommandAck, WsErrorPayload } from 
 import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
 
+// Graceful image swap (KJ-22): before recreating, ask the agent to finish its
+// turn(s) and exit on its own (no turn cut). We wait up to this long for the
+// container to go away; past it we force the swap (a turn longer than this, or
+// an OLD wrapper that predates `drain` and ignores it, gets the forced swap —
+// harmless if the agent was idle). Configurable so a rollout can tune it; the
+// default trades "don't cut a normal turn" against "don't stall the first
+// rollout (old wrapper) too long".
+const DRAIN_TIMEOUT_MS = Number.parseInt(process.env.KJ_IMAGE_SWAP_DRAIN_TIMEOUT_MS ?? '', 10) || 180_000
+const DRAIN_POLL_MS = 2_000
+
 export interface AgentImageUpdateHandlerDeps {
     docker: KJDocker
     status: AgentStatusReporter
@@ -187,7 +197,11 @@ export class AgentImageUpdateHandler {
         // 4. Restart_after=true: swap the running container with one
         //    based on the freshly-pulled image, preserving its env +
         //    mounts so the agent reconnects to the same session and
-        //    volume.
+        //    volume. First drain it gracefully (KJ-22) — ask the wrapper to
+        //    finish its in-flight turn(s) and exit on its own, so no
+        //    conversation is cut mid-reply. Times out to a forced swap.
+        await this.gracefulDrain(payload.agent_id, existing, log)
+
         const swapHeartbeat = new StatusHeartbeat({
             reporter: this.status,
             agent_id: payload.agent_id,
@@ -263,6 +277,46 @@ export class AgentImageUpdateHandler {
         const containers = await this.docker.listKjContainers()
         const match = containers.find((c) => c.agent_id === agent_id)
         return match ? match.container_id : null
+    }
+
+    /**
+     * Graceful drain before an image swap (KJ-22). Send a `drain` control
+     * envelope to the wrapper; it finishes any in-flight turn and exits on its
+     * own (the container stops). We poll until the container is gone, up to
+     * DRAIN_TIMEOUT_MS. On timeout (or no live stream) we just return — the
+     * caller's recreate force-kills, same as before. So this never blocks the
+     * swap forever; it only avoids cutting a turn when the agent is busy.
+     */
+    private async gracefulDrain(
+        agent_id: number,
+        container_id: string,
+        log: KJLogger
+    ): Promise<void> {
+        const sent = this.streams.writeControl(agent_id, { type: 'drain' })
+        if (!sent) {
+            log.debug('drain: no live stream to the agent — recreating without draining')
+            return
+        }
+        log.info({ timeout_ms: DRAIN_TIMEOUT_MS }, 'draining agent before swap — waiting for idle')
+        const deadline = Date.now() + DRAIN_TIMEOUT_MS
+        while (Date.now() < deadline) {
+            if (!(await this.isContainerRunning(container_id))) {
+                log.info('drain: agent exited cleanly — proceeding to swap')
+                return
+            }
+            await new Promise((r) => setTimeout(r, DRAIN_POLL_MS))
+        }
+        log.warn('drain: timed out waiting for idle — forcing the swap (in-flight turn cut)')
+    }
+
+    /** True while the container is still running (gone/unreadable → false). */
+    private async isContainerRunning(container_id: string): Promise<boolean> {
+        try {
+            const info = await this.docker.inspect(container_id)
+            return info.State?.Running === true
+        } catch {
+            return false
+        }
     }
 }
 
