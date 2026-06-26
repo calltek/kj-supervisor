@@ -39,7 +39,8 @@ import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbe
 // harmless if the agent was idle). Configurable so a rollout can tune it; the
 // default trades "don't cut a normal turn" against "don't stall the first
 // rollout (old wrapper) too long".
-const DRAIN_TIMEOUT_MS = Number.parseInt(process.env.KJ_IMAGE_SWAP_DRAIN_TIMEOUT_MS ?? '', 10) || 180_000
+const DRAIN_TIMEOUT_MS =
+    Number.parseInt(process.env.KJ_IMAGE_SWAP_DRAIN_TIMEOUT_MS ?? '', 10) || 180_000
 const DRAIN_POLL_MS = 2_000
 
 export interface AgentImageUpdateHandlerDeps {

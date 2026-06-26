@@ -391,9 +391,7 @@ export class KJDocker {
             Cmd: ['/bin/sh', '-c', opts.command],
             AttachStdout: true,
             AttachStderr: true,
-            Env: opts.env
-                ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
-                : undefined,
+            Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
             // Tty:true merges stdout+stderr into a single RAW stream (no 8-byte
             // multiplex frames), so we read bytes directly — no demux, and no
             // "(HTTP code 101) unexpected" from mishandling the hijacked socket.
