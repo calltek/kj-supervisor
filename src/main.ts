@@ -165,6 +165,7 @@ async function main(): Promise<void> {
         docker,
         status: statusReporter,
         streams,
+        tracker,
         logger,
     })
     const inputHandler = new AgentInputHandler({ streams, logger })

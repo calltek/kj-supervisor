@@ -20,6 +20,7 @@ import type {
     WsErrorPayload,
 } from '../../protocol'
 import type { KJContainerSummary } from '../../docker/client/client'
+import { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
 import { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 import { AgentStreamManager } from '../../agent-stream/stream-manager'
 import { McpDispatcher } from '../../agent-stream/mcp-dispatcher'
@@ -131,6 +132,7 @@ function makeHandler(docker: FakeDocker, client: FakeClient): AgentImageUpdateHa
     return new AgentImageUpdateHandler({
         docker: docker as never,
         status: new AgentStatusReporter(client, silentLogger),
+        tracker: new OperationTracker(),
         streams: makeStreams(docker, client),
         logger: silentLogger,
     })
@@ -304,6 +306,7 @@ describe('AgentImageUpdateHandler', () => {
         const handler = new AgentImageUpdateHandler({
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
+            tracker: new OperationTracker(),
             streams: fakeStreams as never,
             logger: silentLogger,
         })
@@ -327,6 +330,7 @@ describe('AgentImageUpdateHandler', () => {
         const handler = new AgentImageUpdateHandler({
             docker: docker as never,
             status: new AgentStatusReporter(client, silentLogger),
+            tracker: new OperationTracker(),
             streams: fakeStreams as never,
             logger: silentLogger,
         })
@@ -334,6 +338,43 @@ describe('AgentImageUpdateHandler', () => {
         await handler.handle(makePayload({ restart_after: true }))
         await waitForFinalStatus(client, 'RUNNING')
         expect(docker.recreated).toHaveLength(1)
+    })
+
+    test('swap tracks the OLD container so its die is not reported as external', async () => {
+        // Regression: the recreate kills + removes the old container. If that
+        // isn't tracked, the events-watcher pushes a spurious "external die"
+        // STOPPED that beats the RUNNING we push for the new container — a
+        // healthy freshly-imaged agent shows as STOPPED (and a fleet rollout's
+        // canary aborts). The fix tracks the old id across the whole swap.
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        docker.recreate_returns = 'c-new'
+        docker.next_inspect = { Config: { Env: ['KJ_SESSION_ID=uuid'] } }
+        const client = new FakeClient()
+        const tracked: string[] = []
+        const untracked: string[] = []
+        const spyTracker = {
+            track: (id: string) => tracked.push(id),
+            untrack: (id: string) => untracked.push(id),
+            isTracked: (id: string) => tracked.includes(id) && !untracked.includes(id),
+        }
+        const handler = new AgentImageUpdateHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            streams: makeStreams(docker, client),
+            tracker: spyTracker as never,
+            logger: silentLogger,
+        })
+
+        await handler.handle(makePayload({ restart_after: true }))
+        await waitForFinalStatus(client, 'RUNNING')
+
+        // The OLD container was tracked during the swap and released after.
+        expect(tracked).toContain('c-old')
+        expect(untracked).toContain('c-old')
+        // The NEW container is never tracked — a genuine crash of it must be
+        // reported by the events-watcher.
+        expect(tracked).not.toContain('c-new')
     })
 
     test('pull failure + cached locally → fallback, swap proceeds', async () => {

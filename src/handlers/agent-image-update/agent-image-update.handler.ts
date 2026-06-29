@@ -27,6 +27,7 @@ import {
     type KJDocker,
     type PullProgressEvent,
 } from '../../docker/client/client'
+import type { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
 import type { KJLogger } from '../../logger'
 import type { AgentImageUpdatePayload, ControlCommandAck, WsErrorPayload } from '../../protocol'
 import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
@@ -47,6 +48,7 @@ export interface AgentImageUpdateHandlerDeps {
     docker: KJDocker
     status: AgentStatusReporter
     streams: AgentStreamManager
+    tracker: OperationTracker
     logger: KJLogger
 }
 
@@ -54,12 +56,14 @@ export class AgentImageUpdateHandler {
     private readonly docker: KJDocker
     private readonly status: AgentStatusReporter
     private readonly streams: AgentStreamManager
+    private readonly tracker: OperationTracker
     private readonly logger: KJLogger
 
     constructor(deps: AgentImageUpdateHandlerDeps) {
         this.docker = deps.docker
         this.status = deps.status
         this.streams = deps.streams
+        this.tracker = deps.tracker
         this.logger = deps.logger.child({ component: 'agent-image-update' })
     }
 
@@ -172,9 +176,14 @@ export class AgentImageUpdateHandler {
                 { container_id: existing },
                 'pull complete, stopping container per restart_after=false'
             )
+            // Track the container so the events-watcher treats the die/destroy
+            // as OURS, not as an external crash (otherwise it'd push a spurious
+            // "external die" STOPPED on top of ours — same race as the swap).
+            this.tracker.track(existing)
             try {
                 await this.docker.stopContainer(existing, { force: true })
                 await this.docker.removeContainer(existing)
+                this.tracker.untrack(existing)
                 this.status.push({
                     agent_id: payload.agent_id,
                     status: 'STOPPED',
@@ -183,6 +192,7 @@ export class AgentImageUpdateHandler {
                     last_action_at: Date.now(),
                 })
             } catch (err) {
+                this.tracker.untrack(existing)
                 log.error({ err: errMessage(err) }, 'stop+remove failed after pull')
                 this.status.push({
                     agent_id: payload.agent_id,
@@ -201,6 +211,16 @@ export class AgentImageUpdateHandler {
         //    volume. First drain it gracefully (KJ-22) — ask the wrapper to
         //    finish its in-flight turn(s) and exit on its own, so no
         //    conversation is cut mid-reply. Times out to a forced swap.
+        //
+        // Track the OLD container across the whole drain+swap: its drain-exit,
+        // kill and destroy are all OURS. Without this the events-watcher sees
+        // the old container die and pushes a spurious "external die" STOPPED
+        // that races (and usually beats) the RUNNING we push for the NEW
+        // container — leaving a healthy, freshly-imaged agent shown as STOPPED
+        // (and aborting a fleet rollout's canary). We only track the OLD id; the
+        // NEW one stays untracked so a genuine crash of it IS reported.
+        this.tracker.track(existing)
+
         await this.gracefulDrain(payload.agent_id, existing, log)
 
         const swapHeartbeat = new StatusHeartbeat({
@@ -230,6 +250,7 @@ export class AgentImageUpdateHandler {
                 resources: payload.resources,
             })
         } catch (err) {
+            this.tracker.untrack(existing)
             swapHeartbeat.stop()
             log.error({ err: errMessage(err) }, 'recreate failed')
             this.status.push({
@@ -241,6 +262,7 @@ export class AgentImageUpdateHandler {
             })
             return
         }
+        this.tracker.untrack(existing)
         swapHeartbeat.stop()
 
         // Re-attach stdio so the operator UI keeps receiving
