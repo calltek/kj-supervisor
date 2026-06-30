@@ -117,7 +117,7 @@ function makeStreams(docker: FakeDocker, client: FakeClient): AgentStreamManager
     const mcp = new McpDispatcher({
         sendRequest: async () => ({ ok: true, data: {} }),
         writeToContainer: () => true,
-        resolveContactId: () => undefined,
+        resolveTarget: () => ({}),
         logger: silentLogger,
     })
     return new AgentStreamManager({
