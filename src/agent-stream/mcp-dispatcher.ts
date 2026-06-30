@@ -36,6 +36,17 @@ export interface McpRequestEnvelope {
     request_id: string
     tool: string
     args: Record<string, unknown>
+    /**
+     * Conversation session UUID that issued this call (KUJI-84). The
+     * in-container kj-mcp reads it off its per-session URL
+     * (`/mcp?session=<uuid>`) and stamps it here so we route
+     * conversation/contact-scoped tools (attachment_send, model_set,
+     * user_*, …) to the conversation that ACTUALLY made the call —
+     * not the last person who wrote (last_active_session_id), which
+     * leaked attachments across parallel conversations. Optional: when
+     * absent (older agent image) we fall back to the legacy heuristic.
+     */
+    conversation_session_id?: string
 }
 
 export interface McpResponseEnvelope {
@@ -76,14 +87,16 @@ export interface McpDispatcherDeps {
      * (success OR error). Rejects only on transport-level failure.
      * The supervisor stamps `agent_id` from its container map and
      * forwards the `request_id` untouched so the in-container MCP
-     * can match its own pending promise.
+     * can match its own pending promise. `conversation_id`/`contact_id`
+     * pin the destination thread (KUJI-84) so conversation/contact-
+     * scoped tools land where the call was actually made.
      */
     sendRequest: (
         agent_id: number,
         request_id: string,
         tool: string,
         args: Record<string, unknown>,
-        contact_id: number | undefined
+        target: { conversation_id?: number; contact_id?: number }
     ) => Promise<McpRequestAck>
     /**
      * Write a line to the agent's container stdin. Used to forward the
@@ -91,12 +104,19 @@ export interface McpDispatcherDeps {
      */
     writeToContainer: (agent_id: number, envelope: McpEnvelope) => boolean
     /**
-     * Resolve the contact_id the in-container MCP call belongs to.
-     * The agent doesn't tell us — the supervisor knows it from the
-     * most recent `agent:input` that flowed through that container.
-     * Returns undefined when no input has primed the stream yet.
+     * Resolve the destination (conversation_id + contact_id) an
+     * in-container MCP call belongs to (KUJI-84). When the envelope
+     * carries `conversation_session_id` (current images) we resolve it
+     * from the supervisor's per-session routing tables — the exact
+     * conversation that made the call. When it's absent (older images)
+     * we fall back to the last-active heuristic, hence the optional
+     * arg. Returns `{}` when nothing is known yet (e.g. a boot-prompt
+     * tool call before any input primed the stream).
      */
-    resolveContactId: (agent_id: number) => number | undefined
+    resolveTarget: (
+        agent_id: number,
+        conversation_session_id: string | undefined
+    ) => { conversation_id?: number; contact_id?: number }
     logger: KJLogger
 }
 
@@ -165,7 +185,7 @@ export class McpDispatcher {
         })
         log.debug('forwarding mcp request to control')
 
-        const contact_id = this.deps.resolveContactId(agent_id)
+        const target = this.deps.resolveTarget(agent_id, request.conversation_session_id)
         let response: McpResponseEnvelope
         try {
             const ack = await this.deps.sendRequest(
@@ -173,7 +193,7 @@ export class McpDispatcher {
                 request.request_id,
                 request.tool,
                 request.args,
-                contact_id
+                target
             )
             response = ack.ok
                 ? {

@@ -58,7 +58,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
-            resolveContactId: () => undefined,
+            resolveTarget: () => ({}),
             logger: silentLogger(),
         })
 
@@ -88,6 +88,43 @@ describe('McpDispatcher.onContainerLine', () => {
         ])
     })
 
+    test('routes by the envelope conversation_session_id, not the last-active heuristic (KUJI-84)', async () => {
+        const resolveCalls: Array<string | undefined> = []
+        const sentTargets: Array<{ conversation_id?: number; contact_id?: number }> = []
+        const dispatcher = new McpDispatcher({
+            sendRequest: async (_agent_id, _request_id, _tool, _args, target) => {
+                sentTargets.push(target)
+                return { ok: true, data: {} } satisfies McpRequestAck
+            },
+            writeToContainer: () => true,
+            // Echo a deterministic target per session so we can assert the
+            // dispatcher forwarded the envelope's session, not a guess.
+            resolveTarget: (_agent_id, session) => {
+                resolveCalls.push(session)
+                return session === 'sess-elena'
+                    ? { conversation_id: 148, contact_id: 152 }
+                    : { conversation_id: 149, contact_id: 153 }
+            },
+            logger: silentLogger(),
+        })
+
+        dispatcher.onContainerLine(7, {
+            kj_channel: 'mcp',
+            kind: 'request',
+            request_id: 'r-att',
+            tool: 'attachment_send',
+            args: { filename: 'hoja.pdf' },
+            conversation_session_id: 'sess-elena',
+        })
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+
+        // The dispatcher resolved using the session the CALL carried,
+        // and stamped Elena's conversation/contact — never Bego's.
+        expect(resolveCalls).toEqual(['sess-elena'])
+        expect(sentTargets).toEqual([{ conversation_id: 148, contact_id: 152 }])
+    })
+
     test('forwards a structured error ack back to the container', async () => {
         const writes: McpEnvelope[] = []
         const dispatcher = new McpDispatcher({
@@ -104,7 +141,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
-            resolveContactId: () => undefined,
+            resolveTarget: () => ({}),
             logger: silentLogger(),
         })
 
@@ -135,7 +172,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
-            resolveContactId: () => undefined,
+            resolveTarget: () => ({}),
             logger: silentLogger(),
         })
 
@@ -165,7 +202,7 @@ describe('McpDispatcher.onContainerLine', () => {
                 writes.push(envelope)
                 return true
             },
-            resolveContactId: () => undefined,
+            resolveTarget: () => ({}),
             logger: silentLogger(),
         })
 
@@ -190,7 +227,7 @@ describe('McpDispatcher.forwardPushToContainer', () => {
                 writes.push(envelope)
                 return true
             },
-            resolveContactId: () => undefined,
+            resolveTarget: () => ({}),
             logger: silentLogger(),
         })
 
@@ -215,7 +252,7 @@ describe('McpDispatcher.forwardPushToContainer', () => {
         const dispatcher = new McpDispatcher({
             sendRequest: async () => ({ ok: true, data: {} }) satisfies McpRequestAck,
             writeToContainer: () => false,
-            resolveContactId: () => undefined,
+            resolveTarget: () => ({}),
             logger: silentLogger(),
         })
         // Just checks it doesn't throw.
