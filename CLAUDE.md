@@ -1,5 +1,14 @@
 # Kujira — Supervisor (`kj-supervisor`)
 
+> **⚙️ Flujo de desarrollo (2026-06-30) — léelo antes de tocar nada.**
+> Ramas + **Pull Request**, nunca commit directo a `main` (varios agentes/personas
+> en paralelo; `main` auto-despliega vía Dokploy al mergear). Trabajo en paralelo →
+> un **`git worktree` por tarea** (compartir el working dir = un solo HEAD → os
+> pisáis al cambiar de rama). Y **no se desarrolla Kujira dentro de Kujira-prod**:
+> el core/deploy se hace con agentes de fuera (Claude Code + worktrees + CI);
+> dogfooding solo en tareas auxiliares aisladas. Detalle completo en
+> `kj-backend/CLAUDE.md` §6.
+
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
 una conexión WebSocket persistente con el control (`kj-backend`) y
 orquesta el ciclo de vida de los agentes Claude locales: levanta,
