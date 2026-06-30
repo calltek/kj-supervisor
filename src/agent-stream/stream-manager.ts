@@ -56,10 +56,13 @@ interface AgentStream {
     contact_id_by_session: Map<string, number>
     /**
      * Last conversation session the supervisor wrote to this stream.
-     * The MCP dispatcher uses it to pick the contact_id to stamp on
-     * `mcp:request` calls coming back from the container — the agent
-     * doesn't know which contact it's talking to right now, the
-     * supervisor does.
+     *
+     * @deprecated LEGACY heuristic — do NOT use as the source of truth for
+     * routing MCP calls (KUJI-84). Resolving an MCP call's target from this
+     * field is what leaked attachments across parallel conversations. It is
+     * kept ONLY as a best-effort fallback in `resolveTarget` for old agent
+     * images that don't stamp `conversation_session_id` on the envelope.
+     * Current images always carry the calling session — route by that.
      */
     last_active_session_id: string | null
 }
@@ -113,7 +116,28 @@ export class AgentStreamManager {
     ): { conversation_id?: number; contact_id?: number } {
         const entry = this.streams.get(agent_id)
         if (!entry) return {}
-        const session = conversation_session_id ?? entry.last_active_session_id
+        // KUJI-84: prefer the session the CALL carried. Only fall back to the
+        // legacy last-active heuristic for old agent images that don't stamp
+        // it. That fallback is exactly what leaked attachments across parallel
+        // conversations, so when we take it AND more than one conversation is
+        // active we log a warning — a current image should never land here,
+        // and a silent fallback in a data-leak path must stay observable.
+        let session: string | null | undefined = conversation_session_id
+        if (!session) {
+            if (entry.contact_id_by_session.size > 1) {
+                this.logger.warn(
+                    {
+                        agent_id,
+                        active_sessions: entry.contact_id_by_session.size,
+                        fallback_session: entry.last_active_session_id,
+                    },
+                    'mcp request without conversation_session_id while multiple ' +
+                        'conversations are active — falling back to last-active ' +
+                        'heuristic (KUJI-84). Update the agent image to stop guessing.'
+                )
+            }
+            session = entry.last_active_session_id
+        }
         if (!session) return {}
         return {
             conversation_id: entry.conversation_id_by_session.get(session),
@@ -291,10 +315,10 @@ export class AgentStreamManager {
                 payload.conversation_id
             )
         }
-        // Same idea for contact_id — but the MCP user_* tools pick the
-        // contact from `last_active_session_id` rather than mapping by
-        // a session id the agent never sees. Persist both so we can
-        // reconstruct intent after restarts.
+        // Persist contact_id keyed by this conversation's session so an MCP
+        // call coming from it resolves to the right contact (KUJI-84 resolves
+        // by the call's own session, NOT last_active_session_id). Keeping the
+        // map also lets us reconstruct intent after restarts.
         if (payload.contact_id !== undefined) {
             entry.contact_id_by_session.set(sessionForInput, payload.contact_id)
         }
