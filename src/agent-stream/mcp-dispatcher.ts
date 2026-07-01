@@ -96,7 +96,15 @@ export interface McpDispatcherDeps {
         request_id: string,
         tool: string,
         args: Record<string, unknown>,
-        target: { conversation_id?: number; contact_id?: number }
+        // conversation_session_id is the RAW stamp from the container (the
+        // per-session kj-mcp URL) — the control resolves the conversation from
+        // it against the DB (authoritative), rather than trusting our
+        // in-memory-map guess. conversation_id/contact_id stay as a legacy hint.
+        target: {
+            conversation_id?: number
+            contact_id?: number
+            conversation_session_id?: string
+        }
     ) => Promise<McpRequestAck>
     /**
      * Write a line to the agent's container stdin. Used to forward the
@@ -193,7 +201,10 @@ export class McpDispatcher {
                 request.request_id,
                 request.tool,
                 request.args,
-                target
+                // Pass the container's RAW session stamp through so the control
+                // can resolve the conversation authoritatively (from the DB),
+                // not from our best-effort in-memory routing map.
+                { ...target, conversation_session_id: request.conversation_session_id }
             )
             response = ack.ok
                 ? {

@@ -136,6 +136,12 @@ async function main(): Promise<void> {
                         ? { conversation_id: target.conversation_id }
                         : {}),
                     ...(target.contact_id !== undefined ? { contact_id: target.contact_id } : {}),
+                    // The container's raw session stamp — the control resolves
+                    // the conversation from it against the DB (KJ-27: strict,
+                    // origin-agnostic filtering, no in-memory-map guessing).
+                    ...(target.conversation_session_id !== undefined
+                        ? { conversation_session_id: target.conversation_session_id }
+                        : {}),
                 },
                 15000
             ),
