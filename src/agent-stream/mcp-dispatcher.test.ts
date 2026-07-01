@@ -90,7 +90,11 @@ describe('McpDispatcher.onContainerLine', () => {
 
     test('routes by the envelope conversation_session_id, not the last-active heuristic (KUJI-84)', async () => {
         const resolveCalls: Array<string | undefined> = []
-        const sentTargets: Array<{ conversation_id?: number; contact_id?: number }> = []
+        const sentTargets: Array<{
+            conversation_id?: number
+            contact_id?: number
+            conversation_session_id?: string
+        }> = []
         const dispatcher = new McpDispatcher({
             sendRequest: async (_agent_id, _request_id, _tool, _args, target) => {
                 sentTargets.push(target)
@@ -120,9 +124,13 @@ describe('McpDispatcher.onContainerLine', () => {
         await new Promise((r) => setImmediate(r))
 
         // The dispatcher resolved using the session the CALL carried,
-        // and stamped Elena's conversation/contact — never Bego's.
+        // and stamped Elena's conversation/contact — never Bego's. It ALSO
+        // forwards the RAW session stamp (KJ-27) so the control can resolve
+        // the conversation authoritatively from the DB, not from our map hint.
         expect(resolveCalls).toEqual(['sess-elena'])
-        expect(sentTargets).toEqual([{ conversation_id: 148, contact_id: 152 }])
+        expect(sentTargets).toEqual([
+            { conversation_id: 148, contact_id: 152, conversation_session_id: 'sess-elena' },
+        ])
     })
 
     test('forwards a structured error ack back to the container', async () => {
