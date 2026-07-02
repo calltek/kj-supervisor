@@ -345,6 +345,11 @@ export class AgentStreamManager {
         // Per-conversation model (KUJI-39): the wrapper starts/recycles this
         // session's claude with `--model <this>`. Pure passthrough.
         if (payload.model) envelope.model = payload.model
+        // Per-conversation context cap (eje A): the wrapper compacts the
+        // session in place when its context crosses it. Pure passthrough
+        // (0 = no cap, so forward it too — only skip when absent).
+        if (payload.max_context_tokens !== undefined)
+            envelope.max_context_tokens = payload.max_context_tokens
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
