@@ -44,6 +44,7 @@ import {
     type AgentRestoreAck,
     type AgentRestorePayload,
     type AgentInputPayload,
+    type AgentInterruptPayload,
     type AgentPausePayload,
     type AgentResumePayload,
     type AgentSkillsChangedPayload,
@@ -212,6 +213,32 @@ async function main(): Promise<void> {
     client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) =>
         inputHandler.handle(payload)
     )
+    // KJ-3: cut the turn in flight. Best-effort: a busy session gets a claude
+    // control_request/interrupt on its own stdin; idle/no-stream → a soft error.
+    client.onCommand<AgentInterruptPayload, ControlCommandAck>('agent:interrupt', (payload) => {
+        const r = streams.interrupt(payload)
+        if (r.ok) {
+            logger.debug(
+                { request_id: payload.request_id, agent_id: payload.agent_id },
+                'agent:interrupt delivered'
+            )
+            return { ok: true, accepted: true }
+        }
+        return {
+            ok: false,
+            error: {
+                code:
+                    r.reason === 'no_stream'
+                        ? WS_ERROR_CODES.AGENT_NOT_RUNNING
+                        : WS_ERROR_CODES.INTERNAL_ERROR,
+                message:
+                    r.reason === 'no_stream'
+                        ? `agent ${payload.agent_id} has no live stream`
+                        : 'failed to write interrupt to agent stdin',
+                retryable: false,
+            },
+        }
+    })
     client.onCommand<AgentExecPayload, AgentExecAck>('agent:exec', (payload) =>
         execHandler.handle(payload)
     )
