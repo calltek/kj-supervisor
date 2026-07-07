@@ -611,6 +611,19 @@ export class KJDocker {
                 NanoCpus: opts.resources
                     ? Math.round(opts.resources.cpu * 1_000_000_000)
                     : host.NanoCpus,
+                // Re-apply the SAME security posture runContainer sets on a fresh
+                // spawn. This was silently dropped before, so a recreated agent
+                // (image:update / catalogue bump) ran with Docker's ~14 default
+                // caps and no `no-new-privileges` — a real hardening regression.
+                // CapDrop ALL + no-new-privileges always; carry the source's
+                // CapAdd/Devices so a privileged (VPN) agent keeps /dev/net/tun +
+                // NET_ADMIN across the recreate instead of losing them silently
+                // (KJ-156). The source is the source of truth for this agent's
+                // intended networking.
+                CapDrop: ['ALL'],
+                SecurityOpt: ['no-new-privileges'],
+                ...(host.CapAdd?.length ? { CapAdd: host.CapAdd } : {}),
+                ...(host.Devices?.length ? { Devices: host.Devices } : {}),
             },
         })
 
