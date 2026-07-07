@@ -64,7 +64,11 @@ export class AgentExecHandler {
                 request_id: payload.request_id,
                 exit_code: result.exit_code,
                 output: result.output,
-                truncated: result.truncated || result.timedOut,
+                truncated: result.truncated,
+                // Report the timeout as its own reason (KJ-131) instead of
+                // masking it as a truncated success — the control marks the run
+                // TIMEOUT off this.
+                timed_out: result.timedOut,
             }
         } catch (err) {
             return {
