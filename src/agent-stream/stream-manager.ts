@@ -22,7 +22,7 @@ import { PassThrough } from 'node:stream'
 
 import type { KJDocker } from '../docker/client/client'
 import type { KJLogger } from '../logger'
-import type { AgentInputPayload } from '../protocol'
+import type { AgentInputPayload, AgentInterruptPayload } from '../protocol'
 import { isMcpEnvelope, type McpDispatcher, type McpEnvelope } from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
@@ -301,6 +301,21 @@ export class AgentStreamManager {
      * If conversation_session_id is absent the agent falls back to its
      * default session (Phase A behaviour) — useful for old test paths.
      */
+    /**
+     * KJ-3: cut the turn in flight for a conversation. Resolves the target
+     * session the same way `write()` does (explicit → last active → cold
+     * session_id) and writes an `interrupt` control envelope; agent-base turns
+     * it into a claude `control_request/interrupt` on that session's process.
+     */
+    interrupt(payload: AgentInterruptPayload): { ok: boolean; reason?: string } {
+        const entry = this.streams.get(payload.agent_id)
+        if (!entry) return { ok: false, reason: 'no_stream' }
+        const session_id =
+            payload.conversation_session_id ?? entry.last_active_session_id ?? entry.session_id
+        const ok = this.writeControl(payload.agent_id, { type: 'interrupt', session_id })
+        return ok ? { ok: true } : { ok: false, reason: 'write_failed' }
+    }
+
     write(payload: AgentInputPayload): { ok: boolean; reason?: string } {
         const entry = this.streams.get(payload.agent_id)
         if (!entry) return { ok: false, reason: 'no_stream' }
