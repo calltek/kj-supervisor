@@ -125,6 +125,107 @@ describe('recreateContainerWithImage', () => {
     })
 })
 
+describe('runContainer — privileged networking (KJ-156)', () => {
+    test('network_privileged adds CAP_NET_ADMIN + /dev/net/tun, keeps the lockdown', async () => {
+        const fake = new FakeDocker()
+        await makeDocker(fake).runContainer({
+            image_tag: 'ghcr.io/calltek/kj-agent-flex:0.2.0',
+            name: 'kj-agent-9',
+            env: {},
+            labels: {},
+            resources: { memory_mb: 512, cpu: 1 },
+            network_privileged: true,
+        })
+        const hc = fake.createdSpec.HostConfig
+        expect(hc.CapDrop).toEqual(['ALL'])
+        expect(hc.CapAdd).toEqual(['NET_ADMIN'])
+        expect(hc.Devices).toEqual([
+            {
+                PathOnHost: '/dev/net/tun',
+                PathInContainer: '/dev/net/tun',
+                CgroupPermissions: 'rwm',
+            },
+        ])
+        expect(hc.SecurityOpt).toEqual(['no-new-privileges'])
+    })
+
+    test('the default container is locked down (no CapAdd / Devices)', async () => {
+        const fake = new FakeDocker()
+        await makeDocker(fake).runContainer({
+            image_tag: 'img',
+            name: 'kj-agent-1',
+            env: {},
+            labels: {},
+            resources: { memory_mb: 512, cpu: 1 },
+        })
+        const hc = fake.createdSpec.HostConfig
+        expect(hc.CapDrop).toEqual(['ALL'])
+        expect(hc.CapAdd).toBeUndefined()
+        expect(hc.Devices).toBeUndefined()
+        expect(hc.SecurityOpt).toEqual(['no-new-privileges'])
+    })
+})
+
+describe('recreateContainerWithImage — security posture (KJ-156)', () => {
+    const baseHost = {
+        Binds: [],
+        Mounts: [],
+        RestartPolicy: { Name: 'unless-stopped' },
+        NetworkMode: 'bridge',
+        GroupAdd: [],
+        Memory: 0,
+        NanoCpus: 0,
+    }
+
+    test('re-applies CapDrop ALL + no-new-privileges and carries the source CapAdd/Devices', async () => {
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-9'] = {
+            Config: { Env: [], Cmd: null, Entrypoint: null, Labels: {} },
+            HostConfig: {
+                ...baseHost,
+                CapAdd: ['NET_ADMIN'],
+                Devices: [
+                    {
+                        PathOnHost: '/dev/net/tun',
+                        PathInContainer: '/dev/net/tun',
+                        CgroupPermissions: 'rwm',
+                    },
+                ],
+            },
+        }
+        await makeDocker(fake).recreateContainerWithImage({
+            source_container: 'kj-agent-9',
+            new_image_tag: 'img:new',
+            keep_name: 'kj-agent-9',
+        })
+        const hc = fake.createdSpec.HostConfig
+        // hardening re-applied (was silently dropped before)…
+        expect(hc.CapDrop).toEqual(['ALL'])
+        expect(hc.SecurityOpt).toEqual(['no-new-privileges'])
+        // …and the privileged networking survives the recreate.
+        expect(hc.CapAdd).toEqual(['NET_ADMIN'])
+        expect(hc.Devices?.[0]?.PathInContainer).toBe('/dev/net/tun')
+    })
+
+    test('a non-privileged source recreates locked down (no CapAdd/Devices)', async () => {
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-1'] = {
+            Config: { Env: [], Cmd: null, Entrypoint: null, Labels: {} },
+            HostConfig: { ...baseHost },
+        }
+        await makeDocker(fake).recreateContainerWithImage({
+            source_container: 'kj-agent-1',
+            new_image_tag: 'img:new',
+            keep_name: 'kj-agent-1',
+        })
+        const hc = fake.createdSpec.HostConfig
+        expect(hc.CapDrop).toEqual(['ALL'])
+        expect(hc.SecurityOpt).toEqual(['no-new-privileges'])
+        expect(hc.CapAdd).toBeUndefined()
+        expect(hc.Devices).toBeUndefined()
+    })
+})
+
 describe('getOwnContainerName', () => {
     test('prefers KJ_OWN_CONTAINER (reliable under --network host)', async () => {
         process.env.KJ_OWN_CONTAINER = 'kj-supervisor-new-9'

@@ -342,6 +342,11 @@ export class AgentSpawnHandler {
                 // skills, memories across stop+start. Docker creates the
                 // volume on first use. Skip for alpine smoke containers.
                 home_volume_name: homeVolume,
+                // KJ-156: privileged networking (VPN) — opt-in per agent. Cast
+                // until the control's /protocol (pulled at build) ships the
+                // field; harmless (undefined) on older control planes.
+                network_privileged: (payload as { network_privileged?: boolean })
+                    .network_privileged,
             })
         } catch (err) {
             log.error({ err: errMessage(err) }, 'docker run failed')
