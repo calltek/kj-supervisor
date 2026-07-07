@@ -49,6 +49,12 @@ export interface KJContainerRunOptions {
      * memories, skills) across stop+start. Created on demand if missing.
      */
     home_volume_name?: string
+    /**
+     * Privileged networking (KJ-156): add the `/dev/net/tun` device +
+     * `CAP_NET_ADMIN` so the agent can bring up a VPN itself. Opt-in per agent;
+     * everything else stays locked down (CapDrop ALL + no-new-privileges).
+     */
+    network_privileged?: boolean
 }
 
 export interface KJContainerSummary {
@@ -198,7 +204,22 @@ export class KJDocker {
                 Memory: opts.resources.memory_mb * 1024 * 1024,
                 NanoCpus: Math.round(opts.resources.cpu * 1_000_000_000),
                 // Security defaults: drop everything, no privilege escalation.
+                // KJ-156: an opt-in agent additionally gets CAP_NET_ADMIN (only
+                // that — CapDrop ALL still strips the rest) + the /dev/net/tun
+                // device so it can run a VPN. `no-new-privileges` stays on.
                 CapDrop: ['ALL'],
+                ...(opts.network_privileged ? { CapAdd: ['NET_ADMIN'] } : {}),
+                ...(opts.network_privileged
+                    ? {
+                          Devices: [
+                              {
+                                  PathOnHost: '/dev/net/tun',
+                                  PathInContainer: '/dev/net/tun',
+                                  CgroupPermissions: 'rwm',
+                              },
+                          ],
+                      }
+                    : {}),
                 SecurityOpt: ['no-new-privileges'],
                 // Restart so the container survives docker daemon restarts but
                 // not its own crashes (the supervisor decides whether to relaunch).
