@@ -27,6 +27,7 @@ import {
     type KJDocker,
     type PullProgressEvent,
 } from '../../docker/client/client'
+import { describeDockerRunFailure } from '../../docker/spawn-error'
 import type { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
 import type { KJLogger } from '../../logger'
 import type { AgentImageUpdatePayload, ControlCommandAck, WsErrorPayload } from '../../protocol'
@@ -257,7 +258,7 @@ export class AgentImageUpdateHandler {
                 agent_id: payload.agent_id,
                 status: 'ERROR',
                 container_id: null,
-                last_action: `recreate failed: ${errMessage(err)}`,
+                last_action: describeDockerRunFailure(err, 'recreate failed'),
                 last_action_at: Date.now(),
             })
             return

@@ -20,6 +20,7 @@ import type { AgentStatusReporter } from '../../reporters/agent-status/agent-sta
 import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 import type { KJLogger } from '../../logger'
+import { describeDockerRunFailure } from '../../docker/spawn-error'
 import { isMutableTag } from './image-tag'
 
 export interface AgentSpawnHandlerDeps {
@@ -354,7 +355,7 @@ export class AgentSpawnHandler {
                 agent_id: payload.agent_id,
                 status: 'ERROR',
                 container_id: null,
-                last_action: `docker run failed: ${errMessage(err)}`,
+                last_action: describeDockerRunFailure(err, 'docker run failed'),
                 last_action_at: Date.now(),
             })
             return
