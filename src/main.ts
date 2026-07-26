@@ -261,12 +261,6 @@ async function main(): Promise<void> {
         void upgradeHandler.handle(payload)
     })
 
-    // Skills hot-reload: the operator (re)assigned/edited a skill on a
-    // RUNNING agent. Re-seed `.claude/skills/` on the volume (purge +
-    // rewrite, exactly like spawn) then tell the wrapper to recycle its
-    // claude pool. No container restart, no conversation loss; busy
-    // sessions finish their turn first (wrapper-side). Best-effort: if
-    // the agent isn't running locally, the next spawn seeds it anyway.
     // Warm a session before the call starts (llamadas): the control asks for
     // it the moment someone presses "call", so the model/effort swap — which
     // costs a session recycle — happens while the UI rings and the mic is shut,
@@ -276,18 +270,24 @@ async function main(): Promise<void> {
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
         const delivered = streams.writeControl(payload.agent_id, {
             type: 'warmup',
-            session_id: payload.session_id,
+            conversation_session_id: payload.conversation_session_id,
             ...(payload.model ? { model: payload.model } : {}),
             ...(payload.effort ? { effort: payload.effort } : {}),
         })
         logger
             .child({ agent_id: payload.agent_id, component: 'warmup' })
             .info(
-                { delivered, session_id: payload.session_id },
+                { delivered, session_id: payload.conversation_session_id },
                 delivered ? 'warm-up signalled to wrapper' : 'agent not attached — warm-up skipped'
             )
     })
 
+    // Skills hot-reload: the operator (re)assigned/edited a skill on a
+    // RUNNING agent. Re-seed `.claude/skills/` on the volume (purge +
+    // rewrite, exactly like spawn) then tell the wrapper to recycle its
+    // claude pool. No container restart, no conversation loss; busy
+    // sessions finish their turn first (wrapper-side). Best-effort: if
+    // the agent isn't running locally, the next spawn seeds it anyway.
     client.onPush<AgentSkillsChangedPayload>('agent:skills_changed', (payload) => {
         void (async () => {
             const log = logger.child({ agent_id: payload.agent_id, component: 'skills-changed' })
