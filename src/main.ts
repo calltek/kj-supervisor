@@ -368,10 +368,16 @@ async function main(): Promise<void> {
             )
         }
 
+        // Stable identity of this machine, so the control can refuse a second
+        // registration of the same box (one machine = one server = one org).
+        // Best-effort: if the daemon won't answer we simply don't report it.
+        const machine_id = await docker.machineId().catch(() => undefined)
+
         const payload: ServerHelloPayload = {
             kj_agent_version: settings.kj_agent_version,
             protocol_version: PROTOCOL_VERSION,
             hostname: hostname(),
+            ...(machine_id ? { machine_id } : {}),
             containers: live_containers,
             // Host specs — let the control persist them so the
             // operator never has to type them on the create form.

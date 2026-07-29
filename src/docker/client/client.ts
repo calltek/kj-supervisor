@@ -96,6 +96,28 @@ export class KJDocker {
     }
 
     /**
+     * The Docker daemon's own ID — a stable fingerprint of THIS machine.
+     *
+     * The control plane uses it to enforce one machine = one server = one
+     * organization: installing a second supervisor on a box used to evict the
+     * first one in silence. The hostname can't do that job (it repeats across
+     * boxes and changes on a whim) and neither can the observed IP (dynamic on
+     * a NAS, shared behind NAT). The daemon ID is stable per Docker install and
+     * readable on Linux, Synology DSM and macOS alike, unlike /etc/machine-id.
+     *
+     * Returns undefined when the daemon won't say: the control simply can't
+     * enforce uniqueness for this host, which is where we already were.
+     */
+    async machineId(): Promise<string | undefined> {
+        try {
+            const info = (await this.docker.info()) as { ID?: unknown }
+            return typeof info.ID === 'string' && info.ID.length > 0 ? info.ID : undefined
+        } catch {
+            return undefined
+        }
+    }
+
+    /**
      * Returns true when the daemon already has a local image with the
      * given tag. Used by the spawn handler to skip the pull entirely
      * when the image is cached — important for development (where the
