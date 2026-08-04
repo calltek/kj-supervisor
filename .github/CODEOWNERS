@@ -1,0 +1,18 @@
+# Gestionado por SOKI (agente de seguridad de la org).
+# Objetivo: que GitHub asigne la review sola segun la ruta tocada.
+# OJO: gana la ULTIMA linea que coincide, las reglas NO se acumulan ->
+# por eso en las rutas sensibles van AMBOS owners.
+
+# Todo -> Nova (logica y calidad)
+*                        @n0v4-SYS
+
+# Superficie de seguridad -> Nova + SOKI
+/.github/                @n0v4-SYS @SOKY-SYS
+Dockerfile*              @n0v4-SYS @SOKY-SYS
+docker*.yml              @n0v4-SYS @SOKY-SYS
+.env.example             @n0v4-SYS @SOKY-SYS
+package.json             @n0v4-SYS @SOKY-SYS
+/src/client/auth/                                @n0v4-SYS @SOKY-SYS
+/src/oauth/                                      @n0v4-SYS @SOKY-SYS
+/src/handlers/oauth-exchange/                    @n0v4-SYS @SOKY-SYS
+/src/docker/                                     @n0v4-SYS @SOKY-SYS
