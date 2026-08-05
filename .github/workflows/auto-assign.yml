@@ -1,0 +1,26 @@
+# Asigna a 50l3r como *assignee* de todo PR nuevo, para tenerlos localizados
+# en `assignee:@me`. Es a proposito distinto de CODEOWNERS: ese fichero solo
+# SOLICITA REVIEW (Nova y SOKI), que es otro rol.
+name: auto-assign
+
+on:
+    pull_request_target:
+        types: [opened, reopened]
+
+# El job no hace checkout: solo llama a la API, asi que `pull_request_target`
+# no llega a ejecutar nada del codigo de la rama del PR.
+permissions:
+    pull-requests: write
+
+jobs:
+    assign:
+        runs-on: ubuntu-latest
+        steps:
+            - name: asignar a 50l3r
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REPO: ${{ github.repository }}
+                  PR: ${{ github.event.pull_request.number }}
+              run: |
+                  gh api -X POST "repos/$REPO/issues/$PR/assignees" \
+                    -f "assignees[]=50l3r"
