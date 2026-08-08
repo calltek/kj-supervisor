@@ -1,3 +1,12 @@
+# Dónde corre esto lo decide la variable `CI_RUNNER` de la organización:
+#
+#   sin definir            → los runners de GitHub, como siempre
+#   CI_RUNNER=<etiqueta>   → nuestra propia máquina con esa etiqueta
+#
+# Está así y no clavado a `self-hosted` porque una máquina propia es un punto
+# único: el día que se apague o se quede sin red, borrar la variable devuelve
+# todo a GitHub sin tocar código ni abrir un PR. Y ponerla afecta a los cuatro
+# repositorios a la vez, que es como se quiere.
 name: build-supervisor-image
 
 on:
@@ -20,7 +29,7 @@ env:
 jobs:
     test:
         name: tests + typecheck + lint
-        runs-on: ubuntu-latest
+        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
         steps:
             - uses: actions/checkout@v5
 
@@ -46,7 +55,7 @@ jobs:
     build:
         name: build + push supervisor image
         needs: test
-        runs-on: ubuntu-latest
+        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
         steps:
             - uses: actions/checkout@v5
 
