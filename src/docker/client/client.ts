@@ -1079,26 +1079,119 @@ export class KJDocker {
      * Tar the agent's /home/agent volume (gzip) and PUT it straight to a
      * pre-signed R2 URL — the bytes never touch the control. The volume is
      * mounted read-only; the tarball is staged in the helper's /tmp (host
-     * overlay) so curl can send a Content-Length. Returns the uploaded size.
+     * overlay) so curl can send a Content-Length. Returns the uploaded size,
+     * plus the per-part ETags when the tarball had to go up in pieces.
+     *
+     * **Why pieces at all** (#263): a pre-signed PUT in R2 tops out at
+     * 4.995 GiB. Ailfred's volume tars to 6.21 GiB, so its nightly backup
+     * failed with a bare `400` for 35 nights running. Over the limit we split
+     * the file and PUT each chunk to its own pre-signed URL; the control
+     * stitches them back into one object with the ETags we return here.
+     *
+     * Chunks are cut with `dd` on demand and deleted right after uploading,
+     * so peak disk stays at "tarball + one chunk" instead of double.
+     *
+     * `--fail-with-body` instead of plain `-f`: R2 says WHY in the response
+     * body (`EntityTooLarge`, `SignatureDoesNotMatch`…). Swallowing it is
+     * what kept #263 unexplained for a month — a `400` on its own says
+     * nothing.
      */
-    async backupVolume(volume_name: string, upload_url: string): Promise<{ size_bytes: number }> {
+    async backupVolume(
+        volume_name: string,
+        upload_url: string,
+        multipart?: {
+            upload_id: string
+            part_urls: string[]
+            part_size_bytes: number
+            single_put_limit_bytes: number
+        }
+    ): Promise<{ size_bytes: number; parts?: { part_number: number; etag: string }[] }> {
+        // Guard against the control handing us a part_size_bytes that isn't
+        // a positive multiple of 1 MiB. The helper cuts chunks with
+        // `dd bs=1048576 count=$(( KJ_PART_SIZE / 1048576 ))`, which truncates
+        // on non-multiples — each chunk would be a few bytes short of where
+        // the next one's `skip` expects, and the tarball would land in R2
+        // with hidden holes (no error from curl, no ETag mismatch). And with
+        // `part_size_bytes = 0`, `NEEDED = (SZ + KJ_PART_SIZE - 1) / KJ_PART_SIZE`
+        // divides by zero in the helper and we'd get a cryptic shell error
+        // instead of the clear message the guard is here for. Fail loud here
+        // rather than upload a silently corrupted backup.
+        if (multipart) {
+            if (multipart.part_size_bytes <= 0) {
+                throw new Error(
+                    `part_size_bytes must be a positive number of bytes (got ${multipart.part_size_bytes})`
+                )
+            }
+            if (multipart.part_size_bytes % (1024 * 1024) !== 0) {
+                throw new Error(
+                    `part_size_bytes must be a multiple of 1 MiB (got ${multipart.part_size_bytes})`
+                )
+            }
+        }
+        // Newline-separated so the helper can read them without quoting
+        // games; passed via env because the arg list would blow past ARG_MAX
+        // with 60 signed URLs.
+        const partUrls = multipart?.part_urls.join('\n') ?? ''
         const script = [
             'set -e',
             'apk add --no-cache curl >/dev/null 2>&1',
             'tar -C /v -czf /tmp/b.tgz .',
             'SZ=$(stat -c %s /tmp/b.tgz)',
-            'curl -fsS -X PUT -H "Content-Type: application/octet-stream" --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
             'echo "KJ_BACKUP_SIZE=$SZ"',
+            '',
+            '# Fits in one PUT (or the control gave us no parts): original path.',
+            'if [ -z "$KJ_PART_URLS" ] || [ "$SZ" -le "$KJ_SINGLE_LIMIT" ]; then',
+            '  curl -sS --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
+            '       --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
+            '  exit 0',
+            'fi',
+            '',
+            '# Too big for one PUT: cut it into chunks and send them one by one.',
+            'PARTS=$(printf "%s\\n" "$KJ_PART_URLS" | wc -l)',
+            'NEEDED=$(( (SZ + KJ_PART_SIZE - 1) / KJ_PART_SIZE ))',
+            'if [ "$NEEDED" -gt "$PARTS" ]; then',
+            '  echo "backup too large: needs $NEEDED parts, only $PARTS signed" >&2',
+            '  exit 3',
+            'fi',
+            'N=1',
+            'while [ "$N" -le "$NEEDED" ]; do',
+            '  URL=$(printf "%s\\n" "$KJ_PART_URLS" | sed -n "${N}p")',
+            '  OFFSET=$(( (N - 1) * KJ_PART_SIZE ))',
+            '  dd if=/tmp/b.tgz of=/tmp/part.bin bs=1048576 \\',
+            '     skip=$(( OFFSET / 1048576 )) count=$(( KJ_PART_SIZE / 1048576 )) 2>/dev/null',
+            '  # -D dumps the response headers; the ETag in there is what the',
+            '  # control needs to seal the object.',
+            '  curl -sS --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
+            '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tr -d "\\r\\"")',
+            '  if [ -z "$ETAG" ]; then echo "part $N uploaded without an ETag" >&2; exit 4; fi',
+            '  echo "KJ_PART=$N:$ETAG"',
+            '  rm -f /tmp/part.bin /tmp/h.txt',
+            '  N=$(( N + 1 ))',
+            'done',
         ].join('\n')
+
         const { code, logs } = await this.runVolumeHelper({
             volume_name,
             script,
-            env: [`KJ_UPLOAD_URL=${upload_url}`],
+            env: [
+                `KJ_UPLOAD_URL=${upload_url}`,
+                `KJ_PART_URLS=${partUrls}`,
+                `KJ_PART_SIZE=${multipart?.part_size_bytes ?? 0}`,
+                `KJ_SINGLE_LIMIT=${multipart?.single_put_limit_bytes ?? 0}`,
+            ],
             readonly: true,
         })
         if (code !== 0) throw new Error(`backup helper exited ${code}: ${logs.slice(-400)}`)
+
         const m = logs.match(/KJ_BACKUP_SIZE=(\d+)/)
-        return { size_bytes: m ? Number(m[1]) : 0 }
+        const size_bytes = m ? Number(m[1]) : 0
+
+        const parts: { part_number: number; etag: string }[] = []
+        for (const line of logs.matchAll(/KJ_PART=(\d+):(\S+)/g)) {
+            const [, number, etag] = line
+            if (number && etag) parts.push({ part_number: Number(number), etag })
+        }
+        return parts.length > 0 ? { size_bytes, parts } : { size_bytes }
     }
 
     /**

@@ -48,12 +48,20 @@ export class AgentBackupHandler {
         })
         log.info('agent:backup received')
         try {
-            const { size_bytes } = await this.docker.backupVolume(
+            const { size_bytes, parts } = await this.docker.backupVolume(
                 volumeName(payload.agent_id),
-                payload.upload_url
+                payload.upload_url,
+                payload.multipart
             )
-            log.info({ size_bytes }, 'agent:backup uploaded')
-            return { ok: true, request_id: payload.request_id, size_bytes }
+            log.info({ size_bytes, parts: parts?.length ?? 0 }, 'agent:backup uploaded')
+            // `parts` only comes back when the tarball didn't fit in a single
+            // PUT — the control needs the ETags to seal the object (#263).
+            return {
+                ok: true,
+                request_id: payload.request_id,
+                size_bytes,
+                ...(parts?.length ? { parts } : {}),
+            }
         } catch (err) {
             log.error({ err: errMessage(err) }, 'agent:backup failed')
             return {
