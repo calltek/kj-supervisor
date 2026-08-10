@@ -1106,6 +1106,18 @@ export class KJDocker {
             single_put_limit_bytes: number
         }
     ): Promise<{ size_bytes: number; parts?: { part_number: number; etag: string }[] }> {
+        // Guard against the control handing us a part_size_bytes that isn't
+        // a multiple of 1 MiB. The helper cuts chunks with
+        // `dd bs=1048576 count=$(( KJ_PART_SIZE / 1048576 ))`, which truncates
+        // on non-multiples — each chunk would be a few bytes short of where
+        // the next one's `skip` expects, and the tarball would land in R2
+        // with hidden holes (no error from curl, no ETag mismatch). Fail
+        // loud here rather than upload a silently corrupted backup.
+        if (multipart && multipart.part_size_bytes % (1024 * 1024) !== 0) {
+            throw new Error(
+                `part_size_bytes must be a multiple of 1 MiB (got ${multipart.part_size_bytes})`,
+            )
+        }
         // Newline-separated so the helper can read them without quoting
         // games; passed via env because the arg list would blow past ARG_MAX
         // with 60 signed URLs.

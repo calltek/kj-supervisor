@@ -256,3 +256,44 @@ describe('containerExists', () => {
         expect(await docker.containerExists('kj-supervisor-new-123')).toBe(false)
     })
 })
+
+describe('backupVolume — multipart contract guard', () => {
+    // The helper cuts chunks with `dd bs=1048576 count=$((KJ_PART_SIZE / 1048576))`,
+    // which truncates on non-multiples. If the control ever hands us a
+    // part_size_bytes that isn't 1 MiB-aligned, every chunk would be a few
+    // bytes short of where the next `skip` expects and the tarball would
+    // land in R2 with hidden holes — no error from curl, no ETag mismatch.
+    // Better to fail loud here than silently upload a corrupted backup.
+    test('rejects part_size_bytes that is not a multiple of 1 MiB', async () => {
+        const docker = makeDocker(new FakeDocker())
+        await expect(
+            docker.backupVolume('kj-agent-42-home', 'https://r2/put', {
+                upload_id: 'up-1',
+                part_urls: ['https://r2/part1'],
+                part_size_bytes: 536_870_913, // 512 MiB + 1 byte
+                single_put_limit_bytes: 5_364_514_816,
+            }),
+        ).rejects.toThrow(/multiple of 1 MiB/)
+    })
+
+    test('accepts part_size_bytes that is a multiple of 1 MiB (would call docker)', async () => {
+        // We don't want to spin a real container here — we just want to
+        // confirm the guard doesn't reject a valid size. The call will
+        // fail downstream in FakeDocker, but NOT on the guard.
+        const docker = makeDocker(new FakeDocker())
+        let err: Error | undefined
+        try {
+            await docker.backupVolume('kj-agent-42-home', 'https://r2/put', {
+                upload_id: 'up-1',
+                part_urls: ['https://r2/part1'],
+                part_size_bytes: 536_870_912, // 512 MiB exact
+                single_put_limit_bytes: 5_364_514_816,
+            })
+        } catch (e) {
+            err = e as Error
+        }
+        expect(err).toBeDefined()
+        // The guard must NOT be the thing that fired — anything else is fine.
+        expect(err?.message).not.toMatch(/multiple of 1 MiB/)
+    })
+})
