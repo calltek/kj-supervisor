@@ -272,8 +272,35 @@ describe('backupVolume — multipart contract guard', () => {
                 part_urls: ['https://r2/part1'],
                 part_size_bytes: 536_870_913, // 512 MiB + 1 byte
                 single_put_limit_bytes: 5_364_514_816,
-            }),
+            })
         ).rejects.toThrow(/multiple of 1 MiB/)
+    })
+
+    test('rejects part_size_bytes that is zero (would divide by zero in helper)', async () => {
+        // 0 % 1 MiB === 0, so the alignment guard alone lets this through and
+        // the helper crashes with a cryptic "division by zero" instead of the
+        // explicit message the guard is here for.
+        const docker = makeDocker(new FakeDocker())
+        await expect(
+            docker.backupVolume('kj-agent-42-home', 'https://r2/put', {
+                upload_id: 'up-1',
+                part_urls: ['https://r2/part1'],
+                part_size_bytes: 0,
+                single_put_limit_bytes: 5_364_514_816,
+            })
+        ).rejects.toThrow(/positive number of bytes/)
+    })
+
+    test('rejects part_size_bytes that is negative', async () => {
+        const docker = makeDocker(new FakeDocker())
+        await expect(
+            docker.backupVolume('kj-agent-42-home', 'https://r2/put', {
+                upload_id: 'up-1',
+                part_urls: ['https://r2/part1'],
+                part_size_bytes: -1024,
+                single_put_limit_bytes: 5_364_514_816,
+            })
+        ).rejects.toThrow(/positive number of bytes/)
     })
 
     test('accepts part_size_bytes that is a multiple of 1 MiB (would call docker)', async () => {
