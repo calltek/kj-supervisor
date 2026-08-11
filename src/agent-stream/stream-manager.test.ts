@@ -148,3 +148,73 @@ describe('AgentStreamManager.resolveTarget (KUJI-84)', () => {
         expect(m.resolveTarget(999, 'whatever')).toEqual({})
     })
 })
+
+/**
+ * #277 — el nivel de razonamiento por conversación tiene que LLEGAR al
+ * contenedor. Viajaba en el turno desde el control y se quedaba aquí: el
+ * envelope reenviaba el modelo y se dejaba el esfuerzo por el camino, así que
+ * el ajuste existía de punta a punta menos en el último metro.
+ *
+ * Los dos van juntos a propósito: ambos son banderas de arranque, y el wrapper
+ * recicla la sesión al cambiarlas — mandarlos en el mismo turno hace que un
+ * solo reciclado cubra los dos.
+ */
+describe('el turno lleva modelo Y esfuerzo al contenedor (#277)', () => {
+    /** Un gestor con una sesión enganchada, devolviendo lo que se le escribe. */
+    async function attached(): Promise<{ manager: AgentStreamManager; written: () => string[] }> {
+        const lines: string[] = []
+        const stream = new PassThrough()
+        stream.on('data', (chunk: Buffer) => lines.push(chunk.toString()))
+        const manager = new AgentStreamManager({
+            docker: {
+                attachContainer: async () => stream,
+                demuxAttachStream: () => {},
+            } as never,
+            client: new FakeClient(),
+            logger: silentLogger,
+            mcp: new McpDispatcher({
+                sendRequest: async () => ({ ok: true, data: {} }),
+                writeToContainer: () => true,
+                resolveTarget: () => ({}),
+                logger: silentLogger,
+            }),
+        })
+        await manager.attach({
+            agent_id: 1,
+            container_id: 'c1',
+            session_id: 's1',
+        })
+        return { manager, written: () => lines }
+    }
+
+    test('el esfuerzo llega, junto al modelo', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+            model: 'claude-haiku-4-5',
+            effort: 'max',
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.model).toBe('claude-haiku-4-5')
+        expect(envelope.effort).toBe('max')
+    })
+
+    test('sin esfuerzo, la clave no viaja (el contenedor usa el suyo)', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect('effort' in envelope).toBe(false)
+    })
+})

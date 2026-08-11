@@ -360,6 +360,11 @@ export class AgentStreamManager {
         // Per-conversation model (KUJI-39): the wrapper starts/recycles this
         // session's claude with `--model <this>`. Pure passthrough.
         if (payload.model) envelope.model = payload.model
+        // Y el nivel de razonamiento con él (#277). Es otra bandera de arranque,
+        // así que viaja pegado al modelo: el wrapper recicla la sesión una sola
+        // vez y aplica los dos. Se quedaba por el camino, y sin esto el ajuste
+        // por conversación llegaba hasta aquí y moría.
+        if (payload.effort) envelope.effort = payload.effort
         // Per-conversation context cap (eje A): the wrapper compacts the
         // session in place when its context crosses it. Pure passthrough
         // (0 = no cap, so forward it too — only skip when absent).
