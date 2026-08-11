@@ -11,7 +11,7 @@ import os from 'node:os'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
-import { agentHardening, privilegedNetworkingExtras } from './hardening'
+import { agentHardening, privilegedNetworkingExtras, withoutDockerSocket } from './hardening'
 
 /**
  * Our own container id, read from /proc — works under `--network host` where
@@ -611,8 +611,10 @@ export class KJDocker {
             AttachStdout: true,
             AttachStderr: true,
             HostConfig: {
-                Binds: host.Binds,
-                Mounts: host.Mounts,
+                // Los montajes se copian del contenedor de origen, así que el
+                // socket de Docker se colaría si alguien lo hubiera puesto ahí
+                // a mano: no es un montaje, es la máquina entera (#12).
+                ...withoutDockerSocket(host),
                 RestartPolicy: host.RestartPolicy,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,

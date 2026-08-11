@@ -71,3 +71,43 @@ export function agentHardening(extras?: {
         ...(extras?.Devices?.length ? { Devices: extras.Devices.map((d) => ({ ...d })) } : {}),
     }
 }
+
+/** El socket del demonio de Docker: la máquina entera en un fichero. */
+const DOCKER_SOCKET = '/var/run/docker.sock'
+
+/**
+ * Strip any mount that would hand an agent the Docker socket.
+ *
+ * A container that can reach that socket can start another one as root, mount
+ * the host filesystem and read every other agent's home — it isn't a mount, it's
+ * the machine. The supervisor needs it (that's its job); an agent never does
+ * (kj-supervisor#12).
+ *
+ * This matters on the RECREATE path specifically: it copies the mounts from
+ * whatever the previous container had, so one container touched by hand would
+ * pass the socket on to its replacement, and that one to the next, forever. The
+ * spawn path builds its mounts from scratch and never adds it — but the filter
+ * runs on both, because "the source had it" is exactly how this class of thing
+ * comes back.
+ *
+ * Nothing legitimate is lost: no agent mount points at that path.
+ */
+export function withoutDockerSocket<
+    T extends {
+        Binds?: string[] | null
+        Mounts?: { Source?: string; Target?: string }[] | null
+    },
+>(host: T): { Binds?: string[]; Mounts?: T['Mounts'] } {
+    const touchesSocket = (...paths: (string | undefined)[]): boolean =>
+        paths.some((p) => !!p && p.includes(DOCKER_SOCKET))
+    return {
+        ...(host.Binds ? { Binds: host.Binds.filter((b) => !touchesSocket(b)) } : {}),
+        ...(host.Mounts
+            ? {
+                  Mounts: host.Mounts.filter(
+                      (m) => !touchesSocket(m?.Source, m?.Target)
+                  ) as T['Mounts'],
+              }
+            : {}),
+    }
+}

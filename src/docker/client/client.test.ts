@@ -324,3 +324,81 @@ describe('backupVolume — multipart contract guard', () => {
         expect(err?.message).not.toMatch(/multiple of 1 MiB/)
     })
 })
+
+/**
+ * The Docker socket is the whole machine: a container that can reach it can
+ * start another container as root, mount the host filesystem, and read every
+ * other agent's home. The supervisor needs it — that's its job — but an AGENT
+ * must never see it (kj-supervisor#12).
+ *
+ * Nothing mounts it today. This is here because the hardening around these two
+ * paths already drifted apart once (#13): the recreate silently dropped
+ * `CapDrop: ALL`, and nobody noticed until someone read both blocks side by
+ * side. The socket is the one thing where "nobody noticed" would be a machine
+ * handed over, so it gets a test that fails loudly instead of a comment asking
+ * to be careful.
+ *
+ * Both paths are covered, and the recreate one carries the socket in its SOURCE
+ * container on purpose: the recreate copies mounts from what was there, so
+ * "the source had it" is exactly how it would sneak in.
+ */
+describe('un contenedor de agente NUNCA ve el socket de Docker (#12)', () => {
+    const DOCKER_SOCKET = '/var/run/docker.sock'
+
+    /** Todo lo que el contenedor acabaría viendo, venga por donde venga. */
+    function mountedPaths(hc: {
+        Binds?: string[] | null
+        Mounts?: { Source?: string; Target?: string }[] | null
+        Devices?: { PathOnHost?: string }[] | null
+    }): string[] {
+        return [
+            ...(hc.Binds ?? []),
+            ...(hc.Mounts ?? []).flatMap((m) => [m.Source ?? '', m.Target ?? '']),
+            ...(hc.Devices ?? []).map((d) => d.PathOnHost ?? ''),
+        ]
+    }
+
+    test('al crearlo', async () => {
+        const fake = new FakeDocker()
+        await makeDocker(fake).runContainer({
+            image_tag: 'img',
+            name: 'kj-agent-1',
+            env: {},
+            labels: {},
+            resources: { memory_mb: 512, cpu: 1 },
+            home_volume_name: 'kj-agent-1-home',
+            network_privileged: true, // el caso con más permisos que existe
+        })
+
+        const paths = mountedPaths(fake.createdSpec.HostConfig)
+        expect(paths.some((p) => p.includes(DOCKER_SOCKET))).toBe(false)
+    })
+
+    test('y al recrearlo, aunque el contenedor de origen lo tuviera', async () => {
+        // Así es como se colaría: el recreate copia los montajes del origen, de
+        // modo que un contenedor tocado a mano se lo pasaría al siguiente y de
+        // ahí a todos los que vinieran después.
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-9'] = {
+            Config: { Env: [], Cmd: null, Entrypoint: null, Labels: {} },
+            HostConfig: {
+                Binds: [`${DOCKER_SOCKET}:${DOCKER_SOCKET}`],
+                Mounts: [],
+                RestartPolicy: { Name: 'unless-stopped' },
+                NetworkMode: 'bridge',
+                GroupAdd: [],
+                Memory: 0,
+                NanoCpus: 0,
+            },
+        }
+
+        await makeDocker(fake).recreateContainerWithImage({
+            source_container: 'kj-agent-9',
+            new_image_tag: 'img:new',
+            keep_name: 'kj-agent-9',
+        })
+
+        const paths = mountedPaths(fake.createdSpec.HostConfig)
+        expect(paths.some((p) => p.includes(DOCKER_SOCKET))).toBe(false)
+    })
+})
