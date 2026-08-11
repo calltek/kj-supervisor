@@ -60,7 +60,8 @@ describe('agentHardening', () => {
         const h = agentHardening(extras)
 
         extras.CapAdd.push('SYS_ADMIN')
-        extras.Devices[0].PathOnHost = '/dev/mem'
+        const [device] = extras.Devices
+        if (device) device.PathOnHost = '/dev/mem'
 
         expect(h.CapAdd).toEqual(['NET_ADMIN'])
         expect(h.Devices?.[0]?.PathOnHost).toBe('/dev/net/tun')
