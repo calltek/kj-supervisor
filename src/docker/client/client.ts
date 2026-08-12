@@ -87,6 +87,82 @@ export interface DockerEvent {
     timeNano?: number
 }
 
+/**
+ * The shell the backup helper runs, as a pure string so it can be tested.
+ *
+ * It lives here and not inline because what it does is load-bearing and easy
+ * to break by accident: which paths are skipped, and that SQLite databases are
+ * copied with the mechanism that survives a concurrent writer.
+ */
+export function buildBackupScript(): string {
+    return [
+        'set -e',
+        'apk add --no-cache curl sqlite >/dev/null 2>&1',
+        '',
+        '# Bases SQLite: copia en caliente ANTES del tar.',
+        '#',
+        '# Copiar el fichero a pelo mientras alguien escribe da una base rota,',
+        '# y en la flota hay una Chroma de 1 GB que se escribe sola cuando el',
+        '# agente indexa. `VACUUM INTO` es el mecanismo que SQLite trae justo',
+        '# para esto: respeta el bloqueo y produce una copia consistente sin',
+        '# parar a quien escribe. La copia va al lado, con sufijo, y el tar se',
+        '# lleva las dos — así una restauración tiene siempre una versión',
+        '# buena aunque la original saliera a medias.',
+        'find /v -name "*.sqlite3" -o -name "*.sqlite" -o -name "*.db" 2>/dev/null |',
+        '  grep -v "/node_modules/" | grep -v "/.venv/" | while read -r DB; do',
+        '    [ -f "$DB" ] || continue',
+        '    sqlite3 "$DB" "VACUUM INTO \'$DB.kjbackup\'" 2>/dev/null ||',
+        '      echo "aviso: no se pudo copiar en caliente $DB" >&2',
+        '  done',
+        '',
+        '# Fuera lo que se regenera solo. En el volumen de un agente real son',
+        '# 2,8 GB de 11 — un cuarto del tamaño, del tiempo y del coste de cada',
+        '# noche, guardado siete veces. Restaurar exige reinstalar dependencias,',
+        '# que es el precio acordado.',
+        'tar -C /v -czf /tmp/b.tgz \\',
+        '    --exclude="./**/node_modules" --exclude="./node_modules" \\',
+        '    --exclude="./**/.venv" --exclude="./.venv" \\',
+        '    --exclude="./**/__pycache__" --exclude="./__pycache__" \\',
+        '    --exclude="./**/.cache" --exclude="./.cache" \\',
+        '    .',
+        '',
+        '# Las copias en caliente ya viajan dentro del tar.',
+        'find /v -name "*.kjbackup" -delete 2>/dev/null || true',
+        'SZ=$(stat -c %s /tmp/b.tgz)',
+        'echo "KJ_BACKUP_SIZE=$SZ"',
+        '',
+        '# Fits in one PUT (or the control gave us no parts): original path.',
+        'if [ -z "$KJ_PART_URLS" ] || [ "$SZ" -le "$KJ_SINGLE_LIMIT" ]; then',
+        '  curl -sS --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
+        '       --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
+        '  exit 0',
+        'fi',
+        '',
+        '# Too big for one PUT: cut it into chunks and send them one by one.',
+        'PARTS=$(printf "%s\\n" "$KJ_PART_URLS" | wc -l)',
+        'NEEDED=$(( (SZ + KJ_PART_SIZE - 1) / KJ_PART_SIZE ))',
+        'if [ "$NEEDED" -gt "$PARTS" ]; then',
+        '  echo "backup too large: needs $NEEDED parts, only $PARTS signed" >&2',
+        '  exit 3',
+        'fi',
+        'N=1',
+        'while [ "$N" -le "$NEEDED" ]; do',
+        '  URL=$(printf "%s\\n" "$KJ_PART_URLS" | sed -n "${N}p")',
+        '  OFFSET=$(( (N - 1) * KJ_PART_SIZE ))',
+        '  dd if=/tmp/b.tgz of=/tmp/part.bin bs=1048576 \\',
+        '     skip=$(( OFFSET / 1048576 )) count=$(( KJ_PART_SIZE / 1048576 )) 2>/dev/null',
+        '  # -D dumps the response headers; the ETag in there is what the',
+        '  # control needs to seal the object.',
+        '  curl -sS --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
+        '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tr -d "\\r\\"")',
+        '  if [ -z "$ETAG" ]; then echo "part $N uploaded without an ETag" >&2; exit 4; fi',
+        '  echo "KJ_PART=$N:$ETAG"',
+        '  rm -f /tmp/part.bin /tmp/h.txt',
+        '  N=$(( N + 1 ))',
+        'done',
+    ].join('\n')
+}
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -1119,43 +1195,7 @@ export class KJDocker {
         // games; passed via env because the arg list would blow past ARG_MAX
         // with 60 signed URLs.
         const partUrls = multipart?.part_urls.join('\n') ?? ''
-        const script = [
-            'set -e',
-            'apk add --no-cache curl >/dev/null 2>&1',
-            'tar -C /v -czf /tmp/b.tgz .',
-            'SZ=$(stat -c %s /tmp/b.tgz)',
-            'echo "KJ_BACKUP_SIZE=$SZ"',
-            '',
-            '# Fits in one PUT (or the control gave us no parts): original path.',
-            'if [ -z "$KJ_PART_URLS" ] || [ "$SZ" -le "$KJ_SINGLE_LIMIT" ]; then',
-            '  curl -sS --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
-            '       --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
-            '  exit 0',
-            'fi',
-            '',
-            '# Too big for one PUT: cut it into chunks and send them one by one.',
-            'PARTS=$(printf "%s\\n" "$KJ_PART_URLS" | wc -l)',
-            'NEEDED=$(( (SZ + KJ_PART_SIZE - 1) / KJ_PART_SIZE ))',
-            'if [ "$NEEDED" -gt "$PARTS" ]; then',
-            '  echo "backup too large: needs $NEEDED parts, only $PARTS signed" >&2',
-            '  exit 3',
-            'fi',
-            'N=1',
-            'while [ "$N" -le "$NEEDED" ]; do',
-            '  URL=$(printf "%s\\n" "$KJ_PART_URLS" | sed -n "${N}p")',
-            '  OFFSET=$(( (N - 1) * KJ_PART_SIZE ))',
-            '  dd if=/tmp/b.tgz of=/tmp/part.bin bs=1048576 \\',
-            '     skip=$(( OFFSET / 1048576 )) count=$(( KJ_PART_SIZE / 1048576 )) 2>/dev/null',
-            '  # -D dumps the response headers; the ETag in there is what the',
-            '  # control needs to seal the object.',
-            '  curl -sS --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
-            '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tr -d "\\r\\"")',
-            '  if [ -z "$ETAG" ]; then echo "part $N uploaded without an ETag" >&2; exit 4; fi',
-            '  echo "KJ_PART=$N:$ETAG"',
-            '  rm -f /tmp/part.bin /tmp/h.txt',
-            '  N=$(( N + 1 ))',
-            'done',
-        ].join('\n')
+        const script = buildBackupScript()
 
         const { code, logs } = await this.runVolumeHelper({
             volume_name,

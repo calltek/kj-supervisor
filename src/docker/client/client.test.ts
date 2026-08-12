@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import os from 'node:os'
 
 import { KJLogger } from '../../logger'
-import { KJDocker } from './client'
+import { KJDocker, buildBackupScript } from './client'
 
 const silentLogger = KJLogger.create('error')
 
@@ -400,5 +400,37 @@ describe('un contenedor de agente NUNCA ve el socket de Docker (#12)', () => {
 
         const paths = mountedPaths(fake.createdSpec.HostConfig)
         expect(paths.some((p) => p.includes(DOCKER_SOCKET))).toBe(false)
+    })
+})
+
+describe('buildBackupScript — qué entra en la copia y qué no (#391)', () => {
+    const script = buildBackupScript()
+
+    test('las bases SQLite se copian con el método que aguanta un escritor', () => {
+        // Copiar el fichero a pelo mientras alguien escribe da una base rota, y
+        // en la flota hay una Chroma de 1 GB que se escribe sola cuando el
+        // agente indexa. `VACUUM INTO` respeta el bloqueo y produce una copia
+        // consistente sin parar a nadie.
+        expect(script).toContain('VACUUM INTO')
+        expect(script).toContain('*.sqlite3')
+        // Y las copias temporales no se quedan en el volumen del cliente.
+        expect(script).toContain('-name "*.kjbackup" -delete')
+    })
+
+    test('lo regenerable queda fuera, tanto anidado como en la raíz', () => {
+        // El patrón `./**/x` NO casa con `./x` a primer nivel — verificado
+        // contra el tar de BusyBox, que es el que corre en el ayudante. Sin la
+        // pareja, un `.cache` en la raíz se colaba en todas las copias.
+        for (const dir of ['node_modules', '.venv', '__pycache__', '.cache']) {
+            expect(script).toContain(`--exclude="./**/${dir}"`)
+            expect(script).toContain(`--exclude="./${dir}"`)
+        }
+    })
+
+    test('las bases que viven dentro de lo excluido no se copian en balde', () => {
+        // Una SQLite dentro de node_modules es de una dependencia: ni entra en
+        // el tar ni merece una copia en caliente de un giga.
+        expect(script).toContain('grep -v "/node_modules/"')
+        expect(script).toContain('grep -v "/.venv/"')
     })
 })
