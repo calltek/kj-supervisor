@@ -183,7 +183,12 @@ async function main(): Promise<void> {
     const inputHandler = new AgentInputHandler({ streams, logger })
     const execHandler = new AgentExecHandler({ docker, logger })
     const syncHandler = new AgentSyncHandler({ streams, logger })
-    const backupHandler = new AgentBackupHandler({ docker, status: statusReporter, logger })
+    const backupHandler = new AgentBackupHandler({
+        docker,
+        status: statusReporter,
+        tracker,
+        logger,
+    })
     const oauthExchangeHandler = new OAuthExchangeHandler({ logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,

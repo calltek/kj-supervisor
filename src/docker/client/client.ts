@@ -1102,6 +1102,18 @@ export class KJDocker {
         script: string
         env?: string[]
         readonly?: boolean
+        /**
+         * Fire `onMarker` as soon as this string shows up in the helper's
+         * output, without waiting for it to finish.
+         *
+         * It exists so a frozen agent thaws the moment the tar is done instead
+         * of staying frozen through the upload — the difference between ~5 and
+         * ~9 minutes on the biggest volume in the fleet. Polling rather than
+         * streaming because the log is a handful of lines and the poll costs
+         * nothing next to a tar.
+         */
+        marker?: string
+        onMarker?: () => Promise<void>
     }): Promise<{ code: number; logs: string }> {
         const helperImage = 'alpine:3.20'
         if (!(await this.imageExistsLocally(helperImage)))
@@ -1126,14 +1138,34 @@ export class KJDocker {
                 SecurityOpt: ['no-new-privileges'],
             },
         })
+        let markerSeen = false
+        const watchForMarker = async (): Promise<void> => {
+            if (!opts.marker || !opts.onMarker) return
+            while (!markerSeen) {
+                await new Promise((r) => setTimeout(r, 2_000))
+                if (markerSeen) return
+                const seen = await container
+                    .logs({ stdout: true, stderr: true, follow: false })
+                    .then((b) => stripDockerFrames(b).includes(opts.marker as string))
+                    .catch(() => false)
+                if (seen) {
+                    markerSeen = true
+                    await opts.onMarker().catch(() => undefined)
+                }
+            }
+        }
         try {
             await container.start()
+            const watcher = watchForMarker()
             const result = await container.wait()
+            markerSeen = true // detiene el sondeo pase lo que pase
+            await watcher.catch(() => undefined)
             const logsBuf = await container
                 .logs({ stdout: true, stderr: true, follow: false })
                 .catch(() => Buffer.from(''))
             return { code: result.StatusCode, logs: stripDockerFrames(logsBuf) }
         } finally {
+            markerSeen = true
             await container.remove({ force: true }).catch(() => undefined)
         }
     }
@@ -1167,7 +1199,9 @@ export class KJDocker {
             part_urls: string[]
             part_size_bytes: number
             single_put_limit_bytes: number
-        }
+        },
+        /** Called the instant the tar is done, before the upload starts. */
+        onTarDone?: () => Promise<void>
     ): Promise<{ size_bytes: number; parts?: { part_number: number; etag: string }[] }> {
         // Guard against the control handing us a part_size_bytes that isn't
         // a positive multiple of 1 MiB. The helper cuts chunks with
@@ -1200,6 +1234,10 @@ export class KJDocker {
         const { code, logs } = await this.runVolumeHelper({
             volume_name,
             script,
+            // El tamaño se imprime justo después del tar: es la señal de que ya
+            // no se está leyendo el volumen y el agente puede seguir.
+            marker: 'KJ_BACKUP_SIZE=',
+            onMarker: onTarDone,
             env: [
                 `KJ_UPLOAD_URL=${upload_url}`,
                 `KJ_PART_URLS=${partUrls}`,
