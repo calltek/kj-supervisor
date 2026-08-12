@@ -20,6 +20,7 @@ function makeHandler(docker: Partial<KJDocker>) {
         docker: docker as KJDocker,
         status,
         logger: fakeLogger,
+        tracker: { track: () => undefined, untrack: () => undefined } as never,
     })
     return { handler, pushes }
 }
@@ -165,5 +166,119 @@ describe('AgentBackupHandler', () => {
         })
         expect(ack.ok).toBe(true)
         expect(restored).toEqual(['kj-agent-7-home'])
+    })
+})
+
+describe('congelar el agente durante la copia (#391)', () => {
+    /** Un docker de mentira que apunta lo que se le pide y cuándo. */
+    function freezableDocker(opts: { onBackup?: () => Promise<void> | void } = {}) {
+        const acciones: string[] = []
+        const docker = {
+            listKjContainers: async () => [{ container_id: 'cnt-1', agent_id: 42 }],
+            pauseContainer: async () => {
+                acciones.push('congelar')
+            },
+            unpauseContainer: async () => {
+                acciones.push('descongelar')
+            },
+            backupVolume: async (
+                _v: string,
+                _u: string,
+                _m: unknown,
+                onTarDone?: () => Promise<void>
+            ) => {
+                acciones.push('tar')
+                await onTarDone?.()
+                acciones.push('subida')
+                await opts.onBackup?.()
+                return { size_bytes: 10 }
+            },
+        }
+        return { docker, acciones }
+    }
+
+    const payload = (freeze?: boolean) => ({
+        request_id: 'r-1',
+        agent_id: 42,
+        upload_url: 'https://r2/put',
+        ...(freeze ? { freeze_container: true } : {}),
+    })
+
+    test('sin pedirlo, el agente no se toca', async () => {
+        const { docker, acciones } = freezableDocker()
+        const { handler } = makeHandler(docker as never)
+        await handler.handleBackup(payload() as never)
+        expect(acciones).toEqual(['tar', 'subida'])
+    })
+
+    test('descongela al terminar el TAR, no al terminar la subida', async () => {
+        // Es la diferencia entre ~5 y ~9 minutos parado en el volumen más
+        // grande de la flota: una vez hecho el tarball nadie lee ya el disco.
+        const { docker, acciones } = freezableDocker()
+        const { handler } = makeHandler(docker as never)
+        await handler.handleBackup(payload(true) as never)
+        expect(acciones).toEqual(['congelar', 'tar', 'descongelar', 'subida'])
+    })
+
+    test('si la copia revienta, el agente se descongela igual', async () => {
+        // Lo que no puede pasar bajo ningún concepto: que un fallo deje a un
+        // agente congelado para siempre. La copia es prescindible; el agente no.
+        const { docker, acciones } = freezableDocker()
+        docker.backupVolume = async () => {
+            acciones.push('tar')
+            throw new Error('R2 dijo que no')
+        }
+        const { handler } = makeHandler(docker as never)
+        const ack = await handler.handleBackup(payload(true) as never)
+        expect(ack.ok).toBe(false)
+        expect(acciones).toEqual(['congelar', 'tar', 'descongelar'])
+    })
+
+    test('si no se puede congelar, la copia sigue en caliente', async () => {
+        // Negarse a copiar por no poder congelar cambia un riesgo pequeño por
+        // la certeza de no tener nada.
+        const { docker, acciones } = freezableDocker()
+        docker.pauseContainer = async () => {
+            throw new Error('el demonio dice que no')
+        }
+        const { handler } = makeHandler(docker as never)
+        const ack = await handler.handleBackup(payload(true) as never)
+        expect(ack.ok).toBe(true)
+        expect(acciones).toEqual(['tar', 'subida'])
+    })
+
+    test('sin contenedor que congelar, tampoco se aborta', async () => {
+        const { docker, acciones } = freezableDocker()
+        docker.listKjContainers = async () => []
+        const { handler } = makeHandler(docker as never)
+        const ack = await handler.handleBackup(payload(true) as never)
+        expect(ack.ok).toBe(true)
+        expect(acciones).toEqual(['tar', 'subida'])
+    })
+
+    // El fallo que se coló tres rondas: la guarda de "no descongeles dos veces"
+    // vivía en el handler, que es UNO para todo el proceso. La primera copia
+    // apuntaba el contenedor y no lo borraba nunca, así que a partir de la
+    // segunda se congelaba sin descongelar y el agente quedaba parado para
+    // siempre — reportándose RUNNING, además.
+    test('dos copias seguidas del mismo agente: descongela en LAS DOS', async () => {
+        const { docker, acciones } = freezableDocker()
+        const { handler } = makeHandler(docker as never)
+
+        await handler.handleBackup(payload(true) as never)
+        await handler.handleBackup(payload(true) as never)
+
+        expect(acciones.filter((a) => a === 'congelar')).toHaveLength(2)
+        expect(acciones.filter((a) => a === 'descongelar')).toHaveLength(2)
+    })
+
+    // Y la guarda que SÍ hacía falta sigue en pie: dentro de una copia se
+    // descongela desde dos sitios (el aviso del tar y el `finally`), y eso no
+    // puede acabar en dos `unpause`.
+    test('dentro de una copia, descongela una sola vez', async () => {
+        const { docker, acciones } = freezableDocker()
+        const { handler } = makeHandler(docker as never)
+        await handler.handleBackup(payload(true) as never)
+        expect(acciones.filter((a) => a === 'descongelar')).toHaveLength(1)
     })
 })

@@ -87,6 +87,141 @@ export interface DockerEvent {
     timeNano?: number
 }
 
+/**
+ * The shell the backup helper runs, as a pure string so it can be tested.
+ *
+ * It lives here and not inline because what it does is load-bearing and easy
+ * to break by accident: which paths are skipped, and that SQLite databases are
+ * copied with the mechanism that survives a concurrent writer.
+ */
+export function buildBackupScript(): string {
+    return [
+        'set -e',
+        // GNU tar además de BusyBox: hace falta para meter en UN solo archivo
+        // dos orígenes distintos (`-C` dos veces). El de BusyBox aplica el
+        // último `-C` a todos y se pierde el volumen — comprobado.
+        'apk add --no-cache curl sqlite tar >/dev/null 2>&1',
+        '',
+        '# Copias consistentes de las bases SQLite, en /tmp del ayudante.',
+        '#',
+        '# El volumen va montado en SOLO LECTURA, y eso NO se toca: que una',
+        '# copia no pueda escribir en el disco del cliente vale más que la',
+        '# comodidad de dejar el fichero al lado. Por eso las copias van al',
+        '# overlay del ayudante, que además desaparece con el contenedor (sin',
+        '# restos, sin llenar el volumen del cliente, sin carreras entre dos',
+        '# copias simultáneas).',
+        'STAGE=/tmp/kjdb',
+        'umask 077',
+        'mkdir -p "$STAGE"',
+        ': > /tmp/kjdb.failed',
+        '',
+        '# Antes de escribir un solo byte: ¿cabe? El ayudante escribe en SU',
+        '# overlay, que sale del disco del supervisor — el mismo que usan TODOS',
+        '# los agentes del host. Llenarlo copiando a uno los tumba a todos, y',
+        '# ese es un precio que ninguna copia vale. Como cota se usa el tamaño',
+        '# del volumen en crudo (el .tgz siempre sale más pequeño) más las',
+        '# copias en caliente; si no cabe, se falla AQUÍ y con nombre.',
+        'NEED=$(du -sk /v 2>/dev/null | cut -f1)',
+        "FREE=$(df -Pk /tmp | awk 'NR==2 {print $4}')",
+        'if [ -n "$NEED" ] && [ -n "$FREE" ] && [ "$FREE" -lt "$NEED" ]; then',
+        '  echo "sin espacio en el supervisor: hacen falta ~$NEED KB y quedan $FREE KB" >&2',
+        '  exit 8',
+        'fi',
+        '',
+        '# `-exec … +` en vez de recorrer la salida de find: un nombre con un',
+        '# salto de línea rompe cualquier bucle que la parsee.',
+        'find /v -type f \\( -name "*.sqlite3" -o -name "*.sqlite" -o -name "*.db" \\) \\',
+        '     -not -path "*/node_modules/*" -not -path "*/.venv/*" \\',
+        "     -exec sh -c '",
+        '  for DB do',
+        '    # Sólo lo que de VERDAD es SQLite: un .db que no lo sea haría',
+        '    # fallar la copia entera por un fichero que no importa.',
+        '    head -c 15 "$DB" | grep -q "SQLite format 3" || continue',
+        '    REL=${DB#/v/}',
+        '    SEQ=$(cat /tmp/kjdb.seq 2>/dev/null || echo 0); SEQ=$((SEQ+1))',
+        '    echo "$SEQ" > /tmp/kjdb.seq',
+        '    # `.backup` y no `VACUUM INTO`: es una orden del cliente, toma la',
+        '    # ruta SIN comillas, y así no hay comillas SQL que choquen con las',
+        '    # del `sh -c` que envuelve esto. Hace lo mismo — una copia',
+        '    # consistente respetando el bloqueo de quien escribe.',
+        '    #',
+        '    # Y el destino es un CONTADOR, no la ruta: el nombre del fichero lo',
+        '    # controla el agente, y el cliente de sqlite3 ejecuta su argumento',
+        '    # como script entero.',
+        '    # El mv entra en la MISMA condición que la copia: si la copia sale',
+        '    # bien pero moverla a su sitio no, la original rota gana en el tar y',
+        '    # queda un copia-N suelto en la raíz del archivo. Un fallo parcial',
+        '    # que nadie ve es lo que este cambio viene a quitar.',
+        '    if sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" &&',
+        '       mkdir -p "/tmp/kjdb/$(dirname "$REL")" &&',
+        '       mv "/tmp/kjdb/copia-$SEQ" "/tmp/kjdb/$REL"; then',
+        '      :',
+        '    else',
+        '      echo "$DB" >> /tmp/kjdb.failed',
+        '      continue',
+        '    fi',
+        '    # El -wal/-shm de la ORIGINAL pertenece a otro instante que el de',
+        '    # nuestra copia. Si viaja tal cual, al restaurar SQLite intentaría',
+        '    # aplicarlo sobre una base que ya lo lleva dentro. Se sustituyen por',
+        '    # ficheros vacíos (que para SQLite significa "nada que reproducir"),',
+        '    # y sólo si existían: crear un -wal donde no lo había empujaría a',
+        '    # modo WAL a una base que no lo usa.',
+        '    for SUF in -wal -shm; do',
+        '      [ -f "$DB$SUF" ] && : > "/tmp/kjdb/$REL$SUF"',
+        '    done',
+        '  done',
+        "' _ {} +",
+        '',
+        '# Y si alguna falló, la copia FALLA. Un backup que se sube en verde',
+        '# sabiendo que una base puede estar rota es peor que no tenerlo: el',
+        '# fallo sólo se descubre el día que hay que restaurar.',
+        'if [ -s /tmp/kjdb.failed ]; then',
+        '  echo "no se pudo copiar en caliente:" >&2; cat /tmp/kjdb.failed >&2',
+        '  exit 7',
+        'fi',
+        '',
+        '# Las copias van DESPUÉS del volumen a propósito: al extraer, la última',
+        '# entrada de una ruta repetida gana, así que una restauración se queda',
+        '# con la versión consistente sin que nadie tenga que elegir.',
+        'tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .',
+        '',
+        '# Las copias en caliente ya viajan dentro del tar.',
+        'find /v -name "*.kjbackup" -delete 2>/dev/null || true',
+        'SZ=$(stat -c %s /tmp/b.tgz)',
+        'echo "KJ_BACKUP_SIZE=$SZ"',
+        '',
+        '# Fits in one PUT (or the control gave us no parts): original path.',
+        'if [ -z "$KJ_PART_URLS" ] || [ "$SZ" -le "$KJ_SINGLE_LIMIT" ]; then',
+        '  curl -sS --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
+        '       --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
+        '  exit 0',
+        'fi',
+        '',
+        '# Too big for one PUT: cut it into chunks and send them one by one.',
+        'PARTS=$(printf "%s\\n" "$KJ_PART_URLS" | wc -l)',
+        'NEEDED=$(( (SZ + KJ_PART_SIZE - 1) / KJ_PART_SIZE ))',
+        'if [ "$NEEDED" -gt "$PARTS" ]; then',
+        '  echo "backup too large: needs $NEEDED parts, only $PARTS signed" >&2',
+        '  exit 3',
+        'fi',
+        'N=1',
+        'while [ "$N" -le "$NEEDED" ]; do',
+        '  URL=$(printf "%s\\n" "$KJ_PART_URLS" | sed -n "${N}p")',
+        '  OFFSET=$(( (N - 1) * KJ_PART_SIZE ))',
+        '  dd if=/tmp/b.tgz of=/tmp/part.bin bs=1048576 \\',
+        '     skip=$(( OFFSET / 1048576 )) count=$(( KJ_PART_SIZE / 1048576 )) 2>/dev/null',
+        '  # -D dumps the response headers; the ETag in there is what the',
+        '  # control needs to seal the object.',
+        '  curl -sS --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
+        '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tr -d "\\r\\"")',
+        '  if [ -z "$ETAG" ]; then echo "part $N uploaded without an ETag" >&2; exit 4; fi',
+        '  echo "KJ_PART=$N:$ETAG"',
+        '  rm -f /tmp/part.bin /tmp/h.txt',
+        '  N=$(( N + 1 ))',
+        'done',
+    ].join('\n')
+}
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -1026,6 +1161,18 @@ export class KJDocker {
         script: string
         env?: string[]
         readonly?: boolean
+        /**
+         * Fire `onMarker` as soon as this string shows up in the helper's
+         * output, without waiting for it to finish.
+         *
+         * It exists so a frozen agent thaws the moment the tar is done instead
+         * of staying frozen through the upload — the difference between ~5 and
+         * ~9 minutes on the biggest volume in the fleet. Polling rather than
+         * streaming because the log is a handful of lines and the poll costs
+         * nothing next to a tar.
+         */
+        marker?: string
+        onMarker?: () => Promise<void>
     }): Promise<{ code: number; logs: string }> {
         const helperImage = 'alpine:3.20'
         if (!(await this.imageExistsLocally(helperImage)))
@@ -1050,14 +1197,43 @@ export class KJDocker {
                 SecurityOpt: ['no-new-privileges'],
             },
         })
+        let markerSeen = false
+        const watchForMarker = async (): Promise<void> => {
+            if (!opts.marker || !opts.onMarker) return
+            while (!markerSeen) {
+                await new Promise((r) => setTimeout(r, 2_000))
+                if (markerSeen) return
+                const seen = await container
+                    .logs({ stdout: true, stderr: true, follow: false })
+                    // Al PRINCIPIO de una línea, no en cualquier parte del log.
+                    // Por ahí pasan rutas de ficheros que pone el agente, y una
+                    // llamada `KJ_BACKUP_SIZE=…` le dejaría decidir cuándo se
+                    // descongela. El daño sería pequeño (descongelar antes de
+                    // tiempo), pero no es suyo ese botón.
+                    .then((b) =>
+                        stripDockerFrames(b)
+                            .split('\n')
+                            .some((line) => line.startsWith(opts.marker as string))
+                    )
+                    .catch(() => false)
+                if (seen) {
+                    markerSeen = true
+                    await opts.onMarker().catch(() => undefined)
+                }
+            }
+        }
         try {
             await container.start()
+            const watcher = watchForMarker()
             const result = await container.wait()
+            markerSeen = true // detiene el sondeo pase lo que pase
+            await watcher.catch(() => undefined)
             const logsBuf = await container
                 .logs({ stdout: true, stderr: true, follow: false })
                 .catch(() => Buffer.from(''))
             return { code: result.StatusCode, logs: stripDockerFrames(logsBuf) }
         } finally {
+            markerSeen = true
             await container.remove({ force: true }).catch(() => undefined)
         }
     }
@@ -1091,7 +1267,9 @@ export class KJDocker {
             part_urls: string[]
             part_size_bytes: number
             single_put_limit_bytes: number
-        }
+        },
+        /** Called the instant the tar is done, before the upload starts. */
+        onTarDone?: () => Promise<void>
     ): Promise<{ size_bytes: number; parts?: { part_number: number; etag: string }[] }> {
         // Guard against the control handing us a part_size_bytes that isn't
         // a positive multiple of 1 MiB. The helper cuts chunks with
@@ -1119,47 +1297,15 @@ export class KJDocker {
         // games; passed via env because the arg list would blow past ARG_MAX
         // with 60 signed URLs.
         const partUrls = multipart?.part_urls.join('\n') ?? ''
-        const script = [
-            'set -e',
-            'apk add --no-cache curl >/dev/null 2>&1',
-            'tar -C /v -czf /tmp/b.tgz .',
-            'SZ=$(stat -c %s /tmp/b.tgz)',
-            'echo "KJ_BACKUP_SIZE=$SZ"',
-            '',
-            '# Fits in one PUT (or the control gave us no parts): original path.',
-            'if [ -z "$KJ_PART_URLS" ] || [ "$SZ" -le "$KJ_SINGLE_LIMIT" ]; then',
-            '  curl -sS --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
-            '       --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
-            '  exit 0',
-            'fi',
-            '',
-            '# Too big for one PUT: cut it into chunks and send them one by one.',
-            'PARTS=$(printf "%s\\n" "$KJ_PART_URLS" | wc -l)',
-            'NEEDED=$(( (SZ + KJ_PART_SIZE - 1) / KJ_PART_SIZE ))',
-            'if [ "$NEEDED" -gt "$PARTS" ]; then',
-            '  echo "backup too large: needs $NEEDED parts, only $PARTS signed" >&2',
-            '  exit 3',
-            'fi',
-            'N=1',
-            'while [ "$N" -le "$NEEDED" ]; do',
-            '  URL=$(printf "%s\\n" "$KJ_PART_URLS" | sed -n "${N}p")',
-            '  OFFSET=$(( (N - 1) * KJ_PART_SIZE ))',
-            '  dd if=/tmp/b.tgz of=/tmp/part.bin bs=1048576 \\',
-            '     skip=$(( OFFSET / 1048576 )) count=$(( KJ_PART_SIZE / 1048576 )) 2>/dev/null',
-            '  # -D dumps the response headers; the ETag in there is what the',
-            '  # control needs to seal the object.',
-            '  curl -sS --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
-            '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tr -d "\\r\\"")',
-            '  if [ -z "$ETAG" ]; then echo "part $N uploaded without an ETag" >&2; exit 4; fi',
-            '  echo "KJ_PART=$N:$ETAG"',
-            '  rm -f /tmp/part.bin /tmp/h.txt',
-            '  N=$(( N + 1 ))',
-            'done',
-        ].join('\n')
+        const script = buildBackupScript()
 
         const { code, logs } = await this.runVolumeHelper({
             volume_name,
             script,
+            // El tamaño se imprime justo después del tar: es la señal de que ya
+            // no se está leyendo el volumen y el agente puede seguir.
+            marker: 'KJ_BACKUP_SIZE=',
+            onMarker: onTarDone,
             env: [
                 `KJ_UPLOAD_URL=${upload_url}`,
                 `KJ_PART_URLS=${partUrls}`,

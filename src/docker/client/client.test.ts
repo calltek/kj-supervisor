@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import os from 'node:os'
 
 import { KJLogger } from '../../logger'
-import { KJDocker } from './client'
+import { KJDocker, buildBackupScript } from './client'
 
 const silentLogger = KJLogger.create('error')
 
@@ -400,5 +400,66 @@ describe('un contenedor de agente NUNCA ve el socket de Docker (#12)', () => {
 
         const paths = mountedPaths(fake.createdSpec.HostConfig)
         expect(paths.some((p) => p.includes(DOCKER_SOCKET))).toBe(false)
+    })
+})
+
+describe('buildBackupScript — copia consistente de las bases (#391)', () => {
+    const script = buildBackupScript()
+
+    test('NO escribe dentro del volumen, que va montado en solo lectura', () => {
+        // El fallo que cazó la revisión de seguridad: la primera versión hacía
+        // `VACUUM INTO` a un fichero dentro de /v. El ayudante monta ese
+        // volumen READ-ONLY, así que fallaba SIEMPRE — y el `2>/dev/null` se lo
+        // tragaba: copia en verde, sin una sola base consistente, y el fallo
+        // sólo visible el día de restaurar.
+        expect(script).not.toMatch(/\.backup\s+\/v\//)
+        expect(script).not.toMatch(/VACUUM INTO\s+'?\/v\//)
+        expect(script).toContain('.backup /tmp/kjdb/copia-$SEQ')
+    })
+
+    test('una copia que falla TUMBA el backup, no lo silencia', () => {
+        // La otra mitad del hallazgo: mientras un fallo fuera un aviso en
+        // stderr, el sistema podía mentir sobre el estado de las copias.
+        expect(script).toContain('exit 7')
+        expect(script).toContain('/tmp/kjdb.failed')
+        // Y en concreto: la línea de la copia no lleva silenciador.
+        const copia = script.split('\n').find((l) => l.includes('.backup /tmp/kjdb/'))
+        expect(copia).toBeDefined()
+        expect(copia).not.toContain('2>/dev/null')
+        expect(copia).not.toContain('|| echo')
+    })
+
+    test('el destino de la copia es un contador, no la ruta del fichero', () => {
+        // El nombre del fichero lo controla el agente y el cliente de sqlite3
+        // ejecuta su argumento como script entero: interpolar la ruta permitía
+        // encadenar sentencias, y un simple apóstrofo rompía la copia.
+        expect(script).toContain('copia-$SEQ')
+        expect(script).not.toMatch(/\.backup[^\n]*\$DB[^\n]*"/)
+    })
+
+    test('la copia va DESPUÉS del volumen en el tar', () => {
+        // Al extraer, la última entrada de una ruta repetida gana. Ese orden es
+        // lo que hace que una restauración se quede con la versión consistente
+        // sin que nadie tenga que elegir cuál era la buena.
+        const tar = script.split('\n').find((l) => l.startsWith('tar -czf'))
+        expect(tar).toBe('tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .')
+    })
+
+    test('las copias nacen privadas', () => {
+        // `.backup` no hereda el modo del origen: sin esto, la copia íntegra de
+        // una base 0600 quedaba legible por cualquiera durante toda la ventana.
+        expect(script).toContain('umask 077')
+    })
+
+    test('se salta lo que no es SQLite de verdad y lo de las dependencias', () => {
+        expect(script).toContain('SQLite format 3')
+        expect(script).toContain('-not -path "*/node_modules/*"')
+        expect(script).toContain('-not -path "*/.venv/*"')
+    })
+
+    test('recorre los ficheros con -exec, no parseando la salida de find', () => {
+        // Un nombre con un salto de línea rompe cualquier bucle que parsee.
+        expect(script).toContain('-exec sh -c')
+        expect(script).not.toMatch(/find[^\n]*\|[^\n]*while read/)
     })
 })
