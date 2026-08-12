@@ -417,19 +417,21 @@ describe('buildBackupScript — qué entra en la copia y qué no (#391)', () => 
         expect(script).toContain('-name "*.kjbackup" -delete')
     })
 
-    test('lo regenerable queda fuera, tanto anidado como en la raíz', () => {
-        // El patrón `./**/x` NO casa con `./x` a primer nivel — verificado
-        // contra el tar de BusyBox, que es el que corre en el ayudante. Sin la
-        // pareja, un `.cache` en la raíz se colaba en todas las copias.
-        for (const dir of ['node_modules', '.venv', '__pycache__', '.cache']) {
-            expect(script).toContain(`--exclude="./**/${dir}"`)
-            expect(script).toContain(`--exclude="./${dir}"`)
-        }
+    test('se copia TODO: nada de exclusiones', () => {
+        // Excluir node_modules/.venv recortaba un cuarto de cada copia, y se
+        // revirtió a propósito: la restauración pasaba a depender de que
+        // existiera un fichero de dependencias, y en la flota hay un entorno de
+        // Python de 1,6 GB sin ninguno, del que depende la biblioteca de un
+        // agente. Una copia que sólo sirve si alguien hizo los deberes no es
+        // una copia.
+        expect(script).not.toContain('--exclude')
+        expect(script).toContain('tar -C /v -czf /tmp/b.tgz .')
     })
 
-    test('las bases que viven dentro de lo excluido no se copian en balde', () => {
-        // Una SQLite dentro de node_modules es de una dependencia: ni entra en
-        // el tar ni merece una copia en caliente de un giga.
+    test('no se copian en caliente las bases de las dependencias', () => {
+        // Una SQLite dentro de node_modules o de un .venv es de una
+        // dependencia: se copia tal cual dentro del tar, pero no merece una
+        // pasada de VACUUM que puede tardar sobre una base de un giga.
         expect(script).toContain('grep -v "/node_modules/"')
         expect(script).toContain('grep -v "/.venv/"')
     })
