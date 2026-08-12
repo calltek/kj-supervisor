@@ -38,7 +38,6 @@ export class AgentBackupHandler {
     private readonly tracker: OperationTracker
     private readonly logger: KJLogger
     /** Contenedores ya descongelados en esta copia (thaw es idempotente). */
-    private readonly thawed = new Set<string>()
 
     constructor(deps: AgentBackupHandlerDeps) {
         this.docker = deps.docker
@@ -62,6 +61,15 @@ export class AgentBackupHandler {
         // conexiones abiertas pueden caducar durante la pausa, que es el precio
         // que el operador acepta al activarlo.
         const frozen = await this.freezeIfAsked(payload, log)
+        // La bandera vive en ESTA copia, no en el handler. Se descongela desde
+        // dos sitios —el aviso de que el tar acabó y el `finally` de abajo— y
+        // sólo debe correr una vez; pero la siguiente copia empieza de cero.
+        let thawed = false
+        const thawOnce = async () => {
+            if (!frozen || thawed) return
+            thawed = true
+            await this.thaw(frozen, log)
+        }
         try {
             const { size_bytes, parts } = await this.docker.backupVolume(
                 volumeName(payload.agent_id),
@@ -69,7 +77,7 @@ export class AgentBackupHandler {
                 payload.multipart,
                 // El tar ya terminó: nadie está leyendo el volumen y el agente
                 // puede seguir aunque la subida dure varios minutos más.
-                frozen ? () => this.thaw(frozen, log) : undefined
+                frozen ? thawOnce : undefined
             )
             log.info({ size_bytes, parts: parts?.length ?? 0 }, 'agent:backup uploaded')
             // `parts` only comes back when the tarball didn't fit in a single
@@ -96,7 +104,7 @@ export class AgentBackupHandler {
             // marca, o el aviso no llegó, un agente congelado se quedaría así
             // para siempre. `thaw` es idempotente, así que llamarlo dos veces
             // no cuesta nada y no llamarlo una sí.
-            if (frozen) await this.thaw(frozen, log)
+            await thawOnce()
         }
     }
 
@@ -134,10 +142,17 @@ export class AgentBackupHandler {
         }
     }
 
-    /** Descongela. Idempotente: descongelar lo ya descongelado no es un error. */
+    /**
+     * Descongela. Sin memoria propia: la garantía de llamarlo una sola vez la
+     * pone quien llama, con una bandera de SU copia.
+     *
+     * La tuvo, y era un `Set` del handler — que es único para todo el proceso.
+     * La primera copia de un contenedor lo apuntaba y no lo borraba nunca, así
+     * que la SEGUNDA volvía a congelar y salía por la guarda sin descongelar:
+     * el agente se quedaba pausado para siempre, y encima reportándose como
+     * RUNNING porque el `untrack` tampoco llegaba a correr.
+     */
     private async thaw(container_id: string, log: KJLogger): Promise<void> {
-        if (this.thawed.has(container_id)) return
-        this.thawed.add(container_id)
         try {
             await this.docker.unpauseContainer(container_id)
             log.info({ container_id }, 'agente descongelado')

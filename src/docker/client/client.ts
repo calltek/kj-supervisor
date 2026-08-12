@@ -115,6 +115,19 @@ export function buildBackupScript(): string {
         'mkdir -p "$STAGE"',
         ': > /tmp/kjdb.failed',
         '',
+        '# Antes de escribir un solo byte: ¿cabe? El ayudante escribe en SU',
+        '# overlay, que sale del disco del supervisor — el mismo que usan TODOS',
+        '# los agentes del host. Llenarlo copiando a uno los tumba a todos, y',
+        '# ese es un precio que ninguna copia vale. Como cota se usa el tamaño',
+        '# del volumen en crudo (el .tgz siempre sale más pequeño) más las',
+        '# copias en caliente; si no cabe, se falla AQUÍ y con nombre.',
+        'NEED=$(du -sk /v 2>/dev/null | cut -f1)',
+        "FREE=$(df -Pk /tmp | awk 'NR==2 {print $4}')",
+        'if [ -n "$NEED" ] && [ -n "$FREE" ] && [ "$FREE" -lt "$NEED" ]; then',
+        '  echo "sin espacio en el supervisor: hacen falta ~$NEED KB y quedan $FREE KB" >&2',
+        '  exit 8',
+        'fi',
+        '',
         '# `-exec … +` en vez de recorrer la salida de find: un nombre con un',
         '# salto de línea rompe cualquier bucle que la parsee.',
         'find /v -type f \\( -name "*.sqlite3" -o -name "*.sqlite" -o -name "*.db" \\) \\',
@@ -145,7 +158,17 @@ export function buildBackupScript(): string {
         '      :',
         '    else',
         '      echo "$DB" >> /tmp/kjdb.failed',
+        '      continue',
         '    fi',
+        '    # El -wal/-shm de la ORIGINAL pertenece a otro instante que el de',
+        '    # nuestra copia. Si viaja tal cual, al restaurar SQLite intentaría',
+        '    # aplicarlo sobre una base que ya lo lleva dentro. Se sustituyen por',
+        '    # ficheros vacíos (que para SQLite significa "nada que reproducir"),',
+        '    # y sólo si existían: crear un -wal donde no lo había empujaría a',
+        '    # modo WAL a una base que no lo usa.',
+        '    for SUF in -wal -shm; do',
+        '      [ -f "$DB$SUF" ] && : > "/tmp/kjdb/$REL$SUF"',
+        '    done',
         '  done',
         "' _ {} +",
         '',
@@ -1182,7 +1205,16 @@ export class KJDocker {
                 if (markerSeen) return
                 const seen = await container
                     .logs({ stdout: true, stderr: true, follow: false })
-                    .then((b) => stripDockerFrames(b).includes(opts.marker as string))
+                    // Al PRINCIPIO de una línea, no en cualquier parte del log.
+                    // Por ahí pasan rutas de ficheros que pone el agente, y una
+                    // llamada `KJ_BACKUP_SIZE=…` le dejaría decidir cuándo se
+                    // descongela. El daño sería pequeño (descongelar antes de
+                    // tiempo), pero no es suyo ese botón.
+                    .then((b) =>
+                        stripDockerFrames(b)
+                            .split('\n')
+                            .some((line) => line.startsWith(opts.marker as string))
+                    )
                     .catch(() => false)
                 if (seen) {
                     markerSeen = true

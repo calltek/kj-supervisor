@@ -255,4 +255,30 @@ describe('congelar el agente durante la copia (#391)', () => {
         expect(ack.ok).toBe(true)
         expect(acciones).toEqual(['tar', 'subida'])
     })
+
+    // El fallo que se coló tres rondas: la guarda de "no descongeles dos veces"
+    // vivía en el handler, que es UNO para todo el proceso. La primera copia
+    // apuntaba el contenedor y no lo borraba nunca, así que a partir de la
+    // segunda se congelaba sin descongelar y el agente quedaba parado para
+    // siempre — reportándose RUNNING, además.
+    test('dos copias seguidas del mismo agente: descongela en LAS DOS', async () => {
+        const { docker, acciones } = freezableDocker()
+        const { handler } = makeHandler(docker as never)
+
+        await handler.handleBackup(payload(true) as never)
+        await handler.handleBackup(payload(true) as never)
+
+        expect(acciones.filter((a) => a === 'congelar')).toHaveLength(2)
+        expect(acciones.filter((a) => a === 'descongelar')).toHaveLength(2)
+    })
+
+    // Y la guarda que SÍ hacía falta sigue en pie: dentro de una copia se
+    // descongela desde dos sitios (el aviso del tar y el `finally`), y eso no
+    // puede acabar en dos `unpause`.
+    test('dentro de una copia, descongela una sola vez', async () => {
+        const { docker, acciones } = freezableDocker()
+        const { handler } = makeHandler(docker as never)
+        await handler.handleBackup(payload(true) as never)
+        expect(acciones.filter((a) => a === 'descongelar')).toHaveLength(1)
+    })
 })
