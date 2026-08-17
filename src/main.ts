@@ -12,6 +12,7 @@
 import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
+import { readDecommission, writeDecommission } from './client/auth/decommission'
 import { KJControlClient } from './client/control/control.client'
 import { McpDispatcher, type McpEnvelope } from './agent-stream/mcp-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
@@ -61,6 +62,7 @@ import {
     PROTOCOL_VERSION,
     type ServerHelloAck,
     type ServerHelloPayload,
+    type SupervisorDecommissionPayload,
     type SupervisorUpgradeRequiredPayload,
     WS_ERROR_CODES,
     type WsErrorPayload,
@@ -81,6 +83,20 @@ const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_INVALID,
 ])
 
+/**
+ * Stay up doing nothing, for ever (#270).
+ *
+ * Not `process.exit()`: the container runs with `--restart unless-stopped`, so
+ * exiting is a restart loop — a slower way of knocking at a control that has
+ * no server for us. Idling keeps `docker logs` readable (the reason is the
+ * last line) and, crucially, never opens the socket again.
+ */
+function idleForever(): Promise<never> {
+    return new Promise<never>(() => {
+        // Deliberately never resolves. SIGTERM still stops the container.
+    })
+}
+
 async function main(): Promise<void> {
     const settings = KJSettings.load()
     const logger = KJLogger.create(settings.log_level)
@@ -93,6 +109,24 @@ async function main(): Promise<void> {
         },
         'supervisor starting'
     )
+
+    // Before anything else: were we already told our server is gone? (#270)
+    //
+    // We do NOT exit here. The container runs with `--restart unless-stopped`,
+    // so exiting is a restart loop, and a restart loop is just a slower way of
+    // knocking. Staying up and idle costs nothing, keeps `docker logs` useful,
+    // and — most importantly — never opens the socket again.
+    const alreadyGone = readDecommission(settings.config_dir)
+    if (alreadyGone) {
+        logger.warn(
+            { decommissioned: alreadyGone },
+            'este servidor se borró desde el panel: no hay nada que hacer. ' +
+                'Para quitar el supervisor y los datos de los agentes de esta máquina, ' +
+                'ejecuta `kujira uninstall` (te dirá antes qué borra).'
+        )
+        await idleForever()
+        return
+    }
 
     let agent_token: string
     try {
@@ -500,6 +534,15 @@ async function main(): Promise<void> {
     })
 
     client.on('protocol_error', (payload: WsErrorPayload) => {
+        // The server was deleted from the panel (#270). Terminal on purpose,
+        // and handled apart from the other fatals: those exit, and exiting
+        // here would be a restart loop that reconnects and gets refused again,
+        // for ever. This one is remembered on disk and then goes quiet.
+        if (payload.code === WS_ERROR_CODES.SERVER_DECOMMISSIONED) {
+            decommission(payload.message ?? 'el servidor se borró desde el panel')
+            return
+        }
+
         if (FATAL_ERROR_CODES.has(payload.code)) {
             logger.fatal({ payload }, 'fatal protocol error, exiting')
             stopLoops()
@@ -508,6 +551,41 @@ async function main(): Promise<void> {
         }
         // Non-fatal codes (e.g. SUPERVISOR_TIMEOUT) are surfaced and we keep going.
         logger.warn({ payload }, 'recoverable protocol error')
+    })
+
+    /**
+     * Stop for good: remember it on disk, drop every loop, hang up, and idle.
+     *
+     * Shared by the two ways we can be told — the live push and the handshake
+     * refusal — because a supervisor that was connected when its server was
+     * deleted and one that was switched off have to end up in the same place.
+     */
+    function decommission(reason: string, server_id?: number): void {
+        const remembered = writeDecommission(settings.config_dir, {
+            at: new Date().toISOString(),
+            reason,
+            server_id,
+        })
+        logger.warn(
+            { reason, server_id, remembered },
+            'este servidor se borró desde el panel: paro y me quedo quieto. ' +
+                'Para quitar el supervisor y los datos de los agentes de esta máquina, ' +
+                'ejecuta `kujira uninstall` (te dirá antes qué borra).'
+        )
+        if (!remembered) {
+            // The config volume is read-only or full. We still stop this run;
+            // the next boot will be told again by the handshake.
+            logger.error('no pude dejar la marca en disco: al reiniciar lo volveré a preguntar')
+        }
+        stopLoops()
+        eventsWatcher.stop()
+        streams.detachAll()
+        client.disconnect()
+        void idleForever()
+    }
+
+    client.onPush<SupervisorDecommissionPayload>('supervisor:decommission', (payload) => {
+        decommission(payload.reason, payload.server_id)
     })
 
     client.on('disconnect', () => {
