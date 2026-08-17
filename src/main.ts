@@ -12,7 +12,7 @@
 import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
-import { readDecommission, writeDecommission } from './client/auth/decommission'
+import { markPath, readDecommission, writeDecommission } from './client/auth/decommission'
 import { KJControlClient } from './client/control/control.client'
 import { McpDispatcher, type McpEnvelope } from './agent-stream/mcp-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
@@ -84,16 +84,76 @@ const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * The handle that actually holds the process open. See `idleForever`.
+ *
+ * Exported so it is a real reference the GC can't collect — and so a test can
+ * assert the timer exists, which is the thing the first version got wrong.
+ */
+export let idleHandle: ReturnType<typeof setInterval> | undefined
+
+/**
+ * Stop every agent container on this machine — stop, not remove (#270).
+ *
+ * A decommissioned server has no control plane, and by design its socket never
+ * opens again: whatever is left running here can never be stopped remotely, is
+ * still holding live credentials and still reaching the internet on its own,
+ * with nobody watching. "This server must not operate any more" has to mean
+ * the work stops too (SOKY review).
+ *
+ * Volumes, memories and history are untouched — `docker stop` doesn't remove
+ * anything. Erasing stays where it belongs: `kujira uninstall`, run on the
+ * machine, which says what it destroys before doing it.
+ *
+ * Never throws: a machine that can't reach its Docker socket still has to end
+ * up quiet rather than crash into a restart loop.
+ */
+async function stopAgents(logger: ReturnType<typeof KJLogger.create>): Promise<void> {
+    try {
+        const docker = new KJDocker(logger)
+        const containers = await docker.listKjContainers()
+        if (containers.length === 0) return
+
+        logger.warn({ count: containers.length }, 'parando los agentes de esta máquina')
+        for (const c of containers) {
+            await docker
+                .stopContainer(c.container_id)
+                .catch((err) =>
+                    logger.error(
+                        { container_id: c.container_id, err },
+                        'no pude parar este agente; sigo con los demás'
+                    )
+                )
+        }
+    } catch (err) {
+        logger.error({ err }, 'no pude enumerar los agentes para pararlos')
+    }
+}
+
+/**
  * Stay up doing nothing, for ever (#270).
  *
  * Not `process.exit()`: the container runs with `--restart unless-stopped`, so
  * exiting is a restart loop — a slower way of knocking at a control that has
  * no server for us. Idling keeps `docker logs` readable (the reason is the
  * last line) and, crucially, never opens the socket again.
+ *
+ * It has to be a REAL handle. The first version of this returned
+ * `new Promise(() => {})`, which reads like it blocks and does not: a pending
+ * promise is not an event-loop handle, so with every timer and socket already
+ * closed — which is exactly what `decommission()` does right before calling
+ * this — node and bun both drain the loop and exit 0 in under a millisecond.
+ * The result was the restart loop this whole design exists to avoid, and a
+ * container stuck in `Restarting` is indistinguishable from a real crash, so
+ * it would have masked genuine failures on that machine (SOKY review).
+ *
+ * A long interval is a ref'd handle and keeps the loop alive. Kept in a
+ * module-level variable so the GC can't take it.
  */
 function idleForever(): Promise<never> {
+    // ~12 days. Long enough to be free, finite so it stays a normal timer.
+    idleHandle = setInterval(() => {}, 1 << 30)
     return new Promise<never>(() => {
-        // Deliberately never resolves. SIGTERM still stops the container.
+        // Never resolves; SIGTERM still stops the container.
     })
 }
 
@@ -119,11 +179,17 @@ async function main(): Promise<void> {
     const alreadyGone = readDecommission(settings.config_dir)
     if (alreadyGone) {
         logger.warn(
-            { decommissioned: alreadyGone },
-            'este servidor se borró desde el panel: no hay nada que hacer. ' +
-                'Para quitar el supervisor y los datos de los agentes de esta máquina, ' +
-                'ejecuta `kujira uninstall` (te dirá antes qué borra).'
+            { decommissioned: alreadyGone, marca: markPath(settings.config_dir) },
+            'este servidor se borró desde el panel: no trabajo y no me conecto. ' +
+                'Si fue un error, borra el fichero de la marca y reinicia el contenedor. ' +
+                'Para quitarlo todo de esta máquina (incluidos los datos de los agentes), ' +
+                '`kujira uninstall`, que te dirá antes qué borra.'
         )
+        // The agents keep their volumes but must not keep WORKING: this
+        // machine has no control plane any more, and after this the socket
+        // never reopens, so there would be no way to stop them remotely ever
+        // again (SOKY review). Stopping is not deleting.
+        await stopAgents(logger)
         await idleForever()
         return
     }
@@ -567,10 +633,11 @@ async function main(): Promise<void> {
             server_id,
         })
         logger.warn(
-            { reason, server_id, remembered },
-            'este servidor se borró desde el panel: paro y me quedo quieto. ' +
-                'Para quitar el supervisor y los datos de los agentes de esta máquina, ' +
-                'ejecuta `kujira uninstall` (te dirá antes qué borra).'
+            { reason, server_id, remembered, marca: markPath(settings.config_dir) },
+            'este servidor se borró desde el panel: paro los agentes y me quedo quieto. ' +
+                'Si fue un error, borra el fichero de la marca y reinicia el contenedor. ' +
+                'Para quitarlo todo de esta máquina (incluidos los datos de los agentes), ' +
+                '`kujira uninstall`, que te dirá antes qué borra.'
         )
         if (!remembered) {
             // The config volume is read-only or full. We still stop this run;
@@ -581,10 +648,26 @@ async function main(): Promise<void> {
         eventsWatcher.stop()
         streams.detachAll()
         client.disconnect()
-        void idleForever()
+        // Stop the work too, not just the supervisor: see `stopAgents`.
+        void stopAgents(logger).then(() => idleForever())
     }
 
     client.onPush<SupervisorDecommissionPayload>('supervisor:decommission', (payload) => {
+        // Checking that `payload.server_id` is OURS was asked for in review,
+        // and it can't be done today: the supervisor never learns its own id.
+        // `server:hello` acks with protocol versions and nothing else, so
+        // there is nothing to compare against — a check against `undefined`
+        // would be theatre.
+        //
+        // What does protect this: the message arrives on our own authenticated
+        // socket, and the control targets it per server (`notify(server_id)`
+        // resolves that server's socket in its tracker). Reaching the wrong
+        // machine takes a routing bug in the control, not a forged message —
+        // an attacker would need our socket, and with our socket they already
+        // have everything.
+        //
+        // Making it checkable is cheap and worth doing: add `server_id` to
+        // `ServerHelloAck`. It needs the backend, so it goes in its own change.
         decommission(payload.reason, payload.server_id)
     })
 

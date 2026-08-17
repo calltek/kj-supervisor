@@ -12,7 +12,7 @@
  * lists what it destroys — is where that decision belongs. This only stops the
  * work and leaves a note saying why.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const MARK_FILE = 'decommissioned'
@@ -26,7 +26,7 @@ export interface DecommissionMark {
     server_id?: number
 }
 
-function markPath(config_dir: string): string {
+export function markPath(config_dir: string): string {
     return join(config_dir, MARK_FILE)
 }
 
@@ -40,6 +40,12 @@ export function readDecommission(config_dir: string): DecommissionMark | null {
         // Unreadable or truncated: treat it as marked anyway. A corrupt mark
         // means SOMETHING wrote it, and the safe reading of "maybe you were
         // decommissioned" is to stay quiet rather than resume knocking.
+        //
+        // Fail-closed has a cost worth naming: anyone who can write to
+        // `config_dir` can shut this supervisor down for good with a `touch`.
+        // That directory must stay root-only and must never be mounted into an
+        // agent container. The way back is in the log — delete the file and
+        // restart — precisely so this is recoverable without an `uninstall`.
         return { at: 'unknown', reason: 'marca ilegible en disco' }
     }
 }
@@ -47,12 +53,27 @@ export function readDecommission(config_dir: string): DecommissionMark | null {
 /**
  * Write the mark. Best-effort: if the config volume is read-only we still stop
  * this run — losing the mark only costs a restart that stops again.
+ *
+ * Atomic (temp + rename) because a truncated write would read back as a
+ * corrupt mark, and a corrupt mark counts as a mark: our own interrupted write
+ * would silently become a permanent shutdown with no reason recorded. Rename
+ * within the same directory is atomic, so the file is either the old one or
+ * the whole new one, never half of either.
  */
 export function writeDecommission(config_dir: string, mark: DecommissionMark): boolean {
+    const target = markPath(config_dir)
+    const temp = `${target}.tmp`
     try {
-        writeFileSync(markPath(config_dir), JSON.stringify(mark, null, 2), { mode: 0o600 })
+        writeFileSync(temp, JSON.stringify(mark, null, 2), { mode: 0o600 })
+        renameSync(temp, target)
         return true
     } catch {
+        try {
+            unlinkSync(temp)
+        } catch {
+            // Nothing to clean up, or we can't. Either way the target is
+            // untouched, which is the point.
+        }
         return false
     }
 }
