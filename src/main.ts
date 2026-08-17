@@ -86,8 +86,10 @@ const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
 /**
  * The handle that actually holds the process open. See `idleForever`.
  *
- * Exported so it is a real reference the GC can't collect — and so a test can
- * assert the timer exists, which is the thing the first version got wrong.
+ * Module-level so it is a live reference the GC can't collect. Exported only
+ * to make that reference unmistakable to a reader — no test asserts on it, and
+ * none should: what matters is the behaviour, and that IS covered, by running
+ * both cases in real subprocesses (`decommission.test.ts`).
  */
 export let idleHandle: ReturnType<typeof setInterval> | undefined
 
@@ -626,7 +628,12 @@ async function main(): Promise<void> {
      * refusal — because a supervisor that was connected when its server was
      * deleted and one that was switched off have to end up in the same place.
      */
-    function decommission(reason: string, server_id?: number): void {
+    function decommission(rawReason: string, server_id?: number): void {
+        // The control writes this, and it lands on disk and in the log. Pino
+        // logs JSON so there is nothing to inject, but nothing bounds the
+        // length either — a truncate keeps a hostile or buggy control from
+        // filling the config volume (SOKY review).
+        const reason = rawReason.slice(0, 1024)
         const remembered = writeDecommission(settings.config_dir, {
             at: new Date().toISOString(),
             reason,

@@ -64,6 +64,15 @@ export function writeDecommission(config_dir: string, mark: DecommissionMark): b
     const target = markPath(config_dir)
     const temp = `${target}.tmp`
     try {
+        // Remove any leftover temp first: `mode` only applies when the file is
+        // CREATED, so a `.tmp` seeded earlier with looser permissions would be
+        // reused as-is (SOKY review). Nothing sensitive lives in here, but a
+        // 0600 that silently isn't 0600 is worse than no 0600 at all.
+        try {
+            unlinkSync(temp)
+        } catch {
+            // Wasn't there. Good.
+        }
         writeFileSync(temp, JSON.stringify(mark, null, 2), { mode: 0o600 })
         renameSync(temp, target)
         return true
