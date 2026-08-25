@@ -2,7 +2,7 @@
 # kj-supervisor installer.
 #
 # Usage:
-#   curl -fsSL https://kujira.run/install-supervisor.sh | \
+#   curl -fsSL https://kujira.so/install-supervisor.sh | \
 #     KJ_PROVISIONING_TOKEN=kjprov_xxx KJ_CONTROL_URL=https://api.kujira.so sh
 #
 # What it does:

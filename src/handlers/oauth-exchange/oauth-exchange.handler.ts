@@ -13,7 +13,7 @@
  * control's process) is the egress IP: each supervisor lives on the
  * customer's VPS so the request looks like an ordinary headless CLI
  * exchange from that VPS, not a centralised pattern from
- * `kujira.run`. The control already cached the verifier — it ships
+ * `kujira.so`. The control already cached the verifier — it ships
  * it inline in the payload so the supervisor stays stateless.
  *
  * On success the ack carries the long-lived `access_token`. The

@@ -82,7 +82,7 @@ El supervisor **NO**:
 El cliente recibe del operador (vía panel admin) un comando del estilo:
 
 ```bash
-curl -fsSL https://kujira.run/install-supervisor.sh | \
+curl -fsSL https://kujira.so/install-supervisor.sh | \
     KJ_PROVISIONING_TOKEN=kjprov_... KJ_CONTROL_URL=https://api.kujira.so sh
 ```
 
