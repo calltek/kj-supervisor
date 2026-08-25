@@ -36,7 +36,7 @@ el host:
 ```
 ┌──────────────────────────────┐         ┌────────────────────────────────┐
 │ kj-backend (control)         │         │ VPS del cliente                │
-│ - api.kujira.so             │◀──TLS──▶│ ┌────────────────────────────┐ │
+│ - api.kujira.so              │◀──TLS──▶│ ┌────────────────────────────┐ │
 │ - Postgres = fuente verdad   │         │ │ kj-supervisor              │ │
 │ - Socket.IO server /agents   │         │ │  - 1 container Docker      │ │
 └──────────────────────────────┘         │ │  - 1 WS al control         │ │
