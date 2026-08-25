@@ -11,7 +11,7 @@ cliente, mantiene una conexión WebSocket persistente con el control
 ## Instalación en un VPS
 
 ```bash
-curl -fsSL https://kujira.run/install-supervisor.sh | \
+curl -fsSL https://kujira.so/install-supervisor.sh | \
     KJ_CONTROL_URL=https://api.kujira.so \
     KJ_PROVISIONING_TOKEN=kjprov_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
     sh
