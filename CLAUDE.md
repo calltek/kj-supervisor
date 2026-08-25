@@ -29,14 +29,14 @@ detiene, pausa, reanuda y reporta el estado real.
 ## 1. Visión
 
 El supervisor es la **única pieza** que el cliente instala en su propio
-VPS. Habla con el control en `api.kujira.run` por una conexión Socket.IO
+VPS. Habla con el control en `api.kujira.so` por una conexión Socket.IO
 persistente y traduce comandos del control en operaciones Docker sobre
 el host:
 
 ```
 ┌──────────────────────────────┐         ┌────────────────────────────────┐
 │ kj-backend (control)         │         │ VPS del cliente                │
-│ - api.kujira.run             │◀──TLS──▶│ ┌────────────────────────────┐ │
+│ - api.kujira.so             │◀──TLS──▶│ ┌────────────────────────────┐ │
 │ - Postgres = fuente verdad   │         │ │ kj-supervisor              │ │
 │ - Socket.IO server /agents   │         │ │  - 1 container Docker      │ │
 └──────────────────────────────┘         │ │  - 1 WS al control         │ │
@@ -83,7 +83,7 @@ El cliente recibe del operador (vía panel admin) un comando del estilo:
 
 ```bash
 curl -fsSL https://kujira.run/install-supervisor.sh | \
-    KJ_PROVISIONING_TOKEN=kjprov_... KJ_CONTROL_URL=https://api.kujira.run sh
+    KJ_PROVISIONING_TOKEN=kjprov_... KJ_CONTROL_URL=https://api.kujira.so sh
 ```
 
 El script instala Docker si falta, crea `/etc/kj-supervisor/`, lanza el
@@ -98,7 +98,7 @@ docker run -d \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /etc/kj-supervisor:/etc/kj-supervisor \
-  -e KJ_CONTROL_URL=https://api.kujira.run \
+  -e KJ_CONTROL_URL=https://api.kujira.so \
   -e KJ_SUPERVISOR_CONTAINER=kj-supervisor \
   ghcr.io/calltek/kj-supervisor:latest
 ```
@@ -205,7 +205,7 @@ El backend expone su `protocol.ts` (la fuente de verdad del wire format)
 en un endpoint público:
 
 ```
-GET https://api.kujira.run/protocol   →  text/typescript
+GET https://api.kujira.so/protocol   →  text/typescript
 ```
 
 Mismo patrón que vcs-astro usa para `swagger.json`. Tener un script
@@ -219,7 +219,7 @@ const env = process.argv[2] || 'production'
 const url =
     env === 'development'
         ? 'http://localhost:5050/protocol'
-        : 'https://api.kujira.run/protocol'
+        : 'https://api.kujira.so/protocol'
 
 console.log(`🌍 Pulling protocol from ${url}`)
 const source = await fetch(url).then((r) => r.text())
@@ -245,7 +245,7 @@ siguiente build del supervisor lo refleja automáticamente.
 ### Drift en CI
 
 ```bash
-diff <(cat src/protocol.ts) <(curl -s https://api.kujira.run/protocol)
+diff <(cat src/protocol.ts) <(curl -s https://api.kujira.so/protocol)
 ```
 
 ---
@@ -304,7 +304,7 @@ del container. El resto sigue la misma forma.
 
 | Variable | Requerida | Descripción |
 |---|---|---|
-| `KJ_CONTROL_URL` | sí | URL del control (`https://api.kujira.run`). |
+| `KJ_CONTROL_URL` | sí | URL del control (`https://api.kujira.so`). |
 | `KJ_PROVISIONING_TOKEN` | en bootstrap | Token de un solo uso del operador. Tras el primer handshake se borra del disco. |
 | `KJ_AGENT_TOKEN` | tras bootstrap | Token persistente. Se guarda en `/etc/kj-supervisor/token` mode `0600`. |
 | `KJ_CONFIG_DIR` | no | Default `/etc/kj-supervisor`. Override para dev. |

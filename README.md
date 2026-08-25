@@ -12,7 +12,7 @@ cliente, mantiene una conexión WebSocket persistente con el control
 
 ```bash
 curl -fsSL https://kujira.run/install-supervisor.sh | \
-    KJ_CONTROL_URL=https://api.kujira.run \
+    KJ_CONTROL_URL=https://api.kujira.so \
     KJ_PROVISIONING_TOKEN=kjprov_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
     sh
 ```
@@ -62,7 +62,7 @@ token del disco y el control acepta la reconexión sin necesidad del
 
 | Variable | Requerida | Default | Descripción |
 |---|---|---|---|
-| `KJ_CONTROL_URL` | sí | — | URL base del control (`http://localhost:5050`, `https://api.kujira.run`). |
+| `KJ_CONTROL_URL` | sí | — | URL base del control (`http://localhost:5050`, `https://api.kujira.so`). |
 | `KJ_PROVISIONING_TOKEN` | en bootstrap | — | Token de un solo uso. Tras el primer handshake se descarta. |
 | `KJ_AGENT_TOKEN` | no | — | Override del token persistente. Útil en dev; en prod se lee del disco. |
 | `KJ_CONFIG_DIR` | no | `/etc/kj-supervisor` | Dónde guardar el `token`. |
