@@ -173,11 +173,25 @@ jobs:
                       type=semver,pattern={{major}}.{{minor}}
                       type=semver,pattern={{major}}
 
+            # Los tags salen del output multilínea de metadata-action y se
+            # convierten en `-t` a mano: nada de jq sobre
+            # DOCKER_METADATA_OUTPUT_JSON, que además de ser una dependencia
+            # más en el runner es fácil de escribir mal — un filtro que no
+            # casa devuelve vacío, el `$(...)` se lo traga y el manifiesto se
+            # publicaría SIN un solo tag.
             - name: Create manifest list and push
               working-directory: /tmp/digests
+              env:
+                  TAGS: ${{ steps.meta.outputs.tags }}
               run: |
-                  docker buildx imagetools create \
-                      $(jq -cr '.target."docker.metadata-action".tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+                  set -euo pipefail
+                  args=""
+                  while IFS= read -r tag; do
+                      [ -n "$tag" ] && args="$args -t $tag"
+                  done <<< "$TAGS"
+                  [ -n "$args" ] || { echo "::error::metadata-action no ha dado ningún tag"; exit 1; }
+                  # shellcheck disable=SC2086
+                  docker buildx imagetools create $args \
                       $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
             - name: Inspect
