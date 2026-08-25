@@ -82,8 +82,8 @@ El supervisor **NO**:
 El cliente recibe del operador (vía panel admin) un comando del estilo:
 
 ```bash
-curl -fsSL https://kujira.so/install-supervisor.sh | \
-    KJ_PROVISIONING_TOKEN=kjprov_... KJ_CONTROL_URL=https://api.kujira.so sh
+curl -fsSL https://api.kujira.so/install.sh | \
+    sudo PROVISIONING_TOKEN=kjprov_... bash
 ```
 
 El script instala Docker si falta, crea `/etc/kj-supervisor/`, lanza el
@@ -261,7 +261,9 @@ kj-supervisor/
 ├── biome.json
 ├── tsconfig.json
 ├── Dockerfile                             ← multi-stage Alpine
-├── install-supervisor.sh                  ← one-liner installer para el VPS
+├── install-supervisor.sh                  ← copia vieja; el instalador que
+│                                            se distribuye lo sirve el control
+│                                            en `<control>/install.sh`
 ├── scripts/
 │   └── pull-protocol.ts                   ← descarga protocol.ts del control
 └── src/
