@@ -22,7 +22,7 @@ const env = process.argv[2] || 'production'
 
 const URL_BY_ENV: Record<string, string> = {
     development: 'http://localhost:5050/protocol',
-    production: 'https://api.kujira.run/protocol',
+    production: 'https://api.kujira.so/protocol',
 }
 
 const url = URL_BY_ENV[env]
