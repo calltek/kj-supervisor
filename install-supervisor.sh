@@ -2,8 +2,14 @@
 # kj-supervisor installer.
 #
 # Usage:
-#   curl -fsSL https://kujira.run/install-supervisor.sh | \
-#     KJ_PROVISIONING_TOKEN=kjprov_xxx KJ_CONTROL_URL=https://api.kujira.run sh
+#   OJO: este NO es el instalador que se distribuye. El bueno lo sirve el
+#   control y se instala así:
+#
+#     curl -fsSL https://api.kujira.so/install.sh | \
+#       sudo PROVISIONING_TOKEN=kjprov_xxx bash
+#
+#   Este fichero se ha quedado atrás (usa las variables KJ_*, que el de verdad
+#   ya no lee) y está pendiente de borrarse.
 #
 # What it does:
 #   1. Detect OS, install Docker if missing.
@@ -38,7 +44,7 @@ ok()   { printf '\033[1;32m[kj-install] ✓ %s\033[0m\n' "$*"; }
 # 0. Inputs and sudo
 # ──────────────────────────────────────────────────────────────────────────
 
-: "${KJ_CONTROL_URL:?Missing KJ_CONTROL_URL (e.g. https://api.kujira.run)}"
+: "${KJ_CONTROL_URL:?Missing KJ_CONTROL_URL (e.g. https://api.kujira.so)}"
 : "${KJ_PROVISIONING_TOKEN:?Missing KJ_PROVISIONING_TOKEN (kjprov_… from the operator panel)}"
 
 # Sudo only when we need it. If Docker is already installed and reachable
