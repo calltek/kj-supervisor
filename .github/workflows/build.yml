@@ -1,12 +1,9 @@
-# Dónde corre esto lo decide la variable `CI_RUNNER` de la organización:
-#
-#   sin definir            → los runners de GitHub, como siempre
-#   CI_RUNNER=<etiqueta>   → nuestra propia máquina con esa etiqueta
-#
-# Está así y no clavado a `self-hosted` porque una máquina propia es un punto
-# único: el día que se apague o se quede sin red, borrar la variable devuelve
-# todo a GitHub sin tocar código ni abrir un PR. Y ponerla afecta a los cuatro
-# repositorios a la vez, que es como se quiere.
+# Este repo es PÚBLICO, así que aquí no se usa `CI_RUNNER`: los minutos de
+# Actions en repos públicos son gratis, y hacer que un PR de un fork ejecute
+# código en nuestra máquina no compensa. Cada plataforma se construye nativa en
+# runners de GitHub — `ubuntu-latest` para amd64 y `ubuntu-24.04-arm` para
+# arm64 — y luego se unen las dos en un único manifiesto. Emulando arm64 con
+# QEMU el mismo build tardaba 4,3 min; nativo, 0,6.
 name: build-supervisor-image
 
 on:
@@ -29,7 +26,7 @@ env:
 jobs:
     test:
         name: tests + typecheck + lint
-        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+        runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v5
 
@@ -52,12 +49,30 @@ jobs:
             - name: Unit tests
               run: bun test
 
+    # One job per platform, each on its own native machine. Nothing is tagged
+    # here: each job pushes an untagged image by digest and hands the digest to
+    # the merge job, which is what stitches both into one multi-arch tag.
     build:
-        name: build + push supervisor image
+        name: build supervisor (${{ matrix.platform }})
         needs: test
-        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: linux/amd64
+                      runner: ubuntu-latest
+                    - platform: linux/arm64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
         steps:
             - uses: actions/checkout@v5
+
+            # linux/amd64 -> linux-amd64, so it can be used in cache scopes and
+            # artifact names (a slash breaks both).
+            - name: Platform as a safe name
+              run: |
+                  platform=${{ matrix.platform }}
+                  echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
 
             - uses: oven-sh/setup-bun@v2
               with:
@@ -68,9 +83,6 @@ jobs:
             # from inside the image.
             - name: Pull protocol.ts (production endpoint)
               run: bun run pull-protocol
-
-            - name: Set up QEMU
-              uses: docker/setup-qemu-action@v3
 
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@v3
@@ -83,10 +95,72 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            # Tags:
-            #   - latest  on main pushes
-            #   - <sha>   always (so we can pin a deploy precisely)
-            #   - vX.Y.Z  on version tag pushes (with major + major.minor aliases)
+            - name: Labels for this image
+              id: meta
+              uses: docker/metadata-action@v5
+              with:
+                  images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+            - name: Build by digest
+              id: build
+              uses: docker/build-push-action@v6
+              with:
+                  context: .
+                  file: ./Dockerfile
+                  platforms: ${{ matrix.platform }}
+                  labels: ${{ steps.meta.outputs.labels }}
+                  outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+                  cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+                  cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+            # The digest travels to the merge job as an empty file named after
+            # it — nothing is downloaded twice, the layers are already in GHCR.
+            - name: Export digest
+              if: github.event_name != 'pull_request'
+              run: |
+                  mkdir -p /tmp/digests
+                  digest="${{ steps.build.outputs.digest }}"
+                  touch "/tmp/digests/${digest#sha256:}"
+
+            - name: Upload digest
+              if: github.event_name != 'pull_request'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: digests-${{ env.PLATFORM_PAIR }}
+                  path: /tmp/digests/*
+                  if-no-files-found: error
+                  retention-days: 1
+
+    # This is where the tags are actually created: one manifest list pointing at
+    # both per-platform digests.
+    #
+    # Tags:
+    #   - latest  on main pushes
+    #   - <sha>   always (so we can pin a deploy precisely)
+    #   - vX.Y.Z  on version tag pushes (with major + major.minor aliases)
+    merge:
+        name: publish manifest
+        needs: build
+        if: github.event_name != 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download digests
+              uses: actions/download-artifact@v4
+              with:
+                  path: /tmp/digests
+                  pattern: digests-*
+                  merge-multiple: true
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Login to GHCR
+              uses: docker/login-action@v3
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
             - name: Compute image tags
               id: meta
               uses: docker/metadata-action@v5
@@ -99,14 +173,51 @@ jobs:
                       type=semver,pattern={{major}}.{{minor}}
                       type=semver,pattern={{major}}
 
-            - name: Build and push
-              uses: docker/build-push-action@v6
-              with:
-                  context: .
-                  file: ./Dockerfile
-                  platforms: linux/amd64,linux/arm64
-                  push: ${{ github.event_name != 'pull_request' }}
-                  tags: ${{ steps.meta.outputs.tags }}
-                  labels: ${{ steps.meta.outputs.labels }}
-                  cache-from: type=gha
-                  cache-to: type=gha,mode=max
+            # Los tags salen del output multilínea de metadata-action y se
+            # convierten en `-t` a mano: nada de jq sobre
+            # DOCKER_METADATA_OUTPUT_JSON, que además de ser una dependencia
+            # más en el runner es fácil de escribir mal — un filtro que no
+            # casa devuelve vacío, el `$(...)` se lo traga y el manifiesto se
+            # publicaría SIN un solo tag.
+            - name: Create manifest list and push
+              working-directory: /tmp/digests
+              env:
+                  TAGS: ${{ steps.meta.outputs.tags }}
+              run: |
+                  set -euo pipefail
+                  args=""
+                  while IFS= read -r tag; do
+                      [ -n "$tag" ] && args="$args -t $tag"
+                  done <<< "$TAGS"
+                  [ -n "$args" ] || { echo "::error::metadata-action no ha dado ningún tag"; exit 1; }
+                  # shellcheck disable=SC2086
+                  docker buildx imagetools create $args \
+                      $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+            - name: Inspect
+              run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+    # Check-resumen con nombre FIJO: es el único contexto que exige la
+    # protección de rama. Los jobs de arriba pueden renombrarse o añadir
+    # plataformas a la matriz sin que haya que tocar el ruleset — que es lo que
+    # dejó este mismo PR bloqueado al partir el build en uno por plataforma.
+    gate:
+        name: build + push supervisor image
+        needs: [test, build, merge]
+        # `always()` para que también se pronuncie cuando algo falla; sin él el
+        # gate quedaría skipped y el check requerido nunca reportaría.
+        if: always()
+        runs-on: ubuntu-latest
+        steps:
+            - name: Comprobar resultados
+              run: |
+                  set -euo pipefail
+                  echo "test=${{ needs.test.result }} build=${{ needs.build.result }} merge=${{ needs.merge.result }}"
+                  for r in "${{ needs.test.result }}" "${{ needs.build.result }}"; do
+                      [ "$r" = "success" ] || { echo "::error::un job requerido terminó en '$r'"; exit 1; }
+                  done
+                  # `merge` no corre en pull_request: ahí `skipped` es lo normal.
+                  case "${{ needs.merge.result }}" in
+                      success | skipped) ;;
+                      *) echo "::error::publish manifest terminó en '${{ needs.merge.result }}'"; exit 1 ;;
+                  esac
