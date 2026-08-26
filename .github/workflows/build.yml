@@ -196,3 +196,28 @@ jobs:
 
             - name: Inspect
               run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+    # Check-resumen con nombre FIJO: es el único contexto que exige la
+    # protección de rama. Los jobs de arriba pueden renombrarse o añadir
+    # plataformas a la matriz sin que haya que tocar el ruleset — que es lo que
+    # dejó este mismo PR bloqueado al partir el build en uno por plataforma.
+    gate:
+        name: build + push supervisor image
+        needs: [test, build, merge]
+        # `always()` para que también se pronuncie cuando algo falla; sin él el
+        # gate quedaría skipped y el check requerido nunca reportaría.
+        if: always()
+        runs-on: ubuntu-latest
+        steps:
+            - name: Comprobar resultados
+              run: |
+                  set -euo pipefail
+                  echo "test=${{ needs.test.result }} build=${{ needs.build.result }} merge=${{ needs.merge.result }}"
+                  for r in "${{ needs.test.result }}" "${{ needs.build.result }}"; do
+                      [ "$r" = "success" ] || { echo "::error::un job requerido terminó en '$r'"; exit 1; }
+                  done
+                  # `merge` no corre en pull_request: ahí `skipped` es lo normal.
+                  case "${{ needs.merge.result }}" in
+                      success | skipped) ;;
+                      *) echo "::error::publish manifest terminó en '${{ needs.merge.result }}'"; exit 1 ;;
+                  esac
