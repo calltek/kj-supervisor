@@ -161,13 +161,29 @@ export function buildBackupScript(): string {
         // so `.backup` dies with "unable to open database file" — Soki, night
         // of 2026-08-27, over an idle `.aws/cli/cache/session.db`. When its
         // -wal/-shm are NOT on disk the file is fully checkpointed and nobody
-        // is mid-write, so `immutable=1` (the SQLite door for
-        // read-only media) yields a copy that passes integrity_check. With
-        // sidecars present a consistent copy is impossible from here and the
-        // honest outcome is still kjdb.failed → exit 7.
+        // is mid-write, so `immutable=1` (the SQLite door for read-only
+        // media) can take the copy. With sidecars present a consistent copy
+        // is impossible from here and the honest outcome is still
+        // kjdb.failed → exit 7.
+        //
+        // Three guards around it (security review, PR #25):
+        // - In `file:` the name stops being an opaque path and becomes a URI,
+        //   where `?`/`#`/`%` are metacharacters — and the file name is the
+        //   agent's. A name carrying any of them never reaches the URI; it
+        //   falls through to kjdb.failed, exactly where it landed before the
+        //   fallback existed.
+        // - `immutable=1` tells SQLite to skip locks, so a writer sneaking in
+        //   between the sidecar check and the copy would corrupt it SILENTLY.
+        //   The copy only counts if `PRAGMA integrity_check` says ok…
+        // - …and the sidecars are STILL absent after it, which shrinks that
+        //   window to nothing that matters: a writer that appeared mid-copy
+        //   leaves a -wal behind, and that voids the copy.
         '    if { sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" ||',
         '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] &&',
-        '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ"; }; } &&',
+        '           case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac &&',
+        '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ" &&',
+        '           [ "$(sqlite3 "/tmp/kjdb/copia-$SEQ" "PRAGMA integrity_check;")" = "ok" ] &&',
+        '           [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ]; }; } &&',
         '       mkdir -p "/tmp/kjdb/$(dirname "$REL")" &&',
         '       mv "/tmp/kjdb/copia-$SEQ" "/tmp/kjdb/$REL"; then',
         '      :',
@@ -218,6 +234,11 @@ export function buildBackupScript(): string {
         '  RC=$?',
         '  if [ "$RC" -ge 2 ]; then exit "$RC"; fi',
         '  echo "aviso: ficheros cambiando durante el tar (agente en marcha)" >&2',
+        // The marker survives where the stderr line does not: on success
+        // nobody reads the helper logs, and the difference between a clean
+        // copy and a hot one with files moving underneath deserves to
+        // outlive the night — backupVolume() picks it up and logs a warn.
+        '  echo "KJ_TAR_WARN=1"',
         '}',
         '',
         '# Las copias en caliente ya viajan dentro del tar.',
@@ -1353,6 +1374,17 @@ export class KJDocker {
 
         const m = logs.match(/KJ_BACKUP_SIZE=(\d+)/)
         const size_bytes = m ? Number(m[1]) : 0
+
+        // On success nobody reads the helper logs, so the "files were moving
+        // under the tar" warning would die with the container. Line-anchored
+        // like the size marker: agent-controlled file names do flow into
+        // these logs on failure paths.
+        if (/^KJ_TAR_WARN=1$/m.test(logs)) {
+            this.logger.warn(
+                { volume_name },
+                'backup tarred while the agent kept writing; the sqlite copies inside the tar are the consistent ones'
+            )
+        }
 
         const parts: { part_number: number; etag: string }[] = []
         for (const line of logs.matchAll(/KJ_PART=(\d+):(\S+)/g)) {

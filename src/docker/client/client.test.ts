@@ -501,4 +501,35 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         expect(guardAt).toBeGreaterThan(-1)
         expect(guardAt).toBeLessThan(fallbackAt)
     })
+
+    test('a name with URI metacharacters never reaches the file: URI', () => {
+        // In `file:` the name stops being an opaque path: `?` smuggles query
+        // parameters (`x.db?immutable=0` would void the very flag the
+        // fallback depends on) and `%XX` percent-decodes into a DIFFERENT
+        // path than the one the guards validated. The file name is the
+        // agent's, so any of `?`/`#`/`%` skips the fallback and the file
+        // lands in kjdb.failed — where it landed before the fallback existed.
+        const caseAt = script.indexOf('case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac')
+        const uriAt = script.indexOf('sqlite3 "file:$DB?immutable=1"')
+        expect(caseAt).toBeGreaterThan(-1)
+        expect(caseAt).toBeLessThan(uriAt)
+    })
+
+    test('the immutable copy only counts verified', () => {
+        // `immutable=1` skips locking, so a writer sneaking in between the
+        // sidecar check and the copy would corrupt it with NO error. The copy
+        // must pass integrity_check AND find the sidecars still absent
+        // afterwards; otherwise it goes to kjdb.failed like any other miss.
+        const uriAt = script.indexOf('sqlite3 "file:$DB?immutable=1"')
+        const checkAt = script.indexOf('PRAGMA integrity_check')
+        const recheckAt = script.indexOf('[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ]; }', uriAt)
+        expect(checkAt).toBeGreaterThan(uriAt)
+        expect(recheckAt).toBeGreaterThan(checkAt)
+    })
+
+    test('the tar warning leaves a marker the control side can keep', () => {
+        // The stderr line dies with the helper on success (nobody reads green
+        // logs); the line-anchored marker is what backupVolume() picks up.
+        expect(script).toContain('echo "KJ_TAR_WARN=1"')
+    })
 })
