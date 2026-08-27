@@ -522,14 +522,77 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // afterwards; otherwise it goes to kjdb.failed like any other miss.
         const uriAt = script.indexOf('sqlite3 "file:$DB?immutable=1"')
         const checkAt = script.indexOf('PRAGMA integrity_check')
-        const recheckAt = script.indexOf('[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ]; }', uriAt)
+        const recheckAt = script.indexOf('[ ! -f "$DB-journal" ]; }', uriAt)
         expect(checkAt).toBeGreaterThan(uriAt)
         expect(recheckAt).toBeGreaterThan(checkAt)
+    })
+
+    test('a hot rollback journal blocks the fallback and gets blanked', () => {
+        // `immutable=1` also disables hot-journal replay — and a hot
+        // `-journal` is the OTHER reason the normal `.backup` fails on a
+        // read-only mount. integrity_check cannot catch it (a half-rolled
+        // transaction breaks atomicity, not page structure), so `-journal`
+        // must sit in both existence guards…
+        const first = script.indexOf('[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]')
+        const second = script.indexOf(
+            '[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]',
+            first + 1
+        )
+        expect(first).toBeGreaterThan(-1)
+        expect(second).toBeGreaterThan(first)
+        // …and travel blanked in the tar, like -wal/-shm: a journal from
+        // another instant would be replayed on first open of the restored
+        // copy.
+        expect(script).toContain('for SUF in -wal -shm -journal; do')
     })
 
     test('the tar warning leaves a marker the control side can keep', () => {
         // The stderr line dies with the helper on success (nobody reads green
         // logs); the line-anchored marker is what backupVolume() picks up.
         expect(script).toContain('echo "KJ_TAR_WARN=1"')
+    })
+})
+
+describe('backupVolume — marker parsing is line-anchored', () => {
+    // With tar exit 1 non-fatal, its stderr reaches `logs` on SUCCESS, and
+    // every `tar: ./<name>: file changed as we read it` line carries a file
+    // name the agent chose. Unanchored parsing let a file called
+    // `KJ_BACKUP_SIZE=1` shrink the recorded size, and a `KJ_PART=1:x`
+    // inject a fake ETag into the multipart seal.
+    function helperDocker(logs: string): KJDocker {
+        const fake = {
+            getImage: () => ({ inspect: async () => ({}) }),
+            createContainer: async () => ({
+                start: async () => undefined,
+                wait: async () => ({ StatusCode: 0 }),
+                logs: async () => Buffer.from(logs),
+                remove: async () => undefined,
+            }),
+        }
+        return new KJDocker(silentLogger, fake as never)
+    }
+
+    test('agent-named files inside tar warnings cannot spoof the markers', async () => {
+        const hostile = [
+            'tar: ./KJ_BACKUP_SIZE=1: file changed as we read it',
+            'tar: ./KJ_PART=1:etagfalso: file changed as we read it',
+            'KJ_TAR_WARN=1',
+            'KJ_BACKUP_SIZE=773938408',
+        ].join('\n')
+        const result = await helperDocker(hostile).backupVolume('kj-agent-4-home', 'https://r2/put')
+        expect(result.size_bytes).toBe(773_938_408)
+        // No parts: the single-PUT path must not trick the control into
+        // sealing a multipart that does not exist.
+        expect(result.parts).toBeUndefined()
+    })
+
+    test('real helper-emitted markers still parse', async () => {
+        const clean = ['KJ_BACKUP_SIZE=6666226321', 'KJ_PART=1:abc', 'KJ_PART=2:def'].join('\n')
+        const result = await helperDocker(clean).backupVolume('kj-agent-10-home', 'https://r2/put')
+        expect(result.size_bytes).toBe(6_666_226_321)
+        expect(result.parts).toEqual([
+            { part_number: 1, etag: 'abc' },
+            { part_number: 2, etag: 'def' },
+        ])
     })
 })

@@ -178,12 +178,18 @@ export function buildBackupScript(): string {
         // - …and the sidecars are STILL absent after it, which shrinks that
         //   window to nothing that matters: a writer that appeared mid-copy
         //   leaves a -wal behind, and that voids the copy.
+        //
+        // `-journal` sits in both checks alongside -wal/-shm: a hot rollback
+        // journal is the OTHER case where the normal `.backup` fails on a
+        // read-only mount (SQLITE_READONLY_ROLLBACK), and `immutable=1` would
+        // swallow it whole — integrity_check comes back ok because what a
+        // half-rolled transaction breaks is atomicity, not page structure.
         '    if { sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" ||',
-        '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] &&',
+        '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ] &&',
         '           case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac &&',
         '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ" &&',
         '           [ "$(sqlite3 "/tmp/kjdb/copia-$SEQ" "PRAGMA integrity_check;")" = "ok" ] &&',
-        '           [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ]; }; } &&',
+        '           [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]; }; } &&',
         '       mkdir -p "/tmp/kjdb/$(dirname "$REL")" &&',
         '       mv "/tmp/kjdb/copia-$SEQ" "/tmp/kjdb/$REL"; then',
         '      :',
@@ -197,7 +203,12 @@ export function buildBackupScript(): string {
         '    # ficheros vacíos (que para SQLite significa "nada que reproducir"),',
         '    # y sólo si existían: crear un -wal donde no lo había empujaría a',
         '    # modo WAL a una base que no lo usa.',
-        '    for SUF in -wal -shm; do',
+        // `-journal` for the same reason: a hot rollback journal from another
+        // instant would be REPLAYED on first open of the restored copy,
+        // planting the corruption at restore time. Zero-length means
+        // "nothing to roll back", and (blanked only if it existed) a
+        // PERSIST-mode database keeps the journal file it expects.
+        '    for SUF in -wal -shm -journal; do',
         // `if`, NOT `[ -f ] && …`: when the last database processed has no
         // sidecar, that AND-list leaves status 1 as the exit code of the loop
         // — and thus of the inner shell. BusyBox find propagates it, `set -e`
@@ -1372,13 +1383,19 @@ export class KJDocker {
         })
         if (code !== 0) throw new Error(`backup helper exited ${code}: ${logs.slice(-400)}`)
 
-        const m = logs.match(/KJ_BACKUP_SIZE=(\d+)/)
+        // Every marker parse is line-anchored, always: with tar exit 1 now
+        // non-fatal, its stderr reaches these logs on SUCCESS — and each
+        // `tar: ./<name>: file changed as we read it` line carries a file
+        // name the agent chose. Unanchored, a file called `KJ_BACKUP_SIZE=1`
+        // would win over the helper's real echo (`.match` takes the first
+        // hit), and a `KJ_PART=1:x` would inject a fake ETag into the list
+        // the control seals the multipart with. Same reasoning as the
+        // `line.startsWith` in the marker watcher above.
+        const m = logs.match(/^KJ_BACKUP_SIZE=(\d+)$/m)
         const size_bytes = m ? Number(m[1]) : 0
 
         // On success nobody reads the helper logs, so the "files were moving
-        // under the tar" warning would die with the container. Line-anchored
-        // like the size marker: agent-controlled file names do flow into
-        // these logs on failure paths.
+        // under the tar" warning would die with the container.
         if (/^KJ_TAR_WARN=1$/m.test(logs)) {
             this.logger.warn(
                 { volume_name },
@@ -1387,7 +1404,7 @@ export class KJDocker {
         }
 
         const parts: { part_number: number; etag: string }[] = []
-        for (const line of logs.matchAll(/KJ_PART=(\d+):(\S+)/g)) {
+        for (const line of logs.matchAll(/^KJ_PART=(\d+):(\S+)$/gm)) {
             const [, number, etag] = line
             if (number && etag) parts.push({ part_number: Number(number), etag })
         }
