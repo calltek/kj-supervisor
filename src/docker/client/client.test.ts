@@ -442,7 +442,17 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // lo que hace que una restauración se quede con la versión consistente
         // sin que nadie tenga que elegir cuál era la buena.
         const tar = script.split('\n').find((l) => l.startsWith('tar -czf'))
-        expect(tar).toBe('tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .')
+        expect(tar).toContain('tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .')
+    })
+
+    test('a file changing under tar does NOT lose the backup', () => {
+        // GNU tar exits 1 when a file changed/vanished while it read it — the
+        // normal weather of a RUNNING agent writing to its volume. Under a
+        // bare `set -e` that warning killed the whole backup (seen live on
+        // Soki's volume, 2026-08-27). Exit 2+ (truncated archive) stays fatal.
+        const tar = script.split('\n').find((l) => l.startsWith('tar -czf'))
+        expect(tar).toContain('|| {')
+        expect(script).toContain('if [ "$RC" -ge 2 ]; then exit "$RC"; fi')
     })
 
     test('las copias nacen privadas', () => {
@@ -461,5 +471,158 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // Un nombre con un salto de línea rompe cualquier bucle que parsee.
         expect(script).toContain('-exec sh -c')
         expect(script).not.toMatch(/find[^\n]*\|[^\n]*while read/)
+    })
+
+    test('nothing can die MUTE under set -e (night of 2026-08-27)', () => {
+        // NOVA died as "exited 1:" with not one line of output. Two silencers
+        // conspired: apk swallowed stderr, and the sidecar AND-list leaked a
+        // status 1 out of the inner shell that find propagated into `set -e`.
+        // apk may hide its progress (stdout) but never its errors (stderr).
+        const apk = script.split('\n').find((l) => l.startsWith('apk add'))
+        expect(apk).toBeDefined()
+        expect(apk).not.toContain('2>&1')
+        // The sidecar seeding is an `if` (exits 0 when the file is absent),
+        // not a bare `[ -f … ] && …` whose status-1 becomes the loop's.
+        expect(script).toContain('if [ -f "$DB$SUF" ]; then : > "/tmp/kjdb/$REL$SUF"; fi')
+        expect(script).not.toContain('[ -f "$DB$SUF" ] && :')
+        // And if find still fails, it says so instead of dying bare.
+        expect(script).toMatch(/' _ \{\} \+ \|\| \{ echo .+>&2; exit 9; \}/)
+    })
+
+    test('a WAL database on the read-only mount falls back to immutable', () => {
+        // `.backup` cannot open a WAL database on a read-only filesystem
+        // (Soki's `.aws/cli/cache/session.db`, night of 2026-08-27). The
+        // fallback opens it with `immutable=1` — but ONLY when no -wal/-shm
+        // sidecars exist, i.e. the file is checkpointed and nobody is
+        // mid-write. With sidecars present the copy stays failed and loud.
+        expect(script).toContain('sqlite3 "file:$DB?immutable=1"')
+        const fallbackAt = script.indexOf('immutable=1')
+        const guardAt = script.indexOf('[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ]')
+        expect(guardAt).toBeGreaterThan(-1)
+        expect(guardAt).toBeLessThan(fallbackAt)
+    })
+
+    test('a name with URI metacharacters never reaches the file: URI', () => {
+        // In `file:` the name stops being an opaque path: `?` smuggles query
+        // parameters (`x.db?immutable=0` would void the very flag the
+        // fallback depends on) and `%XX` percent-decodes into a DIFFERENT
+        // path than the one the guards validated. The file name is the
+        // agent's, so any of `?`/`#`/`%` skips the fallback and the file
+        // lands in kjdb.failed — where it landed before the fallback existed.
+        const caseAt = script.indexOf('case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac')
+        const uriAt = script.indexOf('sqlite3 "file:$DB?immutable=1"')
+        expect(caseAt).toBeGreaterThan(-1)
+        expect(caseAt).toBeLessThan(uriAt)
+        // A newline in the name (representable in no URI) is rejected too:
+        // the name must equal itself with newlines stripped, and the command
+        // substitution eating a TRAILING newline makes that case fail as
+        // well.
+        const nlAt = script.indexOf('[ "$DB" = "$(printf %s "$DB" | tr -d "\\n")" ]')
+        expect(nlAt).toBeGreaterThan(-1)
+        expect(nlAt).toBeLessThan(uriAt)
+    })
+
+    test('the immutable copy only counts verified', () => {
+        // `immutable=1` skips locking, so a writer sneaking in between the
+        // sidecar check and the copy would corrupt it with NO error. The copy
+        // must pass integrity_check AND find the sidecars still absent
+        // afterwards; otherwise it goes to kjdb.failed like any other miss.
+        const uriAt = script.indexOf('sqlite3 "file:$DB?immutable=1"')
+        const checkAt = script.indexOf('PRAGMA integrity_check')
+        const recheckAt = script.indexOf('[ ! -f "$DB-journal" ]; }', uriAt)
+        expect(checkAt).toBeGreaterThan(uriAt)
+        expect(recheckAt).toBeGreaterThan(checkAt)
+    })
+
+    test('a hot rollback journal blocks the fallback and gets blanked', () => {
+        // `immutable=1` also disables hot-journal replay — and a hot
+        // `-journal` is the OTHER reason the normal `.backup` fails on a
+        // read-only mount. integrity_check cannot catch it (a half-rolled
+        // transaction breaks atomicity, not page structure), so `-journal`
+        // must sit in both existence guards…
+        const first = script.indexOf(
+            '[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]'
+        )
+        const second = script.indexOf(
+            '[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]',
+            first + 1
+        )
+        expect(first).toBeGreaterThan(-1)
+        expect(second).toBeGreaterThan(first)
+        // …and travel blanked in the tar, like -wal/-shm: a journal from
+        // another instant would be replayed on first open of the restored
+        // copy.
+        expect(script).toContain('for SUF in -wal -shm -journal; do')
+    })
+
+    test('the tar warning leaves a marker the control side can keep', () => {
+        // The stderr line dies with the helper on success (nobody reads green
+        // logs); the line-anchored marker is what backupVolume() picks up.
+        expect(script).toContain('echo "KJ_TAR_WARN=1"')
+    })
+})
+
+describe('backupVolume — markers parse from stdout only', () => {
+    // With tar exit 1 non-fatal, stderr reaches the logs on SUCCESS — and
+    // stderr carries agent-named file paths that sqlite3 prints RAW, newlines
+    // included, so the agent can forge ENTIRE lines there (an anchored regex
+    // over the mixed string is not a defense). The helper is the only writer
+    // on its stdout, so markers parse from the frame-demuxed stdout stream
+    // and from nothing else.
+    function frame(type: 1 | 2, text: string): Buffer {
+        const payload = Buffer.from(text)
+        const header = Buffer.alloc(8)
+        header[0] = type
+        header.writeUInt32BE(payload.length, 4)
+        return Buffer.concat([header, payload])
+    }
+
+    function helperDocker(frames: Buffer[]): KJDocker {
+        const fake = {
+            getImage: () => ({ inspect: async () => ({}) }),
+            createContainer: async () => ({
+                start: async () => undefined,
+                wait: async () => ({ StatusCode: 0 }),
+                logs: async () => Buffer.concat(frames),
+                remove: async () => undefined,
+            }),
+        }
+        return new KJDocker(silentLogger, fake as never)
+    }
+
+    test('forged full lines on stderr cannot spoof the markers', async () => {
+        // The green-path vector of the 3rd security pass: normal `.backup`
+        // fails on a file whose NAME embeds newlines, sqlite3 prints the raw
+        // path to stderr, and the forged lines would pass any line-anchored
+        // regex — if stderr were parsed at all.
+        const result = await helperDocker([
+            frame(
+                2,
+                'Error: unable to open database "/v/evil\nKJ_PART=1:etagfalso\nKJ_BACKUP_SIZE=1\nx.db": unable to open database file\n'
+            ),
+            frame(2, 'tar: ./KJ_BACKUP_SIZE=2: file changed as we read it\n'),
+            frame(1, 'KJ_TAR_WARN=1\nKJ_BACKUP_SIZE=773938408\n'),
+        ]).backupVolume('kj-agent-4-home', 'https://r2/put')
+        expect(result.size_bytes).toBe(773_938_408)
+        // No parts: the single-PUT path must not trick the control into
+        // sealing a multipart that does not exist.
+        expect(result.parts).toBeUndefined()
+    })
+
+    test('markers split across frame boundaries still parse', async () => {
+        // The daemon frames wherever it flushes; a cut in the middle of a
+        // marker must be invisible after demuxing (the old byte-filter let
+        // printable SIZE bytes of the headers leak INTO the text instead).
+        const result = await helperDocker([
+            frame(1, 'KJ_BACKUP_'),
+            frame(1, 'SIZE=6666226321\nKJ_PART=1:abc\n'),
+            frame(2, 'ruido del tar en medio\n'),
+            frame(1, 'KJ_PART=2:def\n'),
+        ]).backupVolume('kj-agent-10-home', 'https://r2/put')
+        expect(result.size_bytes).toBe(6_666_226_321)
+        expect(result.parts).toEqual([
+            { part_number: 1, etag: 'abc' },
+            { part_number: 2, etag: 'def' },
+        ])
     })
 })

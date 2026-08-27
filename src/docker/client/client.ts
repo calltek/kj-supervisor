@@ -100,7 +100,10 @@ export function buildBackupScript(): string {
         // GNU tar además de BusyBox: hace falta para meter en UN solo archivo
         // dos orígenes distintos (`-C` dos veces). El de BusyBox aplica el
         // último `-C` a todos y se pierde el volumen — comprobado.
-        'apk add --no-cache curl sqlite tar >/dev/null 2>&1',
+        // stdout only: if apk fails (a CDN hiccup), `set -e` kills the whole
+        // helper, and with stderr swallowed the backup died with "exited 1:"
+        // and not a word of why. Whatever apk has to say must reach the logs.
+        'apk add --no-cache curl sqlite tar >/dev/null',
         '',
         '# Copias consistentes de las bases SQLite, en /tmp del ayudante.',
         '#',
@@ -152,7 +155,46 @@ export function buildBackupScript(): string {
         '    # bien pero moverla a su sitio no, la original rota gana en el tar y',
         '    # queda un copia-N suelto en la raíz del archivo. Un fallo parcial',
         '    # que nadie ve es lo que este cambio viene a quitar.',
-        '    if sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" &&',
+        '    #',
+        // The fallback: a WAL database on the read-only mount. SQLite cannot
+        // open one the normal way there (it needs to create the -shm to read),
+        // so `.backup` dies with "unable to open database file" — Soki, night
+        // of 2026-08-27, over an idle `.aws/cli/cache/session.db`. When its
+        // -wal/-shm are NOT on disk the file is fully checkpointed and nobody
+        // is mid-write, so `immutable=1` (the SQLite door for read-only
+        // media) can take the copy. With sidecars present a consistent copy
+        // is impossible from here and the honest outcome is still
+        // kjdb.failed → exit 7.
+        //
+        // Three guards around it (security review, PR #25):
+        // - In `file:` the name stops being an opaque path and becomes a URI,
+        //   where `?`/`#`/`%` are metacharacters — and the file name is the
+        //   agent's. A name carrying any of them never reaches the URI; it
+        //   falls through to kjdb.failed, exactly where it landed before the
+        //   fallback existed. Same for a name with a NEWLINE in it (which no
+        //   URI can represent anyway): compared against itself through
+        //   `tr -d "\n"` — command substitution also eats trailing newlines,
+        //   so a name ending in one fails the comparison too, which is the
+        //   point.
+        // - `immutable=1` tells SQLite to skip locks, so a writer sneaking in
+        //   between the sidecar check and the copy would corrupt it SILENTLY.
+        //   The copy only counts if `PRAGMA integrity_check` says ok…
+        // - …and the sidecars are STILL absent after it, which shrinks that
+        //   window to nothing that matters: a writer that appeared mid-copy
+        //   leaves a -wal behind, and that voids the copy.
+        //
+        // `-journal` sits in both checks alongside -wal/-shm: a hot rollback
+        // journal is the OTHER case where the normal `.backup` fails on a
+        // read-only mount (SQLITE_READONLY_ROLLBACK), and `immutable=1` would
+        // swallow it whole — integrity_check comes back ok because what a
+        // half-rolled transaction breaks is atomicity, not page structure.
+        '    if { sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" ||',
+        '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ] &&',
+        '           case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac &&',
+        '           [ "$DB" = "$(printf %s "$DB" | tr -d "\\n")" ] &&',
+        '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ" &&',
+        '           [ "$(sqlite3 "/tmp/kjdb/copia-$SEQ" "PRAGMA integrity_check;")" = "ok" ] &&',
+        '           [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]; }; } &&',
         '       mkdir -p "/tmp/kjdb/$(dirname "$REL")" &&',
         '       mv "/tmp/kjdb/copia-$SEQ" "/tmp/kjdb/$REL"; then',
         '      :',
@@ -166,11 +208,24 @@ export function buildBackupScript(): string {
         '    # ficheros vacíos (que para SQLite significa "nada que reproducir"),',
         '    # y sólo si existían: crear un -wal donde no lo había empujaría a',
         '    # modo WAL a una base que no lo usa.',
-        '    for SUF in -wal -shm; do',
-        '      [ -f "$DB$SUF" ] && : > "/tmp/kjdb/$REL$SUF"',
+        // `-journal` for the same reason: a hot rollback journal from another
+        // instant would be REPLAYED on first open of the restored copy,
+        // planting the corruption at restore time. Zero-length means
+        // "nothing to roll back", and (blanked only if it existed) a
+        // PERSIST-mode database keeps the journal file it expects.
+        '    for SUF in -wal -shm -journal; do',
+        // `if`, NOT `[ -f ] && …`: when the last database processed has no
+        // sidecar, that AND-list leaves status 1 as the exit code of the loop
+        // — and thus of the inner shell. BusyBox find propagates it, `set -e`
+        // aborts, and the backup dies as a mute "exited 1:" (NOVA, night of
+        // 2026-08-27). An `if` that takes no branch exits 0.
+        '      if [ -f "$DB$SUF" ]; then : > "/tmp/kjdb/$REL$SUF"; fi',
         '    done',
         '  done',
-        "' _ {} +",
+        // If find itself fails (unreadable dir, a crash in the inner shell),
+        // say so: bare `set -e` here used to kill the helper with no output
+        // at all, which is the worst kind of red.
+        '\' _ {} + || { echo "el recorrido de bases sqlite falló" >&2; exit 9; }',
         '',
         '# Y si alguna falló, la copia FALLA. Un backup que se sube en verde',
         '# sabiendo que una base puede estar rota es peor que no tenerlo: el',
@@ -183,7 +238,24 @@ export function buildBackupScript(): string {
         '# Las copias van DESPUÉS del volumen a propósito: al extraer, la última',
         '# entrada de una ruta repetida gana, así que una restauración se queda',
         '# con la versión consistente sin que nadie tenga que elegir.',
-        'tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .',
+        '#',
+        // GNU tar exit 1 means "a file changed/vanished while I read it" —
+        // the normal weather of taring a volume a RUNNING agent keeps writing
+        // to, and inherent to hot backups (the databases that must be
+        // consistent already travel as the /tmp/kjdb copies). Under `set -e`
+        // that warning was a lost backup every time the dice rolled badly.
+        // Exit 2+ (truncated archive, I/O error) is a real failure and stays
+        // fatal.
+        'tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb . || {',
+        '  RC=$?',
+        '  if [ "$RC" -ge 2 ]; then exit "$RC"; fi',
+        '  echo "aviso: ficheros cambiando durante el tar (agente en marcha)" >&2',
+        // The marker survives where the stderr line does not: on success
+        // nobody reads the helper logs, and the difference between a clean
+        // copy and a hot one with files moving underneath deserves to
+        // outlive the night — backupVolume() picks it up and logs a warn.
+        '  echo "KJ_TAR_WARN=1"',
+        '}',
         '',
         '# Las copias en caliente ya viajan dentro del tar.',
         'find /v -name "*.kjbackup" -delete 2>/dev/null || true',
@@ -1173,7 +1245,7 @@ export class KJDocker {
          */
         marker?: string
         onMarker?: () => Promise<void>
-    }): Promise<{ code: number; logs: string }> {
+    }): Promise<{ code: number; logs: string; stdout: string }> {
         const helperImage = 'alpine:3.20'
         if (!(await this.imageExistsLocally(helperImage)))
             await this.pullImage(helperImage, () => {})
@@ -1203,16 +1275,17 @@ export class KJDocker {
             while (!markerSeen) {
                 await new Promise((r) => setTimeout(r, 2_000))
                 if (markerSeen) return
+                // STDOUT only, and at the start of a line. The helper is the
+                // only writer on its stdout; stderr carries whatever the
+                // tools spat out — sqlite3 prints raw file paths (agent-named,
+                // newlines included), so anything derived from stderr the
+                // agent can forge whole lines of. The thaw button is not the
+                // agent's to press.
                 const seen = await container
                     .logs({ stdout: true, stderr: true, follow: false })
-                    // Al PRINCIPIO de una línea, no en cualquier parte del log.
-                    // Por ahí pasan rutas de ficheros que pone el agente, y una
-                    // llamada `KJ_BACKUP_SIZE=…` le dejaría decidir cuándo se
-                    // descongela. El daño sería pequeño (descongelar antes de
-                    // tiempo), pero no es suyo ese botón.
                     .then((b) =>
-                        stripDockerFrames(b)
-                            .split('\n')
+                        demuxDockerLogs(b)
+                            .stdout.split('\n')
                             .some((line) => line.startsWith(opts.marker as string))
                     )
                     .catch(() => false)
@@ -1231,7 +1304,13 @@ export class KJDocker {
             const logsBuf = await container
                 .logs({ stdout: true, stderr: true, follow: false })
                 .catch(() => Buffer.from(''))
-            return { code: result.StatusCode, logs: stripDockerFrames(logsBuf) }
+            // `logs` (mixed, human-facing error text) vs `stdout` (frame-demuxed,
+            // the ONLY stream marker parsing may trust — see demuxDockerLogs).
+            return {
+                code: result.StatusCode,
+                logs: stripDockerFrames(logsBuf),
+                stdout: demuxDockerLogs(logsBuf).stdout,
+            }
         } finally {
             markerSeen = true
             await container.remove({ force: true }).catch(() => undefined)
@@ -1299,7 +1378,7 @@ export class KJDocker {
         const partUrls = multipart?.part_urls.join('\n') ?? ''
         const script = buildBackupScript()
 
-        const { code, logs } = await this.runVolumeHelper({
+        const { code, logs, stdout } = await this.runVolumeHelper({
             volume_name,
             script,
             // El tamaño se imprime justo después del tar: es la señal de que ya
@@ -1316,11 +1395,28 @@ export class KJDocker {
         })
         if (code !== 0) throw new Error(`backup helper exited ${code}: ${logs.slice(-400)}`)
 
-        const m = logs.match(/KJ_BACKUP_SIZE=(\d+)/)
+        // Markers parse from STDOUT only, never the mixed logs. On the green
+        // path stderr still carries tool noise with agent-named file paths in
+        // it — and sqlite3 prints those paths RAW, newlines included, so an
+        // agent can forge entire lines there (a file named
+        // "evil\nKJ_PART=1:x\ny.db" defeats any anchor). The helper is the
+        // only writer on its stdout: everything it says that isn't a marker
+        // goes to >&2, and the multipart ETags come from R2's responses, not
+        // from anything the agent can touch. Anchors stay as hygiene.
+        const m = stdout.match(/^KJ_BACKUP_SIZE=(\d+)$/m)
         const size_bytes = m ? Number(m[1]) : 0
 
+        // On success nobody reads the helper logs, so the "files were moving
+        // under the tar" warning would die with the container.
+        if (/^KJ_TAR_WARN=1$/m.test(stdout)) {
+            this.logger.warn(
+                { volume_name },
+                'backup tarred while the agent kept writing; the sqlite copies inside the tar are the consistent ones'
+            )
+        }
+
         const parts: { part_number: number; etag: string }[] = []
-        for (const line of logs.matchAll(/KJ_PART=(\d+):(\S+)/g)) {
+        for (const line of stdout.matchAll(/^KJ_PART=(\d+):(\S+)$/gm)) {
             const [, number, etag] = line
             if (number && etag) parts.push({ part_number: Number(number), etag })
         }
@@ -1352,9 +1448,51 @@ export class KJDocker {
 }
 
 /**
+ * Real demultiplexing of a docker logs/attach buffer (Tty:false): each frame
+ * is an 8-byte header `[type, 0, 0, 0, SIZE_BE32]` followed by SIZE payload
+ * bytes; type 1 = stdout, 2 = stderr.
+ *
+ * This exists because `stripDockerFrames` is NOT a demux — it byte-filters
+ * and concatenates, which (a) merges stderr into the same string as stdout,
+ * and (b) lets printable SIZE bytes of the headers leak into the text. Fine
+ * for human-facing error text; disqualifying for anything a machine parses:
+ * the helper is the only writer on its stdout, while stderr carries raw
+ * agent-named file paths (sqlite3 does not escape newlines in them, so an
+ * agent can forge entire lines there — PR #25, 3rd security pass).
+ *
+ * Strict on purpose: a malformed header stops the parse and drops the rest,
+ * so a truncated buffer fails closed (missing markers read as "no size")
+ * instead of guessing at bytes.
+ */
+function demuxDockerLogs(buf: Buffer | string): { stdout: string; stderr: string } {
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf))
+    const out: Buffer[] = []
+    const err: Buffer[] = []
+    let i = 0
+    while (i + 8 <= b.length) {
+        const type = b[i] as number
+        const zeros = b[i + 1] === 0 && b[i + 2] === 0 && b[i + 3] === 0
+        if (!zeros || type > 2) break
+        const size = b.readUInt32BE(i + 4)
+        const start = i + 8
+        const end = start + size
+        if (end > b.length) break
+        const payload = b.subarray(start, end)
+        if (type === 2) err.push(payload)
+        else out.push(payload)
+        i = end
+    }
+    return {
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+    }
+}
+
+/**
  * dockerode returns multiplexed stdout/stderr frames when Tty:false — each
  * carries an 8-byte header that leaks into the string. Strip non-printable
- * bytes (keep tab/lf + >= 0x20), best-effort.
+ * bytes (keep tab/lf + >= 0x20), best-effort. Human-facing error text ONLY —
+ * never parse markers out of this; that is what `demuxDockerLogs` is for.
  */
 function stripDockerFrames(buf: Buffer | string): string {
     const s = Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf)
