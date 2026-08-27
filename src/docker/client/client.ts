@@ -171,7 +171,11 @@ export function buildBackupScript(): string {
         //   where `?`/`#`/`%` are metacharacters — and the file name is the
         //   agent's. A name carrying any of them never reaches the URI; it
         //   falls through to kjdb.failed, exactly where it landed before the
-        //   fallback existed.
+        //   fallback existed. Same for a name with a NEWLINE in it (which no
+        //   URI can represent anyway): compared against itself through
+        //   `tr -d "\n"` — command substitution also eats trailing newlines,
+        //   so a name ending in one fails the comparison too, which is the
+        //   point.
         // - `immutable=1` tells SQLite to skip locks, so a writer sneaking in
         //   between the sidecar check and the copy would corrupt it SILENTLY.
         //   The copy only counts if `PRAGMA integrity_check` says ok…
@@ -187,6 +191,7 @@ export function buildBackupScript(): string {
         '    if { sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" ||',
         '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ] &&',
         '           case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac &&',
+        '           [ "$DB" = "$(printf %s "$DB" | tr -d "\\n")" ] &&',
         '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ" &&',
         '           [ "$(sqlite3 "/tmp/kjdb/copia-$SEQ" "PRAGMA integrity_check;")" = "ok" ] &&',
         '           [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]; }; } &&',
@@ -1240,7 +1245,7 @@ export class KJDocker {
          */
         marker?: string
         onMarker?: () => Promise<void>
-    }): Promise<{ code: number; logs: string }> {
+    }): Promise<{ code: number; logs: string; stdout: string }> {
         const helperImage = 'alpine:3.20'
         if (!(await this.imageExistsLocally(helperImage)))
             await this.pullImage(helperImage, () => {})
@@ -1270,16 +1275,17 @@ export class KJDocker {
             while (!markerSeen) {
                 await new Promise((r) => setTimeout(r, 2_000))
                 if (markerSeen) return
+                // STDOUT only, and at the start of a line. The helper is the
+                // only writer on its stdout; stderr carries whatever the
+                // tools spat out — sqlite3 prints raw file paths (agent-named,
+                // newlines included), so anything derived from stderr the
+                // agent can forge whole lines of. The thaw button is not the
+                // agent's to press.
                 const seen = await container
                     .logs({ stdout: true, stderr: true, follow: false })
-                    // Al PRINCIPIO de una línea, no en cualquier parte del log.
-                    // Por ahí pasan rutas de ficheros que pone el agente, y una
-                    // llamada `KJ_BACKUP_SIZE=…` le dejaría decidir cuándo se
-                    // descongela. El daño sería pequeño (descongelar antes de
-                    // tiempo), pero no es suyo ese botón.
                     .then((b) =>
-                        stripDockerFrames(b)
-                            .split('\n')
+                        demuxDockerLogs(b)
+                            .stdout.split('\n')
                             .some((line) => line.startsWith(opts.marker as string))
                     )
                     .catch(() => false)
@@ -1298,7 +1304,13 @@ export class KJDocker {
             const logsBuf = await container
                 .logs({ stdout: true, stderr: true, follow: false })
                 .catch(() => Buffer.from(''))
-            return { code: result.StatusCode, logs: stripDockerFrames(logsBuf) }
+            // `logs` (mixed, human-facing error text) vs `stdout` (frame-demuxed,
+            // the ONLY stream marker parsing may trust — see demuxDockerLogs).
+            return {
+                code: result.StatusCode,
+                logs: stripDockerFrames(logsBuf),
+                stdout: demuxDockerLogs(logsBuf).stdout,
+            }
         } finally {
             markerSeen = true
             await container.remove({ force: true }).catch(() => undefined)
@@ -1366,7 +1378,7 @@ export class KJDocker {
         const partUrls = multipart?.part_urls.join('\n') ?? ''
         const script = buildBackupScript()
 
-        const { code, logs } = await this.runVolumeHelper({
+        const { code, logs, stdout } = await this.runVolumeHelper({
             volume_name,
             script,
             // El tamaño se imprime justo después del tar: es la señal de que ya
@@ -1383,20 +1395,20 @@ export class KJDocker {
         })
         if (code !== 0) throw new Error(`backup helper exited ${code}: ${logs.slice(-400)}`)
 
-        // Every marker parse is line-anchored, always: with tar exit 1 now
-        // non-fatal, its stderr reaches these logs on SUCCESS — and each
-        // `tar: ./<name>: file changed as we read it` line carries a file
-        // name the agent chose. Unanchored, a file called `KJ_BACKUP_SIZE=1`
-        // would win over the helper's real echo (`.match` takes the first
-        // hit), and a `KJ_PART=1:x` would inject a fake ETag into the list
-        // the control seals the multipart with. Same reasoning as the
-        // `line.startsWith` in the marker watcher above.
-        const m = logs.match(/^KJ_BACKUP_SIZE=(\d+)$/m)
+        // Markers parse from STDOUT only, never the mixed logs. On the green
+        // path stderr still carries tool noise with agent-named file paths in
+        // it — and sqlite3 prints those paths RAW, newlines included, so an
+        // agent can forge entire lines there (a file named
+        // "evil\nKJ_PART=1:x\ny.db" defeats any anchor). The helper is the
+        // only writer on its stdout: everything it says that isn't a marker
+        // goes to >&2, and the multipart ETags come from R2's responses, not
+        // from anything the agent can touch. Anchors stay as hygiene.
+        const m = stdout.match(/^KJ_BACKUP_SIZE=(\d+)$/m)
         const size_bytes = m ? Number(m[1]) : 0
 
         // On success nobody reads the helper logs, so the "files were moving
         // under the tar" warning would die with the container.
-        if (/^KJ_TAR_WARN=1$/m.test(logs)) {
+        if (/^KJ_TAR_WARN=1$/m.test(stdout)) {
             this.logger.warn(
                 { volume_name },
                 'backup tarred while the agent kept writing; the sqlite copies inside the tar are the consistent ones'
@@ -1404,7 +1416,7 @@ export class KJDocker {
         }
 
         const parts: { part_number: number; etag: string }[] = []
-        for (const line of logs.matchAll(/^KJ_PART=(\d+):(\S+)$/gm)) {
+        for (const line of stdout.matchAll(/^KJ_PART=(\d+):(\S+)$/gm)) {
             const [, number, etag] = line
             if (number && etag) parts.push({ part_number: Number(number), etag })
         }
@@ -1436,9 +1448,51 @@ export class KJDocker {
 }
 
 /**
+ * Real demultiplexing of a docker logs/attach buffer (Tty:false): each frame
+ * is an 8-byte header `[type, 0, 0, 0, SIZE_BE32]` followed by SIZE payload
+ * bytes; type 1 = stdout, 2 = stderr.
+ *
+ * This exists because `stripDockerFrames` is NOT a demux — it byte-filters
+ * and concatenates, which (a) merges stderr into the same string as stdout,
+ * and (b) lets printable SIZE bytes of the headers leak into the text. Fine
+ * for human-facing error text; disqualifying for anything a machine parses:
+ * the helper is the only writer on its stdout, while stderr carries raw
+ * agent-named file paths (sqlite3 does not escape newlines in them, so an
+ * agent can forge entire lines there — PR #25, 3rd security pass).
+ *
+ * Strict on purpose: a malformed header stops the parse and drops the rest,
+ * so a truncated buffer fails closed (missing markers read as "no size")
+ * instead of guessing at bytes.
+ */
+function demuxDockerLogs(buf: Buffer | string): { stdout: string; stderr: string } {
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf))
+    const out: Buffer[] = []
+    const err: Buffer[] = []
+    let i = 0
+    while (i + 8 <= b.length) {
+        const type = b[i] as number
+        const zeros = b[i + 1] === 0 && b[i + 2] === 0 && b[i + 3] === 0
+        if (!zeros || type > 2) break
+        const size = b.readUInt32BE(i + 4)
+        const start = i + 8
+        const end = start + size
+        if (end > b.length) break
+        const payload = b.subarray(start, end)
+        if (type === 2) err.push(payload)
+        else out.push(payload)
+        i = end
+    }
+    return {
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+    }
+}
+
+/**
  * dockerode returns multiplexed stdout/stderr frames when Tty:false — each
  * carries an 8-byte header that leaks into the string. Strip non-printable
- * bytes (keep tab/lf + >= 0x20), best-effort.
+ * bytes (keep tab/lf + >= 0x20), best-effort. Human-facing error text ONLY —
+ * never parse markers out of this; that is what `demuxDockerLogs` is for.
  */
 function stripDockerFrames(buf: Buffer | string): string {
     const s = Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf)

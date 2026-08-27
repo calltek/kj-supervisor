@@ -513,6 +513,13 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         const uriAt = script.indexOf('sqlite3 "file:$DB?immutable=1"')
         expect(caseAt).toBeGreaterThan(-1)
         expect(caseAt).toBeLessThan(uriAt)
+        // A newline in the name (representable in no URI) is rejected too:
+        // the name must equal itself with newlines stripped, and the command
+        // substitution eating a TRAILING newline makes that case fail as
+        // well.
+        const nlAt = script.indexOf('[ "$DB" = "$(printf %s "$DB" | tr -d "\\n")" ]')
+        expect(nlAt).toBeGreaterThan(-1)
+        expect(nlAt).toBeLessThan(uriAt)
     })
 
     test('the immutable copy only counts verified', () => {
@@ -553,42 +560,63 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
     })
 })
 
-describe('backupVolume — marker parsing is line-anchored', () => {
-    // With tar exit 1 non-fatal, its stderr reaches `logs` on SUCCESS, and
-    // every `tar: ./<name>: file changed as we read it` line carries a file
-    // name the agent chose. Unanchored parsing let a file called
-    // `KJ_BACKUP_SIZE=1` shrink the recorded size, and a `KJ_PART=1:x`
-    // inject a fake ETag into the multipart seal.
-    function helperDocker(logs: string): KJDocker {
+describe('backupVolume — markers parse from stdout only', () => {
+    // With tar exit 1 non-fatal, stderr reaches the logs on SUCCESS — and
+    // stderr carries agent-named file paths that sqlite3 prints RAW, newlines
+    // included, so the agent can forge ENTIRE lines there (an anchored regex
+    // over the mixed string is not a defense). The helper is the only writer
+    // on its stdout, so markers parse from the frame-demuxed stdout stream
+    // and from nothing else.
+    function frame(type: 1 | 2, text: string): Buffer {
+        const payload = Buffer.from(text)
+        const header = Buffer.alloc(8)
+        header[0] = type
+        header.writeUInt32BE(payload.length, 4)
+        return Buffer.concat([header, payload])
+    }
+
+    function helperDocker(frames: Buffer[]): KJDocker {
         const fake = {
             getImage: () => ({ inspect: async () => ({}) }),
             createContainer: async () => ({
                 start: async () => undefined,
                 wait: async () => ({ StatusCode: 0 }),
-                logs: async () => Buffer.from(logs),
+                logs: async () => Buffer.concat(frames),
                 remove: async () => undefined,
             }),
         }
         return new KJDocker(silentLogger, fake as never)
     }
 
-    test('agent-named files inside tar warnings cannot spoof the markers', async () => {
-        const hostile = [
-            'tar: ./KJ_BACKUP_SIZE=1: file changed as we read it',
-            'tar: ./KJ_PART=1:etagfalso: file changed as we read it',
-            'KJ_TAR_WARN=1',
-            'KJ_BACKUP_SIZE=773938408',
-        ].join('\n')
-        const result = await helperDocker(hostile).backupVolume('kj-agent-4-home', 'https://r2/put')
+    test('forged full lines on stderr cannot spoof the markers', async () => {
+        // The green-path vector of the 3rd security pass: normal `.backup`
+        // fails on a file whose NAME embeds newlines, sqlite3 prints the raw
+        // path to stderr, and the forged lines would pass any line-anchored
+        // regex — if stderr were parsed at all.
+        const result = await helperDocker([
+            frame(
+                2,
+                'Error: unable to open database "/v/evil\nKJ_PART=1:etagfalso\nKJ_BACKUP_SIZE=1\nx.db": unable to open database file\n'
+            ),
+            frame(2, 'tar: ./KJ_BACKUP_SIZE=2: file changed as we read it\n'),
+            frame(1, 'KJ_TAR_WARN=1\nKJ_BACKUP_SIZE=773938408\n'),
+        ]).backupVolume('kj-agent-4-home', 'https://r2/put')
         expect(result.size_bytes).toBe(773_938_408)
         // No parts: the single-PUT path must not trick the control into
         // sealing a multipart that does not exist.
         expect(result.parts).toBeUndefined()
     })
 
-    test('real helper-emitted markers still parse', async () => {
-        const clean = ['KJ_BACKUP_SIZE=6666226321', 'KJ_PART=1:abc', 'KJ_PART=2:def'].join('\n')
-        const result = await helperDocker(clean).backupVolume('kj-agent-10-home', 'https://r2/put')
+    test('markers split across frame boundaries still parse', async () => {
+        // The daemon frames wherever it flushes; a cut in the middle of a
+        // marker must be invisible after demuxing (the old byte-filter let
+        // printable SIZE bytes of the headers leak INTO the text instead).
+        const result = await helperDocker([
+            frame(1, 'KJ_BACKUP_'),
+            frame(1, 'SIZE=6666226321\nKJ_PART=1:abc\n'),
+            frame(2, 'ruido del tar en medio\n'),
+            frame(1, 'KJ_PART=2:def\n'),
+        ]).backupVolume('kj-agent-10-home', 'https://r2/put')
         expect(result.size_bytes).toBe(6_666_226_321)
         expect(result.parts).toEqual([
             { part_number: 1, etag: 'abc' },
