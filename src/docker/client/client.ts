@@ -100,7 +100,10 @@ export function buildBackupScript(): string {
         // GNU tar además de BusyBox: hace falta para meter en UN solo archivo
         // dos orígenes distintos (`-C` dos veces). El de BusyBox aplica el
         // último `-C` a todos y se pierde el volumen — comprobado.
-        'apk add --no-cache curl sqlite tar >/dev/null 2>&1',
+        // stdout only: if apk fails (a CDN hiccup), `set -e` kills the whole
+        // helper, and with stderr swallowed the backup died with "exited 1:"
+        // and not a word of why. Whatever apk has to say must reach the logs.
+        'apk add --no-cache curl sqlite tar >/dev/null',
         '',
         '# Copias consistentes de las bases SQLite, en /tmp del ayudante.',
         '#',
@@ -152,7 +155,19 @@ export function buildBackupScript(): string {
         '    # bien pero moverla a su sitio no, la original rota gana en el tar y',
         '    # queda un copia-N suelto en la raíz del archivo. Un fallo parcial',
         '    # que nadie ve es lo que este cambio viene a quitar.',
-        '    if sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" &&',
+        '    #',
+        // The fallback: a WAL database on the read-only mount. SQLite cannot
+        // open one the normal way there (it needs to create the -shm to read),
+        // so `.backup` dies with "unable to open database file" — Soki, night
+        // of 2026-08-27, over an idle `.aws/cli/cache/session.db`. When its
+        // -wal/-shm are NOT on disk the file is fully checkpointed and nobody
+        // is mid-write, so `immutable=1` (the SQLite door for
+        // read-only media) yields a copy that passes integrity_check. With
+        // sidecars present a consistent copy is impossible from here and the
+        // honest outcome is still kjdb.failed → exit 7.
+        '    if { sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" ||',
+        '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] &&',
+        '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ"; }; } &&',
         '       mkdir -p "/tmp/kjdb/$(dirname "$REL")" &&',
         '       mv "/tmp/kjdb/copia-$SEQ" "/tmp/kjdb/$REL"; then',
         '      :',
@@ -167,10 +182,18 @@ export function buildBackupScript(): string {
         '    # y sólo si existían: crear un -wal donde no lo había empujaría a',
         '    # modo WAL a una base que no lo usa.',
         '    for SUF in -wal -shm; do',
-        '      [ -f "$DB$SUF" ] && : > "/tmp/kjdb/$REL$SUF"',
+        // `if`, NOT `[ -f ] && …`: when the last database processed has no
+        // sidecar, that AND-list leaves status 1 as the exit code of the loop
+        // — and thus of the inner shell. BusyBox find propagates it, `set -e`
+        // aborts, and the backup dies as a mute "exited 1:" (NOVA, night of
+        // 2026-08-27). An `if` that takes no branch exits 0.
+        '      if [ -f "$DB$SUF" ]; then : > "/tmp/kjdb/$REL$SUF"; fi',
         '    done',
         '  done',
-        "' _ {} +",
+        // If find itself fails (unreadable dir, a crash in the inner shell),
+        // say so: bare `set -e` here used to kill the helper with no output
+        // at all, which is the worst kind of red.
+        "' _ {} + || { echo \"el recorrido de bases sqlite falló\" >&2; exit 9; }",
         '',
         '# Y si alguna falló, la copia FALLA. Un backup que se sube en verde',
         '# sabiendo que una base puede estar rota es peor que no tenerlo: el',
@@ -183,7 +206,19 @@ export function buildBackupScript(): string {
         '# Las copias van DESPUÉS del volumen a propósito: al extraer, la última',
         '# entrada de una ruta repetida gana, así que una restauración se queda',
         '# con la versión consistente sin que nadie tenga que elegir.',
-        'tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .',
+        '#',
+        // GNU tar exit 1 means "a file changed/vanished while I read it" —
+        // the normal weather of taring a volume a RUNNING agent keeps writing
+        // to, and inherent to hot backups (the databases that must be
+        // consistent already travel as the /tmp/kjdb copies). Under `set -e`
+        // that warning was a lost backup every time the dice rolled badly.
+        // Exit 2+ (truncated archive, I/O error) is a real failure and stays
+        // fatal.
+        'tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb . || {',
+        '  RC=$?',
+        '  if [ "$RC" -ge 2 ]; then exit "$RC"; fi',
+        '  echo "aviso: ficheros cambiando durante el tar (agente en marcha)" >&2',
+        '}',
         '',
         '# Las copias en caliente ya viajan dentro del tar.',
         'find /v -name "*.kjbackup" -delete 2>/dev/null || true',

@@ -442,7 +442,17 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // lo que hace que una restauración se quede con la versión consistente
         // sin que nadie tenga que elegir cuál era la buena.
         const tar = script.split('\n').find((l) => l.startsWith('tar -czf'))
-        expect(tar).toBe('tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .')
+        expect(tar).toContain('tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb .')
+    })
+
+    test('a file changing under tar does NOT lose the backup', () => {
+        // GNU tar exits 1 when a file changed/vanished while it read it — the
+        // normal weather of a RUNNING agent writing to its volume. Under a
+        // bare `set -e` that warning killed the whole backup (seen live on
+        // Soki's volume, 2026-08-27). Exit 2+ (truncated archive) stays fatal.
+        const tar = script.split('\n').find((l) => l.startsWith('tar -czf'))
+        expect(tar).toContain('|| {')
+        expect(script).toContain('if [ "$RC" -ge 2 ]; then exit "$RC"; fi')
     })
 
     test('las copias nacen privadas', () => {
@@ -461,5 +471,34 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // Un nombre con un salto de línea rompe cualquier bucle que parsee.
         expect(script).toContain('-exec sh -c')
         expect(script).not.toMatch(/find[^\n]*\|[^\n]*while read/)
+    })
+
+    test('nothing can die MUTE under set -e (night of 2026-08-27)', () => {
+        // NOVA died as "exited 1:" with not one line of output. Two silencers
+        // conspired: apk swallowed stderr, and the sidecar AND-list leaked a
+        // status 1 out of the inner shell that find propagated into `set -e`.
+        // apk may hide its progress (stdout) but never its errors (stderr).
+        const apk = script.split('\n').find((l) => l.startsWith('apk add'))
+        expect(apk).toBeDefined()
+        expect(apk).not.toContain('2>&1')
+        // The sidecar seeding is an `if` (exits 0 when the file is absent),
+        // not a bare `[ -f … ] && …` whose status-1 becomes the loop's.
+        expect(script).toContain('if [ -f "$DB$SUF" ]; then : > "/tmp/kjdb/$REL$SUF"; fi')
+        expect(script).not.toContain('[ -f "$DB$SUF" ] && :')
+        // And if find still fails, it says so instead of dying bare.
+        expect(script).toMatch(/' _ \{\} \+ \|\| \{ echo .+>&2; exit 9; \}/)
+    })
+
+    test('a WAL database on the read-only mount falls back to immutable', () => {
+        // `.backup` cannot open a WAL database on a read-only filesystem
+        // (Soki's `.aws/cli/cache/session.db`, night of 2026-08-27). The
+        // fallback opens it with `immutable=1` — but ONLY when no -wal/-shm
+        // sidecars exist, i.e. the file is checkpointed and nobody is
+        // mid-write. With sidecars present the copy stays failed and loud.
+        expect(script).toContain('sqlite3 "file:$DB?immutable=1"')
+        const fallbackAt = script.indexOf('immutable=1')
+        const guardAt = script.indexOf('[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ]')
+        expect(guardAt).toBeGreaterThan(-1)
+        expect(guardAt).toBeLessThan(fallbackAt)
     })
 })
