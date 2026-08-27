@@ -540,7 +540,9 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // read-only mount. integrity_check cannot catch it (a half-rolled
         // transaction breaks atomicity, not page structure), so `-journal`
         // must sit in both existence guards…
-        const first = script.indexOf('[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]')
+        const first = script.indexOf(
+            '[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]'
+        )
         const second = script.indexOf(
             '[ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]',
             first + 1

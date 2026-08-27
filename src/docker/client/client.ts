@@ -225,7 +225,7 @@ export function buildBackupScript(): string {
         // If find itself fails (unreadable dir, a crash in the inner shell),
         // say so: bare `set -e` here used to kill the helper with no output
         // at all, which is the worst kind of red.
-        "' _ {} + || { echo \"el recorrido de bases sqlite falló\" >&2; exit 9; }",
+        '\' _ {} + || { echo "el recorrido de bases sqlite falló" >&2; exit 9; }',
         '',
         '# Y si alguna falló, la copia FALLA. Un backup que se sube en verde',
         '# sabiendo que una base puede estar rota es peor que no tenerlo: el',
