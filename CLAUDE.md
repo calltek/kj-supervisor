@@ -6,7 +6,12 @@
 > un **`git worktree` por tarea** (compartir el working dir = un solo HEAD → os
 > pisáis al cambiar de rama). Y **no se desarrolla Kujira dentro de Kujira-prod**:
 > el core/deploy se hace con agentes de fuera (Claude Code + worktrees + CI);
-> dogfooding solo en tareas auxiliares aisladas. Detalle completo en
+> dogfooding solo en tareas auxiliares aisladas. La línea que cierra el issue
+> va **en inglés y en su propia línea** — `Closes #233` —, aunque el resto del PR
+> sea español: GitHub sólo reconoce close/fix/resolve, así que «Cierra #233» es
+> prosa y no cierra nada (le pasó a 38 de los 38 PRs de kj-backend que decían
+> cerrar un issue). El workflow `link-issues` la traduce si se te olvida, pero
+> sólo si abre la línea. Detalle completo en
 > `kj-backend/CLAUDE.md` §6.
 
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
