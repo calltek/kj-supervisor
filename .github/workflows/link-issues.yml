@@ -1,0 +1,114 @@
+# Dónde corre esto lo decide la variable `CI_RUNNER` de la organización:
+#
+#   sin definir            → los runners de GitHub, como siempre
+#   CI_RUNNER=<etiqueta>   → nuestra propia máquina con esa etiqueta
+#
+# Está así y no clavado a `self-hosted` porque una máquina propia es un punto
+# único: el día que se apague o se quede sin red, borrar la variable devuelve
+# todo a GitHub sin tocar código ni abrir un PR. Y ponerla afecta a los cuatro
+# repositorios a la vez, que es como se quiere.
+# Traduce la línea de cierre del PR para que GitHub la entienda.
+#
+# Las palabras que cierran un issue al mergear son SOLO las inglesas —close,
+# closes, closed, fix, fixes, fixed, resolve, resolves, resolved— y solo en el
+# cuerpo del PR, nunca en el título. Aquí los PRs se escriben en español, así
+# que «Cierra #233» es prosa: GitHub no la lee, el issue no queda enlazado, y
+# al mergear no se cierra nada.
+#
+# No es una hipótesis. Sobre los PRs ya mergeados de los dos repos con tráfico
+# real, el verbo español gana por goleada al inglés: 15 a 7 en kj-app, y 38 a
+# 0 en kj-backend. La forma que NO funciona es la mayoritaria. Casi todos esos
+# issues se acabaron cerrando a mano, y el que se olvidó —kj-app#233— se quedó
+# abierto meses con la funcionalidad ya en producción.
+#
+# Este job no cierra el issue: AÑADE al cuerpo la línea `Closes #N` que GitHub
+# sí lee, y deja que se encargue él. Así se recupera todo lo nativo —el aviso
+# de «will close #233» antes de mergear, el issue enlazado en la barra lateral,
+# y el cierre al mergear—, que un job que cerrase por su cuenta después del
+# merge no daría.
+name: link-issues
+
+on:
+    pull_request_target:
+        types: [opened, edited, reopened]
+
+# El job no hace checkout: solo llama a la API, así que `pull_request_target`
+# no llega a ejecutar nada del código de la rama del PR. El cuerpo —que lo
+# escribe quien abre el PR— tampoco se interpola con `${{ }}` en ningún sitio:
+# se lee con `gh` dentro del script, ya como dato.
+permissions:
+    pull-requests: write
+
+# Editar el cuerpo dispara otro `edited`, que vuelve a entrar aquí. No hay
+# bucle porque la segunda vuelta ya encuentra puesto el `Closes #N` y no toca
+# nada; el `concurrency` es para que dos ediciones seguidas no se pisen.
+concurrency:
+    group: link-issues-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
+
+jobs:
+    link:
+        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+        timeout-minutes: 5
+        steps:
+            - name: añadir la línea de cierre que GitHub sí lee
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REPO: ${{ github.repository }}
+                  PR: ${{ github.event.pull_request.number }}
+              run: |
+                  set -euo pipefail
+
+                  # El cuerpo se relee de la API en vez de sacarlo del evento:
+                  # si han llegado dos ediciones seguidas, el payload de la
+                  # primera ya está viejo y escribirlo de vuelta borraría la
+                  # segunda.
+                  body=$(gh pr view "$PR" -R "$REPO" --json body -q '.body // ""')
+
+                  # `owner/repo#12` incluido: los cuatro repos se referencian
+                  # entre ellos.
+                  ref='([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+'
+                  es='cierra|cierran|cierro|cerrar|cerrado|cerrada|resuelve|resuelven|soluciona|arregla|corrige'
+                  en='close[sd]?|fix|fixe[sd]|resolve[sd]?'
+
+                  # La cola recoge las listas: «Cierra #170 y #172» son dos
+                  # issues, y quedarse con el primero deja el otro abierto, que
+                  # es justo el fallo que esto viene a arreglar. Corta sola en
+                  # «Cierra #5, el resto en #9»: tras la coma exige una
+                  # referencia, y ahí hay prosa.
+                  lista="((,|[[:space:]]+y)[[:space:]]*$ref)*"
+
+                  # La referencia tiene que ABRIR la línea (o su viñeta). Suelta
+                  # dentro de una frase casi nunca es una promesa de cierre:
+                  # «Acompaña a kj-backend#491 (cierra kj-backend#474)» habla
+                  # del PR del backend, no de este, y «esto no cierra #40» dice
+                  # lo contrario. Con el ancla, sobre los 700 PRs mergeados de
+                  # kj-app y kj-backend salen los 53 de verdad y ningún falso
+                  # positivo; sin él, dos falsos.
+                  quiere=$(printf '%s\n' "$body" \
+                      | grep -oiE "^[[:space:]]*([-*][[:space:]]+)?($es)[[:space:]]+(el[[:space:]]+|la[[:space:]]+)?$ref$lista" \
+                      | grep -oE "$ref" | sort -u) || true
+
+                  # Lo que ya lleva verbo inglés lo cierra GitHub solo. Esto no
+                  # va anclado a propósito: GitHub tampoco lo ancla, así que un
+                  # `Closes #N` a media frase ya cuenta y repetirlo sobra.
+                  tiene=$(printf '%s\n' "$body" \
+                      | grep -oiE "\b($en)[[:space:]]+$ref" \
+                      | grep -oE "$ref" | sort -u) || true
+
+                  faltan=$(comm -23 \
+                      <(printf '%s\n' "$quiere" | sed '/^$/d') \
+                      <(printf '%s\n' "$tiene" | sed '/^$/d'))
+
+                  if [ -z "$faltan" ]; then
+                      echo 'Nada que enlazar.'
+                      exit 0
+                  fi
+
+                  echo "Enlazando: $(echo "$faltan" | tr '\n' ' ')"
+                  {
+                      [ -n "$body" ] && printf '%s\n\n' "$body"
+                      printf '%s\n' '<!-- link-issues: GitHub solo cierra con el verbo en inglés -->'
+                      printf '%s\n' "$faltan" | sed 's/^/Closes /'
+                  } | gh pr edit "$PR" -R "$REPO" --body-file -
