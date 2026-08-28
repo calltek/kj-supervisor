@@ -1,12 +1,17 @@
-# Dónde corre esto lo decide la variable `CI_RUNNER` de la organización:
+# Este repo es PÚBLICO y admite forks, así que aquí NO se usa `CI_RUNNER`, igual
+# que en `build.yml`. `CI_RUNNER` es una variable de ORGANIZACIÓN: el día que se
+# defina —afecta a los cuatro repos a la vez— este job pasaría a correr en
+# nuestra máquina disparado por el PR de cualquiera de internet, sin que nadie
+# toque un YAML ni abra un PR. Y `pull_request_target` lo dispara el de fuera.
 #
-#   sin definir            → los runners de GitHub, como siempre
-#   CI_RUNNER=<etiqueta>   → nuestra propia máquina con esa etiqueta
+# Sin `checkout` no hay ejecución de código ajeno, pero el `GITHUB_TOKEN` con
+# permiso de escritura acabaría en un runner propio, no efímero y compartido
+# por toda la org, y encolar trabajo en esa máquina quedaría al alcance de
+# cualquiera. Sobre todo: el siguiente workflow que se copie de éste heredaría
+# el `runs-on`, y ese sí puede llevar un `checkout`.
 #
-# Está así y no clavado a `self-hosted` porque una máquina propia es un punto
-# único: el día que se apague o se quede sin red, borrar la variable devuelve
-# todo a GitHub sin tocar código ni abrir un PR. Y ponerla afecta a los cuatro
-# repositorios a la vez, que es como se quiere.
+# En los tres repos privados —kj-app, kj-backend, kj-agent-base— el fichero sí
+# lleva `vars.CI_RUNNER`. Es la única línea en la que divergen.
 # Traduce la línea de cierre del PR para que GitHub la entienda.
 #
 # Las palabras que cierran un issue al mergear son SOLO las inglesas —close,
@@ -48,7 +53,7 @@ concurrency:
 
 jobs:
     link:
-        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+        runs-on: ubuntu-latest
         timeout-minutes: 5
         steps:
             - name: añadir la línea de cierre que GitHub sí lee
