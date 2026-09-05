@@ -21,7 +21,12 @@
 > cerrar un issue). El workflow `link-issues` la traduce si se te olvida, pero
 > sólo si abre la línea.
 >
-> **Y el PR se vigila hasta mergearlo — cada ~3 minutos.** El check aquí es
+> **Y TU PR se vigila hasta mergearlo — cada ~3 minutos.** Tuyo quiere decir
+> **abierto por ti en esta sesión**: los demás no se tocan, ni para mergearlos
+> aunque estén verdes y aprobados, ni para arreglarles un check rojo. Que un PR
+> ajeno esté listo no lo hace tuyo — quien lo abrió sabe si está esperando algo,
+> y mergear por encima le quita esa decisión. Sin PRs propios abiertos no hay
+> nada que vigilar: no se monta una ronda para mirar los de otros. El check aquí es
 > `build` (build + `bun test`). Revisan **@n0v4-SYS** (Nova) todo y **@SOKY-SYS**
 > (SOKI) además `/.github/`, `Dockerfile*`, `docker*.yml`, `.env.example`,
 > `package.json`, `/src/client/auth/`, `/src/oauth/`,
