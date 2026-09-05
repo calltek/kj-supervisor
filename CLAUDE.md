@@ -1,33 +1,65 @@
 # Kujira — Supervisor (`kj-supervisor`)
 
-> **⚙️ Flujo de desarrollo (2026-06-30) — léelo antes de tocar nada.**
+> **⚙️ Flujo de desarrollo (2026-06-30, endurecido 2026-08-24 y 2026-09-05) —
+> léelo antes de tocar nada.**
 > Ramas + **Pull Request**, nunca commit directo a `main` (varios agentes/personas
 > en paralelo; `main` auto-despliega vía Dokploy al mergear). Trabajo en paralelo →
-> un **`git worktree` por tarea** (compartir el working dir = un solo HEAD → os
-> pisáis al cambiar de rama). Y **no se desarrolla Kujira dentro de Kujira-prod**:
+> un **`git worktree` por tarea, SIEMPRE** (compartir el working dir = un solo HEAD
+> → os pisáis al cambiar de rama). **El directorio principal no es un puesto de
+> trabajo**: se deja limpio sobre una base al día que nadie esté tocando — en
+> `main`, o desprendido sobre `origin/main` si un worktree ya tiene `main`. Crea
+> la rama desde `origin/main` explícitamente —
+> `git worktree add -b <rama> ../wt/kj-supervisor-<tarea> origin/main` — y antes de
+> abrir el PR comprueba con `git log --oneline origin/main..HEAD` que sólo llevas
+> tus commits: ramificar desde donde otro ha parcado su tarea te mete su trabajo
+> dentro del PR y no avisa. Y **no se desarrolla Kujira dentro de Kujira-prod**:
 > el core/deploy se hace con agentes de fuera (Claude Code + worktrees + CI);
 > dogfooding solo en tareas auxiliares aisladas. La línea que cierra el issue
 > va **en inglés y en su propia línea** — `Closes #233` —, aunque el resto del PR
 > sea español: GitHub sólo reconoce close/fix/resolve, así que «Cierra #233» es
 > prosa y no cierra nada (le pasó a 38 de los 38 PRs de kj-backend que decían
 > cerrar un issue). El workflow `link-issues` la traduce si se te olvida, pero
-> sólo si abre la línea. Detalle completo en
-> `kj-backend/CLAUDE.md` §6.
+> sólo si abre la línea.
+>
+> **Y el PR se vigila hasta mergearlo — cada ~3 minutos.** El check aquí es
+> `build` (build + `bun test`). Revisan **@n0v4-SYS** (Nova) todo y **@SOKY-SYS**
+> (SOKI) además `/.github/`, `Dockerfile*`, `docker*.yml`, `.env.example`,
+> `package.json`, `/src/client/auth/`, `/src/oauth/`,
+> `/src/handlers/oauth-exchange/` y `/src/docker/`. Verde y aprobado →
+> `gh pr merge <n> --squash --delete-branch`; rojo → `gh run view <id>
+> --log-failed` antes de tocar nada; comentarios → aplicarlos o contestar. Los
+> comentarios de revisión son **en línea** y no salen en `gh pr view`:
+> `gh api repos/calltek/kj-supervisor/pulls/<n>/comments`. Un PR desatendido no
+> falla, se queda quieto — y aquí eso significa que la flota sigue con el
+> supervisor viejo. Norma completa en `kj-backend/CLAUDE.md` §6 (decisión
+> 2026-09-05).
 
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
 una conexión WebSocket persistente con el control (`kj-backend`) y
 orquesta el ciclo de vida de los agentes Claude locales: levanta,
 detiene, pausa, reanuda y reporta el estado real.
 
-> **Estado actual (2026-05-18)**: Hitos 1–5 vivos + **pipeline de
-> stream del agente** (Hito 6 implementado por adelantado, ver §9). El
-> supervisor mantiene la conexión, autentica con provisioning/agent
-> token, negocia versión de protocolo, ejecuta `agent:spawn`/`stop`/
-> `pause`/`resume` y, lo nuevo: hace `dockerode.attach` a cada
-> container del agente, parsea su salida stream-json y reenvía cada
-> evento al control como `agent:output`. También acepta `agent:input`
-> del control y lo escribe al stdin del container. Adiós `tmux
-> attach` para hablar con un agente.
+> **Estado actual (2026-09-05)**: en producción en los VPS de clientes. Sobre lo
+> que este apartado describía en mayo (hitos 1–6: conexión, auth, protocolo,
+> ciclo de vida de containers, métricas, reconciliación y el pipeline
+> bidireccional de stdio con `dockerode.attach`), se ha añadido:
+>
+> - **Copias del volumen del agente** (`handlers/agent-backup/`): snapshot a R2
+>   y restauración sobre el volumen vivo. Es el trabajo más reciente del repo y
+>   el más delicado — la noche del 2026-08-27 se perdieron copias por **tres
+>   caminos a la vez**, arreglados en el mismo PR. Léelo antes de tocar aquí.
+> - **`agent:exec`** (`handlers/agent-exec/`): ejecuta un comando dentro del
+>   container, que es lo que permite que un cron corra un script en vez de
+>   inyectar un turno de conversación.
+> - **Canje de OAuth** (`src/oauth/` + `handlers/oauth-exchange/`): el flujo PKCE
+>   de Claude se completa en la máquina del cliente, para que el token no viaje
+>   de más.
+> - **Dedup de comandos por `request_id`** y el contrato `EVENT_DELIVERY`: la
+>   mitad de supervisor de la entrega garantizada. La otra mitad, el
+>   `CommandOutbox`, ya existe en el control.
+>
+> El **provisioning por WebSocket está muerto**: el alta va por bundle HTTP y el
+> `agent_token` lo escribe `install.sh` en `<config_dir>/token` (§2.1).
 
 ---
 
@@ -91,9 +123,15 @@ curl -fsSL https://api.kujira.so/install.sh | \
     sudo PROVISIONING_TOKEN=kjprov_... bash
 ```
 
-El script instala Docker si falta, crea `/etc/kj-supervisor/`, lanza el
-container del supervisor y desaparece. El supervisor toma el control
-desde ahí.
+`install.sh` instala Docker si falta, **canjea el `provisioning_token` por el
+bundle** contra `POST /provisioning/bundle`, escribe el `agent_token` resultante
+en `<config_dir>/token` con modo `0600`, lanza el container del supervisor y
+desaparece.
+
+> **El canje es HTTP, no WebSocket.** El supervisor arranca ya con su
+> `agent_token` en disco y nunca ve un `kjprov_`. La rama `provisioning` del
+> handshake WS existió y **se retiró** (2026-05-24): si un texto de este fichero
+> o una variable `KJ_PROVISIONING_TOKEN` sugiere otra cosa, es residuo.
 
 ### 2.2 El container del supervisor
 
@@ -134,9 +172,9 @@ Volúmenes por agente (creados al spawn):
 | Runtime | **Bun 1.x** | TS nativo, sin transpile en dev. Mismo runtime que el control. |
 | Lenguaje | TypeScript 5.9+ | strict mode. |
 | Socket.IO | `socket.io-client` v4 | Cliente, no servidor. El control es el servidor. |
-| Docker | `dockerode` o spawn de `docker` CLI | Decidir al implementar Hito 2. dockerode es más expresivo, CLI más simple. |
+| Docker | **`dockerode`** | Decidido al implementar el Hito 2 y sin vuelta atrás: todo `src/docker/` va por la librería, incluido el attach al stdio y el watcher de eventos. |
 | Lint + format | **Biome 2** | Mismo que el control. |
-| Tests | `bun test` para unit, vitest para integración Docker (futuro) | |
+| Tests | **`bun test`** | 22 ficheros hoy. La integración real contra Docker sigue sin automatizarse. |
 | Logging | Pino estructurado | Vuelca a stdout (Docker recoge). |
 | Build | Bun + Dockerfile multi-stage | Imagen final Alpine. |
 
@@ -213,8 +251,8 @@ en un endpoint público:
 GET https://api.kujira.so/protocol   →  text/typescript
 ```
 
-Mismo patrón que vcs-astro usa para `swagger.json`. Tener un script
-`scripts/pull-protocol.ts` que se ejecute en `prebuild`:
+Mismo patrón que vcs-astro usa para `swagger.json`. El script vive en
+`scripts/pull-protocol.ts` y corre en `prebuild`:
 
 ```typescript
 // scripts/pull-protocol.ts
@@ -278,11 +316,14 @@ kj-supervisor/
     ├── config/
     │   └── settings.ts                    ← env + validación
     ├── client/
-    │   ├── auth/auth.ts                   ← bootstrap (provisioning ↔ agent_token)
-    │   └── control/control.client.ts      ← wrapper Socket.IO al control
+    │   ├── auth/auth.ts                   ← lee el agent_token del disco
+    │   ├── control/control.client.ts      ← wrapper Socket.IO al control
+    │   └── control/command-dedup.ts       ← dedup por request_id (LRU 2k + TTL 5 min)
+    ├── oauth/                              ← ★ canje PKCE de Claude, del lado del cliente
     ├── docker/
     │   ├── client/client.ts               ← KJDocker: pull, run (con attach stdio), stop, pause, attach
     │   ├── events-watcher/events-watcher.ts ← stream de docker events; detacha streams en die/stop/kill/destroy
+    │   ├── image-tag.ts                   ← isMutableTag: qué tags se re-pullean en cada spawn
     │   └── operation-tracker/             ← marca operaciones supervisor-driven para que el watcher las ignore
     ├── agent-stream/                      ← ★ pipeline del stdio de cada agente
     │   ├── stream-manager.ts              ← Map<agent_id, attach-duplex>; attach/write/detach
@@ -291,7 +332,12 @@ kj-supervisor/
     ├── handlers/
     │   ├── agent-spawn/                   ← pull + run + attach al stream
     │   ├── agent-lifecycle/               ← stop / pause / resume
-    │   ├── agent-input/                   ← ★ escribe input del operador al stdin
+    │   ├── agent-input/                   ← escribe input del operador al stdin
+    │   ├── agent-sync/                    ← re-attach masivo tras reconectar
+    │   ├── agent-image-update/            ← re-pull + recreate preservando el volumen
+    │   ├── agent-backup/                  ← ★ snapshot del volumen a R2 y restauración
+    │   ├── agent-exec/                    ← ★ ejecutar un comando dentro del container
+    │   ├── oauth-exchange/                ← ★ canje PKCE en la máquina del cliente
     │   └── supervisor-upgrade/            ← blue/green swap del propio supervisor
     └── reporters/
         ├── health/                        ← health:ping loop
@@ -301,23 +347,38 @@ kj-supervisor/
         └── status-heartbeat/              ← heartbeat de SPAWNING durante el pull
 ```
 
-Lo nuevo respecto al plan original es `src/agent-stream/` y
-`src/handlers/agent-input/` — el pipeline bidireccional con el stdio
-del container. El resto sigue la misma forma.
+Las piezas marcadas ★ son lo posterior al plan original: el canje de OAuth, las
+copias del volumen y la ejecución de comandos. El pipeline bidireccional de
+stdio (`src/agent-stream/` + `handlers/agent-input/`) tampoco estaba en el plan
+y hoy es el eje del repo. El resto sigue la misma forma.
 
 ---
 
 ## 7. Variables de entorno
 
+> **¿Necesitas una credencial?** Está en `<workspace>/.env.shared` —
+> `C:\Users\5013r\Documents\Git\Kujira\.env.shared`, al lado de los repos y
+> fuera de todos ellos a propósito. Ahí van los IDs y tokens de servicio
+> (`kjtk_*`) de las organizaciones reales; el usuario los mantiene. No los
+> pidas por el chat, no los inventes y **no los copies dentro de un repo** — ni
+> a un `.env.local` gitignoreado: gitleaks escanea el historial en cada PR.
+> Detalle y reglas en `kj-backend/CLAUDE.md` §5.
+
+Son **cuatro**. La lista viva es `src/config/settings.ts`.
+
 | Variable | Requerida | Descripción |
 |---|---|---|
-| `KJ_CONTROL_URL` | sí | URL del control (`https://api.kujira.so`). |
-| `KJ_PROVISIONING_TOKEN` | en bootstrap | Token de un solo uso del operador. Tras el primer handshake se borra del disco. |
-| `KJ_AGENT_TOKEN` | tras bootstrap | Token persistente. Se guarda en `/etc/kj-supervisor/token` mode `0600`. |
-| `KJ_CONFIG_DIR` | no | Default `/etc/kj-supervisor`. Override para dev. |
-| `KJ_LOG_LEVEL` | no | Default `info`. `debug`, `warn`, `error` válidos. |
-| `KJ_PING_INTERVAL_MS` | no | Default `30000`. |
-| `KJ_METRICS_INTERVAL_MS` | no | Default `60000`. |
+| `KJ_CONTROL_URL` | sí | URL del control (`https://api.kujira.so`). Sin barra final. |
+| `KJ_CONFIG_DIR` | no | Default `/etc/kj-supervisor`. Aquí vive el `token` que escribió `install.sh`. Override para dev. |
+| `KJ_LOG_LEVEL` | no | Default `info`. `debug`, `warn`, `error` válidos; cualquier otra cosa aborta el arranque. |
+| `KJ_SUPERVISOR_CONTAINER` | no | Nombre del propio container, para el blue/green del auto-upgrade. |
+
+> **Ya NO existen** `KJ_PROVISIONING_TOKEN`, `KJ_AGENT_TOKEN`,
+> `KJ_PING_INTERVAL_MS` ni `KJ_METRICS_INTERVAL_MS`. Las dos primeras murieron
+> al colapsar el auth en un solo camino (el token se lee del disco, §2.1); los
+> intervalos son constantes del código. Siguieron documentadas aquí meses
+> después de desaparecer — si una receta te las pasa por `-e`, se ignoran en
+> silencio.
 
 ---
 
@@ -459,10 +520,16 @@ moverse a un `kj-channel-core` MCP en el VPS; hoy centralizado.)
 
 ---
 
-## 9. Hoja de ruta (6 hitos)
+## 9. Hoja de ruta
 
 > El alcance de cada hito está pensado para ser commiteable, probable y
 > útil por sí solo. Mismo patrón que el kj-backend.
+>
+> Empezó siendo "6 hitos". Repasada el 2026-09-05: todo lo marcado ✅ está en
+> producción, y lo único abierto es el último apartado. **No hay Hito 8**: ese
+> número se usó para el cajón de pendientes y quedó escrito detrás del 9, así
+> que al ordenarlo se ha renumerado. La numeración no significa nada; el orden
+> sí.
 
 ### Hito 1 — Handshake mínimo ✅
 
@@ -615,18 +682,40 @@ conversación viva. Tres añadidos:
   La invalidación real del volumen del container nunca dependió de
   estos pushes — va por `Agent.sync_pending` + el ciclo de sync.
 
-### Hito 8 — Pendientes futuros
+### Hito 10 — Copias, ejecución y OAuth ✅ (2026-06 → 2026-08)
 
-- **Limpiar el flujo WS-provisioning muerto**: `auth.ts` y
-  `settings.ts` todavía exponen `KJ_PROVISIONING_TOKEN` y la rama
-  `provisioning` del handshake, pero el real ya va por HTTP-bundle.
-  Hay docenas de líneas zombi (typecheck no las marca porque siguen
-  consistentes consigo mismas).
+Lo que se hizo después de que esta hoja de ruta dejara de mantenerse. Va aquí
+para que el orden de los hitos vuelva a ser el orden en que pasaron.
+
+- **`agent:backup` / `agent:restore`** (`handlers/agent-backup/`): empaqueta el
+  volumen `/home/agent` y lo sube al destino R2 de la organización; restaurar
+  vuelca sobre el volumen vivo. **Es la parte más delicada del repo**: la noche
+  del 2026-08-27 se perdieron copias por tres caminos distintos a la vez, y los
+  tres se arreglaron en el mismo PR. Antes de tocar aquí, léelo.
+- **`agent:exec`** (`handlers/agent-exec/`): ejecuta un comando dentro del
+  container y devuelve su salida. Es lo que permite que un cron del control
+  corra un script en vez de inyectar un turno de conversación.
+- **Canje de OAuth** (`src/oauth/` + `handlers/oauth-exchange/`): el flujo PKCE
+  de Claude se completa en la máquina del cliente, así el token no se pasea ni
+  se queda en el control mientras se negocia.
+- **Dedup por `request_id`** (`client/control/command-dedup.ts`) y el contrato
+  `EVENT_DELIVERY`: la mitad de supervisor de la entrega garantizada. La otra
+  mitad, el `CommandOutbox`, ya existe en el control.
+
+### Hito 11 — Pendientes futuros
+
+- ~~**Limpiar el flujo WS-provisioning muerto**~~ ✅. `auth.ts`/`settings.ts`/
+  `main.ts` quedaron colapsados en un solo camino y las variables zombi
+  desaparecieron (§7). Este punto llevaba desde mayo dado por pendiente en un
+  fichero que ya no describía el código.
 - **Backpressure del stream**: si un agente verboso emite cientos de
   `stream_event` por segundo y nadie está suscrito a `/operator`, hoy
   el supervisor empuja igualmente y el control descarta. Optimización:
   el control le puede decir al supervisor "para de empujar de este
   `agent_id`" cuando la room esté vacía.
+- **`agent:image:update` no lleva `conversations[]`**, así que el primer
+  `agent:output` tras un swap de imagen cae al enrutado de reserva del control
+  (§8, decisión 2026-06-04). Mejora menor, conocida.
 
 ---
 
@@ -641,7 +730,7 @@ bun run pull-protocol:dev   # descarga protocol.ts de localhost:5050
 bun --watch src/main.ts
 
 # Tests
-bun test                    # 69 unit pasan al cierre de Hito 6
+bun test                    # 22 ficheros de test
 
 # Build de imagen Docker
 docker build -t kj-supervisor:dev .
@@ -649,7 +738,6 @@ docker run --rm -it \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v ./local/etc-kj-supervisor:/etc/kj-supervisor \
   -e KJ_CONTROL_URL=http://host.docker.internal:5050 \
-  -e KJ_PROVISIONING_TOKEN=kjprov_xxx \
   -e KJ_SUPERVISOR_CONTAINER=kj-supervisor \
   kj-supervisor:dev
 ```
@@ -677,95 +765,71 @@ curl -X POST -H "Authorization: Bearer <JWT>" \
 
 ---
 
-## 11. Estado del control local — listo para arrancar Hito 1
+## 11. Levantar un entorno de desarrollo
 
-El backend (`kj-backend`) en `localhost:5050` ya tiene un Server creado
-esperando a este supervisor. Datos preparados el **2026-05-17**:
+> Esta sección fue durante meses "Estado del control local — listo para arrancar
+> Hito 1": los IDs de un Server y una organización concretos de mayo de 2026, un
+> `provisioning_token` que caducó, y pasos escritos en futuro ("cuando exista el
+> código del Hito 1"). Nada de eso servía ya. Lo que sigue es el procedimiento,
+> sin datos que caduquen.
 
-### Recursos creados en el control
-
-| Recurso | ID | Detalle |
-|---|---|---|
-| **Backend URL** | — | `http://localhost:5050` |
-| **Usuario** | `1` | `supervisor-dev@kujira.local` |
-| **Organization** | `1` | `Kujira Dev`, plan `FREE` |
-| **Server** | `1` | `dev-laptop`, status `OFFLINE` esperando supervisor |
-
-Los secretos vivos (provisioning_token, password, JWT) están en el
-fichero **`.env.local`** del repo (gitignored). Plantilla en
-[.env.example](.env.example).
-
-### Arrancar de cero
+Necesitas el control corriendo, una organización con un servidor, y el
+`agent_token` de ese servidor en el disco.
 
 ```bash
-# 1. Levanta el backend (en otra terminal)
-cd ~/Git/kj-backend
+# 1. El control, en otra terminal
+cd ../kj-backend
 bun run docker:dev   # postgres + redis
 bun run dev          # API en :5050
-
-# 2. Verifica que responde
 curl http://localhost:5050/ping
-# → { "name": "Kujira API", ... }
 
-# 3. Copia .env.example → .env.local y rellena los valores con los del repo
-cp .env.example .env.local
-# Editar .env.local con el provisioning_token actual
-
-# 4. Cuando exista el código del Hito 1
+# 2. Este repo
 bun install
 bun run pull-protocol:dev
+cp .env.example .env.local     # KJ_CONTROL_URL + KJ_CONFIG_DIR=./local/etc-kj-supervisor
+```
+
+**El `agent_token`.** No se pasa por env: se lee de `<KJ_CONFIG_DIR>/token`. En
+producción lo escribe `install.sh` tras canjear el `provisioning_token` por el
+bundle (§2.1). En local, o corres ese mismo `install.sh` apuntando al control de
+desarrollo, o pides el bundle a mano:
+
+```bash
+# Genera un provisioning_token desde el panel (o por API) para tu servidor, y:
+curl -s -X POST http://localhost:5050/provisioning/bundle \
+  -H 'Content-Type: application/json' \
+  -d '{"provisioning_token":"kjprov_..."}'
+# Guarda el agent_token que devuelve:
+mkdir -p ./local/etc-kj-supervisor
+printf '%s' '<agent_token>' > ./local/etc-kj-supervisor/token
+chmod 600 ./local/etc-kj-supervisor/token
+```
+
+```bash
+# 3. Arranca
 bun --watch src/main.ts
 ```
 
-### Si el provisioning_token expira o se gasta
-
-```bash
-JWT="<JWT del usuario, en .env.local>"
-curl -s -X POST http://localhost:5050/org/1/server/1/regenerate-provisioning-token \
-  -H "Authorization: Bearer $JWT" | jq -r '.provisioning_token'
-```
-
-Devuelve un nuevo `kjprov_...` e **invalida** cualquier `agent_token`
-persistente anterior. Si el supervisor ya tenía un token guardado en
-disco (`local/etc-kj-supervisor/token`), bórralo antes de reintentar.
-
-Si el JWT también expiró (7 días desde su emisión), refresca con:
-
-```bash
-curl -s -X POST http://localhost:5050/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"supervisor-dev@kujira.local","password":"<password>"}' \
-  | jq -r '.token'
-```
-
-### Qué validar después del primer handshake
-
-Tras `bun --watch src/main.ts` con el `.env.local` cargado, debes ver
-(aproximadamente):
+Un handshake correcto se ve así (aproximadamente):
 
 ```
 supervisor starting
-auth resolved { mode: "provisioning" }
 socket connected, waiting for control:ready
 control:ready received
-agent_token persisted to disk
-handshake complete { protocol_version: 1 }
+handshake complete { protocol_version: N }
 pong { server_time: ... }            ← cada 30s
 ```
 
-Y en el control (BD):
+Y en la BD del control, el servidor pasa a `ONLINE` con `last_seen_at` reciente:
 
 ```sql
--- server #1 ahora ONLINE con agent_token_hash poblado
-SELECT id, status, provisioning_token IS NULL AS provisioning_consumed,
-       agent_token_hash IS NOT NULL AS has_agent_token, last_seen_at
-FROM server WHERE id = 1;
--- → ONLINE | t | t | <reciente>
+SELECT id, status, agent_token_hash IS NOT NULL AS has_agent_token, last_seen_at
+FROM server WHERE id = <tu server>;
 ```
 
-Reinicios posteriores del supervisor: ya **no** necesita
-`KJ_PROVISIONING_TOKEN`. Lee el agent_token del disco
-(`local/etc-kj-supervisor/token`) y reconecta directo.
+**Si el token deja de valer**, regenerar el provisioning del servidor invalida
+cualquier `agent_token` anterior — borra `./local/etc-kj-supervisor/token` antes
+de reintentar, o el supervisor seguirá presentando el viejo.
 
 ---
 
