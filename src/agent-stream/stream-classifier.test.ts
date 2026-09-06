@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test'
 
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 
-function ctx(): ClassifierContext {
+function ctx(credentials_epoch?: number): ClassifierContext {
     let seq = 0
     return {
         agent_id: 42,
         session_id: '00000000-0000-0000-0000-000000000042',
         next_seq: () => ++seq,
+        credentials_epoch,
     }
 }
 
@@ -100,5 +101,45 @@ describe('classifyStreamEvent', () => {
         const c = ctx()
         const out = classifyStreamEvent({ type: 'assistant', message: {} }, c)
         expect(out.metrics).toBeUndefined()
+    })
+})
+
+/**
+ * #529 — cada aviso dice con qué generación de credenciales corre el
+ * contenedor que lo emite.
+ *
+ * El control la compara con la del agente para descartar lo que diga un
+ * contenedor que ya no lleva las credenciales de ahora: al cambiarlas el agente
+ * se reinicia y el viejo sigue unos segundos fallando con las caducadas, y su
+ * aviso volvía a cerrarle el cuadro de escribir al operador.
+ */
+describe('generación de credenciales en los avisos (#529)', () => {
+    test('cuando se conoce, viaja en el output y en el aviso de credencial', () => {
+        const c = ctx(1_700_000_000_000)
+        const salida = classifyStreamEvent({ type: 'assistant', message: {} }, c)
+        expect(salida.output.credentials_epoch).toBe(1_700_000_000_000)
+
+        const auth = classifyStreamEvent({ type: 'assistant', error: 'authentication_failed' }, c)
+        expect(auth.auth_required?.credentials_epoch).toBe(1_700_000_000_000)
+    })
+
+    test('la generación 0 viaja igual: es «nunca se tocaron», no «no se sabe»', () => {
+        // Distinguirlas importa — el control trata el 0 como una generación más
+        // (la de los agentes a los que nadie cambió las credenciales todavía) y
+        // la ausencia como «no filtres nada».
+        const salida = classifyStreamEvent({ type: 'assistant', message: {} }, ctx(0))
+        expect(salida.output.credentials_epoch).toBe(0)
+    })
+
+    test('cuando no se conoce, el campo no se manda', () => {
+        // Un contenedor anterior a esto, o un inspect que falló. El control lo
+        // lee como «no descartes nada», que es el lado bueno por el que
+        // equivocarse: un sello de más se borra al primer turno bueno.
+        const c = ctx()
+        const salida = classifyStreamEvent({ type: 'assistant', message: {} }, c)
+        expect('credentials_epoch' in salida.output).toBe(false)
+
+        const auth = classifyStreamEvent({ type: 'assistant', error: 'authentication_failed' }, c)
+        expect(auth.auth_required && 'credentials_epoch' in auth.auth_required).toBe(false)
     })
 })

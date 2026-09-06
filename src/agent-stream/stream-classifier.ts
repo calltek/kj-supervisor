@@ -45,6 +45,17 @@ export interface ClassifierContext {
     agent_id: number
     session_id: string
     next_seq: () => number
+    /**
+     * #529 — la generación de credenciales que el contenedor lleva horneada
+     * (`KJ_CREDENTIALS_EPOCH`), leída de él al engancharse. Viaja de vuelta en
+     * cada aviso para que el control descarte lo que diga un contenedor que ya
+     * no lleva las credenciales de ahora.
+     *
+     * `undefined` cuando no se pudo leer (contenedor anterior a esto, o un
+     * inspect que falló). Entonces el control no descarta nada, que es el lado
+     * por el que conviene equivocarse.
+     */
+    credentials_epoch?: number
 }
 
 export function classifyStreamEvent(
@@ -58,6 +69,9 @@ export function classifyStreamEvent(
         seq: ctx.next_seq(),
         timestamp,
         event,
+        ...(ctx.credentials_epoch === undefined
+            ? {}
+            : { credentials_epoch: ctx.credentials_epoch }),
     }
 
     const classified: ClassifiedEvent = { output }
@@ -66,7 +80,13 @@ export function classifyStreamEvent(
     // and api_retry events carry the same field with the failure category.
     const error = readStringField(event, 'error')
     if (error === 'authentication_failed') {
-        classified.auth_required = { agent_id: ctx.agent_id, timestamp }
+        classified.auth_required = {
+            agent_id: ctx.agent_id,
+            timestamp,
+            ...(ctx.credentials_epoch === undefined
+                ? {}
+                : { credentials_epoch: ctx.credentials_epoch }),
+        }
         return classified
     }
 

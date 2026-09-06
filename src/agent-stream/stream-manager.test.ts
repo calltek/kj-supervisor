@@ -218,3 +218,91 @@ describe('el turno lleva modelo Y esfuerzo al contenedor (#277)', () => {
         expect('effort' in envelope).toBe(false)
     })
 })
+
+/**
+ * #529 — la generación de credenciales se lee DEL CONTENEDOR al engancharse.
+ *
+ * Es la pieza que le permite al control distinguir el contenedor que lleva las
+ * credenciales de ahora del que se está muriendo con las de antes: al cambiar
+ * credenciales el agente se reinicia, y el viejo sigue unos segundos fallando
+ * con las caducadas. Su aviso volvía a cerrarle el cuadro de escribir al
+ * operador justo después de que lo arreglara.
+ *
+ * Se lee del entorno del propio contenedor, que es donde el control la horneó
+ * junto al secreto, y no de lo que nadie nos pase: así vale igual para un
+ * arranque, para un re-enganche tras reiniciarnos y para una recreación por
+ * cambio de imagen, sin que ninguno tenga que acordarse.
+ */
+describe('AgentStreamManager: generación de credenciales (#529)', () => {
+    /**
+     * Engancha un contenedor cuyo `docker inspect` devuelve el entorno dado,
+     * le mete una línea de stream-json y devuelve lo que se empujó al control.
+     */
+    async function avisoDeUnContenedorCon(
+        env: string[] | null,
+        opts: { inspectFalla?: boolean } = {}
+    ): Promise<Record<string, unknown> | undefined> {
+        const duplex = new PassThrough()
+        const docker = {
+            attachContainer: async () => duplex,
+            // El de verdad demultiplexa el marco de docker; aquí basta con
+            // volcar el duplex en stdout para que el parser vea las líneas.
+            demuxAttachStream: (stream: NodeJS.ReadWriteStream, stdout: NodeJS.WritableStream) => {
+                stream.pipe(stdout)
+            },
+            inspect: async () => {
+                if (opts.inspectFalla) throw new Error('no such container')
+                return { Config: { Env: env } }
+            },
+        } as never
+
+        const pushed: Array<{ event: string; payload: Record<string, unknown> }> = []
+        const manager = new AgentStreamManager({
+            docker,
+            client: {
+                push(event: string, payload: unknown) {
+                    pushed.push({ event, payload: payload as Record<string, unknown> })
+                },
+            },
+            logger: silentLogger,
+        })
+        await manager.attach({ agent_id: 7, container_id: 'c1', session_id: 'sess' })
+
+        duplex.write(`${JSON.stringify({ type: 'assistant', message: {} })}\n`)
+        await new Promise((r) => setTimeout(r, 20))
+
+        return pushed.find((p) => p.event === 'agent:output')?.payload
+    }
+
+    test('la lee del entorno y la estampa en el aviso', async () => {
+        const salida = await avisoDeUnContenedorCon([
+            'KJ_AGENT_ID=7',
+            'KJ_CREDENTIALS_EPOCH=1700000000000',
+            'KJ_SESSION_ID=sess',
+        ])
+        expect(salida?.credentials_epoch).toBe(1700000000000)
+    })
+
+    test('la generación 0 sí viaja: es «nunca se tocaron», no «no se sabe»', async () => {
+        const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=0'])
+        expect(salida?.credentials_epoch).toBe(0)
+    })
+
+    test('un contenedor sin la variable no manda generación', async () => {
+        // Los que ya estaban corriendo antes de este cambio. El control lo lee
+        // como «no descartes nada», que es el comportamiento de hoy.
+        const salida = await avisoDeUnContenedorCon(['KJ_AGENT_ID=7'])
+        expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+
+    test('un inspect que falla no rompe el enganche ni inventa una generación', async () => {
+        const salida = await avisoDeUnContenedorCon(null, { inspectFalla: true })
+        expect(salida).toBeDefined()
+        expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+
+    test('una variable con basura se ignora, no se manda un NaN', async () => {
+        const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=ayer'])
+        expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+})
