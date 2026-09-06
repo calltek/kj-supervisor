@@ -133,7 +133,12 @@ export class AgentStreamManager {
         // tres condiciones que allí, a propósito: si divergen, el filtro se
         // apaga sin que nadie se entere.
         const raw = Number(entry.slice(PREFIX.length))
-        return Number.isInteger(raw) && raw >= 0 ? raw : undefined
+        // El tope es el mayor milisegundo que cabe en un `Date` (±8.64e15, el
+        // límite de ECMAScript): una generación ES una fecha, así que lo que no
+        // cabe en una no es una generación. Sin él, un valor en nanosegundos
+        // pasaba las otras condiciones y al otro lado acababa siendo un Date
+        // inválido dentro de una consulta, que se caía entera y en silencio.
+        return Number.isInteger(raw) && raw >= 0 && raw <= 8.64e15 ? raw : undefined
     }
 
     /**

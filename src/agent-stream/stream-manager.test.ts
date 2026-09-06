@@ -309,6 +309,13 @@ describe('AgentStreamManager: generación de credenciales (#529)', () => {
         expect(salida && 'credentials_epoch' in salida).toBe(false)
     })
 
+    test('lo que no cabe en un Date tampoco sale de aquí', async () => {
+        // Nanosegundos: entero y no negativo, pero al otro lado sería un Date
+        // inválido que tumba la consulta entera y en silencio.
+        const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=1757000000000000000'])
+        expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+
     test('un negativo tampoco', async () => {
         const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=-1'])
         expect(salida && 'credentials_epoch' in salida).toBe(false)
