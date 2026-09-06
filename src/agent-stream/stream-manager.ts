@@ -95,6 +95,57 @@ export class AgentStreamManager {
     }
 
     /**
+     * #529 — la generación de credenciales horneada en el contenedor.
+     *
+     * `KJ_CREDENTIALS_EPOCH` es la fecha del último cambio de credenciales del
+     * agente en milisegundos (`0` = nunca se tocaron), y el control la mete en
+     * el entorno al crear el contenedor, al lado del propio token. Se la
+     * devolvemos en cada aviso de fallo para que pueda distinguir el contenedor
+     * que lleva las credenciales de ahora del que se está muriendo con las de
+     * antes.
+     *
+     * Devuelve `undefined` —y no un 0, que significaría «nunca se tocaron»—
+     * cuando no hay forma de saberlo: contenedor anterior a esto, o un inspect
+     * que falla. Ahí el control no descarta nada.
+     */
+    private async readCredentialsEpoch(
+        container_id: string,
+        log: KJLogger
+    ): Promise<number | undefined> {
+        let env: string[]
+        try {
+            const info = await this.docker.inspect(container_id)
+            env = info?.Config?.Env ?? []
+        } catch (err) {
+            log.warn(
+                { err: err instanceof Error ? err.message : String(err) },
+                'could not read KJ_CREDENTIALS_EPOCH — stale-generation filtering off for this container'
+            )
+            return undefined
+        }
+        const PREFIX = 'KJ_CREDENTIALS_EPOCH='
+        const entry = env.find((e) => e.startsWith(PREFIX))
+        if (!entry) return undefined
+        // Las CUATRO condiciones de abajo son, a propósito, las mismas que
+        // `readReportedEpoch` en `kj-backend`
+        // (`src/modules/agent-gateway/turn-failure.helper.ts`). Si tocas una,
+        // toca la otra: el control descarta en silencio lo que no las cumpla,
+        // así que una divergencia apaga el filtro entero sin que nada falle —
+        // todo seguiría yendo, nada se descartaría, y nada lo diría.
+        //
+        // Empezando por `Number(...)`: esto es una variable de entorno, o sea
+        // una CADENA, y allí se exige un número. Reenviar `"1700000000000"` tal
+        // cual es justo esa divergencia.
+        const raw = Number(entry.slice(PREFIX.length))
+        // El tope es el mayor milisegundo que cabe en un `Date` (±8.64e15, el
+        // límite de ECMAScript): una generación ES una fecha, así que lo que no
+        // cabe en una no es una generación. Sin él, un valor en nanosegundos
+        // pasaba las otras condiciones y al otro lado acababa siendo un Date
+        // inválido dentro de una consulta, que se caía entera y en silencio.
+        return Number.isInteger(raw) && raw >= 0 && raw <= 8.64e15 ? raw : undefined
+    }
+
+    /**
      * Resolve the destination (conversation_id + contact_id) an MCP call
      * belongs to (KUJI-84).
      *
@@ -239,6 +290,19 @@ export class AgentStreamManager {
         const stderr = new PassThrough()
         this.docker.demuxAttachStream(stream, stdout, stderr)
 
+        // #529 — con qué generación de credenciales corre este contenedor.
+        // Se lee de SU entorno, no de lo que nos manden: es donde el control la
+        // horneó junto al propio secreto, así que contesta la pregunta exacta
+        // («qué credenciales lleva puestas») y no una parecida. Y por eso vale
+        // igual en los tres caminos que llegan aquí —arranque, re-enganche tras
+        // un reinicio nuestro, y recreación por cambio de imagen, que hereda el
+        // entorno— sin que ninguno tenga que acordarse de pasárnosla.
+        //
+        // Si el inspect falla o el contenedor es anterior a esto se queda sin
+        // generación, y entonces el control no descarta nada: el comportamiento
+        // de hoy.
+        const credentials_epoch = await this.readCredentialsEpoch(opts.container_id, log)
+
         const entry: AgentStream = {
             agent_id: opts.agent_id,
             container_id: opts.container_id,
@@ -257,6 +321,7 @@ export class AgentStreamManager {
             agent_id: opts.agent_id,
             session_id: opts.session_id,
             next_seq: () => ++entry.seq,
+            credentials_epoch,
         }
 
         const parser = new NDJSONStreamParser({
