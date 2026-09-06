@@ -126,12 +126,16 @@ export class AgentStreamManager {
         const PREFIX = 'KJ_CREDENTIALS_EPOCH='
         const entry = env.find((e) => e.startsWith(PREFIX))
         if (!entry) return undefined
-        // `Number(...)` y no la cadena pelada: el control valida que sea un
-        // NÚMERO entero no negativo y descarta lo demás, así que reenviar
-        // `"1700000000000"` tal cual apagaría el filtro entero en silencio —
-        // todo seguiría yendo, nada se descartaría, y nada lo diría. Mismas
-        // tres condiciones que allí, a propósito: si divergen, el filtro se
-        // apaga sin que nadie se entere.
+        // Las CUATRO condiciones de abajo son, a propósito, las mismas que
+        // `readReportedEpoch` en `kj-backend`
+        // (`src/modules/agent-gateway/turn-failure.helper.ts`). Si tocas una,
+        // toca la otra: el control descarta en silencio lo que no las cumpla,
+        // así que una divergencia apaga el filtro entero sin que nada falle —
+        // todo seguiría yendo, nada se descartaría, y nada lo diría.
+        //
+        // Empezando por `Number(...)`: esto es una variable de entorno, o sea
+        // una CADENA, y allí se exige un número. Reenviar `"1700000000000"` tal
+        // cual es justo esa divergencia.
         const raw = Number(entry.slice(PREFIX.length))
         // El tope es el mayor milisegundo que cabe en un `Date` (±8.64e15, el
         // límite de ECMAScript): una generación ES una fecha, así que lo que no
