@@ -411,9 +411,36 @@ async function main(): Promise<void> {
                         readonly: true,
                     })),
                 })
+                // Y los ficheros `.kj/` si vienen (calltek/kj-backend#642):
+                // capacidades, instrucciones, índice de largo plazo. Desde que
+                // las instrucciones de producto las renderiza el control y se
+                // filtran por las familias de tools del agente, capar una
+                // familia o mover un umbral cambia lo que el agente LEE — y
+                // hasta ahora eso no llegaba hasta el siguiente stop→start.
+                //
+                // El purgado se limita a `.kj`, NO a `.claude/memories`: ahí al
+                // lado están las memorias que el agente escribe con
+                // `memory_write`, y barrerlas en caliente sería borrarle lo
+                // suyo para actualizar lo nuestro.
+                if (payload.kj_files?.length) {
+                    await docker.seedVolumeFiles({
+                        volume_name: homeVolume,
+                        target_dir: '.claude/memories/.kj',
+                        purge: true,
+                        files: payload.kj_files.map((f) => ({
+                            path: f.path,
+                            content: f.content,
+                            readonly: f.readonly,
+                        })),
+                    })
+                }
                 const delivered = streams.writeControl(payload.agent_id, { type: 'skills_changed' })
                 log.info(
-                    { skills: payload.skills.length, delivered },
+                    {
+                        skills: payload.skills.length,
+                        kj_files: payload.kj_files?.length ?? 0,
+                        delivered,
+                    },
                     'skills re-seeded; pool recycle signalled to wrapper'
                 )
             } catch (err) {
