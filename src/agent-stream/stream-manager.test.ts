@@ -301,6 +301,19 @@ describe('AgentStreamManager: generación de credenciales (#529)', () => {
         expect(salida && 'credentials_epoch' in salida).toBe(false)
     })
 
+    test('un decimal tampoco pasa: el control exige entero y lo descartaría', async () => {
+        // Las tres condiciones tienen que ser las MISMAS a los dos lados
+        // (número, entero, no negativo). Si divergen, el control tira el valor
+        // y el filtro se apaga sin que nada lo diga.
+        const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=1.5'])
+        expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+
+    test('un negativo tampoco', async () => {
+        const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=-1'])
+        expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+
     test('una variable con basura se ignora, no se manda un NaN', async () => {
         const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=ayer'])
         expect(salida && 'credentials_epoch' in salida).toBe(false)

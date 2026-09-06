@@ -126,8 +126,14 @@ export class AgentStreamManager {
         const PREFIX = 'KJ_CREDENTIALS_EPOCH='
         const entry = env.find((e) => e.startsWith(PREFIX))
         if (!entry) return undefined
+        // `Number(...)` y no la cadena pelada: el control valida que sea un
+        // NÚMERO entero no negativo y descarta lo demás, así que reenviar
+        // `"1700000000000"` tal cual apagaría el filtro entero en silencio —
+        // todo seguiría yendo, nada se descartaría, y nada lo diría. Mismas
+        // tres condiciones que allí, a propósito: si divergen, el filtro se
+        // apaga sin que nadie se entere.
         const raw = Number(entry.slice(PREFIX.length))
-        return Number.isFinite(raw) && raw >= 0 ? raw : undefined
+        return Number.isInteger(raw) && raw >= 0 ? raw : undefined
     }
 
     /**
