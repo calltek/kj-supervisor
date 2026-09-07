@@ -12,6 +12,7 @@ import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
 import { agentHardening, privilegedNetworkingExtras, withoutDockerSocket } from './hardening'
+import { agentHostAliases, withHostAlias } from './host-access'
 
 /**
  * Our own container id, read from /proc — works under `--network host` where
@@ -440,6 +441,10 @@ export class KJDocker {
                 ...agentHardening(
                     opts.network_privileged ? privilegedNetworkingExtras() : undefined
                 ),
+                // Un nombre para la máquina donde corre, que es donde puede
+                // estar su modelo (un Ollama en el `11434` del host). Ver
+                // host-access.ts: no amplía lo que alcanza, lo nombra.
+                ExtraHosts: agentHostAliases(),
                 // Restart so the container survives docker daemon restarts but
                 // not its own crashes (the supervisor decides whether to relaunch).
                 RestartPolicy: { Name: 'unless-stopped' },
@@ -735,6 +740,11 @@ export class KJDocker {
                 RestartPolicy: source.HostConfig.RestartPolicy,
                 NetworkMode: source.HostConfig.NetworkMode,
                 GroupAdd: source.HostConfig.GroupAdd,
+                // El clon tiene que alcanzar el host igual que el original: si
+                // no, actualizar la imagen de un agente que corre contra un
+                // modelo local lo deja sin modelo, y el fallo aparece un turno
+                // después.
+                ExtraHosts: withHostAlias(source.HostConfig.ExtraHosts),
                 // Preserve the source's resource limits (KUJI-42) — don't
                 // silently drop them on the blue/green clone.
                 Memory: source.HostConfig.Memory,
@@ -825,6 +835,9 @@ export class KJDocker {
                 RestartPolicy: host.RestartPolicy,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,
+                // Igual que el clon: recrear por imagen no puede dejar sin host
+                // a un agente que corre contra un modelo local.
+                ExtraHosts: withHostAlias(host.ExtraHosts),
                 // Re-apply the resource limits (KUJI-42). The control's value
                 // wins; otherwise preserve what the source had (never silently
                 // leave it unbounded again).
