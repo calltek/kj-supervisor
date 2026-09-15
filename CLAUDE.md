@@ -38,6 +38,17 @@
 > falla, se queda quieto — y aquí eso significa que la flota sigue con el
 > supervisor viejo. Norma completa en `kj-backend/CLAUDE.md` §6 (decisión
 > 2026-09-05).
+>
+> **Y el PR dice qué nota el cliente (2026-09-15).** Una sección `## Novedades`
+> en el cuerpo, una frase por cambio, sin jerga y contada desde su lado —sale
+> **tal cual** en el changelog de Kujira y en el anuncio que reciben todos los
+> clientes—, o la etiqueta **`sin-novedades`** si no nota nada. Aquí eso es lo
+> habitual (el supervisor no se ve), pero un agente que ya no se queda colgado o
+> que arranca más rápido sí es novedad. Lo exige el check `novedades`, igual en
+> los cuatro repos del producto; `gh pr create --body` se salta la plantilla.
+> Al revisar, una línea con jerga o un `sin-novedades` en algo que el cliente
+> nota se pide corregir. El PR `release/next` de `kj-app` **no lo mergea ningún
+> agente**. Norma completa en `kj-backend/CLAUDE.md` §6 (decisión 2026-09-15).
 
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
 una conexión WebSocket persistente con el control (`kj-backend`) y

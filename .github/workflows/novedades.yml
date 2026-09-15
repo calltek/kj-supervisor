@@ -1,0 +1,48 @@
+# Cada PR dice qué nota el cliente, o que no nota nada.
+#
+# De esa sección sale el changelog de Kujira (`kj-app`, workflow `release`):
+# lo que se escribe bajo `## Novedades` va tal cual al CHANGELOG.md y al anuncio
+# de novedades que reciben los clientes. Así que se escribe para ellos — una
+# frase por cambio, sin jerga — y no para quien revisa.
+#
+# Pasa si el cuerpo del PR tiene `## Novedades` con algo escrito (los
+# comentarios HTML no cuentan: la plantilla se explica en uno), o si lleva la
+# etiqueta `sin-novedades` (refactor, CI, docs, tests…). El PR de release
+# (`release/next`) no se mira: su cuerpo ya ES el changelog.
+#
+# Este fichero es idéntico en kj-app, kj-backend, kj-supervisor y
+# kj-agent-base. La lectura de la sección tiene que coincidir con la de
+# `kj-app/scripts/release/notes.ts` (`extractNovedades`).
+name: novedades
+
+on:
+    pull_request:
+        types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+    novedades:
+        runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+        if: github.head_ref != 'release/next'
+        timeout-minutes: 2
+        steps:
+            - env:
+                  BODY: ${{ github.event.pull_request.body }}
+                  INTERNAL: ${{ contains(github.event.pull_request.labels.*.name, 'sin-novedades') }}
+              run: |
+                  if [ "$INTERNAL" = "true" ]; then
+                      echo "Etiqueta sin-novedades: no entra en el changelog."
+                      exit 0
+                  fi
+                  notes=$(printf '%s\n' "$BODY" | perl -0777 -ne '
+                      s/\r//g; s/<!--.*?-->//gs;
+                      if (/^##[ \t]+novedades[ \t]*\n(.*?)(?=^#{1,2}[ \t]|\z)/ims) {
+                          $s = $1; $s =~ s/^\s+|\s+$//g; print $s;
+                      }')
+                  if [ -z "$notes" ]; then
+                      echo "::error::Falta qué cambia para el cliente. Añade al cuerpo del PR una sección «## Novedades» con una frase por cambio, sin jerga (sale tal cual en el anuncio a clientes), o pon la etiqueta «sin-novedades» si el cliente no nota nada."
+                      exit 1
+                  fi
+                  echo "Entra en el changelog:"
+                  printf '%s\n' "$notes"
