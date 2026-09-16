@@ -6,8 +6,10 @@
 # frase por cambio, sin jerga — y no para quien revisa.
 #
 # Pasa si el cuerpo del PR tiene `## Novedades` con algo escrito (los
-# comentarios HTML no cuentan: la plantilla se explica en uno), o si lleva la
-# etiqueta `sin-novedades` (refactor, CI, docs, tests…). El PR de release
+# comentarios HTML no cuentan: la plantilla se explica en uno; tampoco la firma
+# de la herramienta ni un `Closes #123`, que suelen quedar debajo de la sección
+# y no son texto de cliente), o si lleva la etiqueta
+# `sin-novedades` (refactor, CI, docs, tests…). El PR de release
 # (`release/next`) no se mira: su cuerpo ya ES el changelog.
 #
 # Este fichero es idéntico en kj-app, kj-backend, kj-supervisor y
@@ -37,8 +39,10 @@ jobs:
                   fi
                   notes=$(printf '%s\n' "$BODY" | perl -0777 -ne '
                       s/\r//g; s/<!--.*?-->//gs;
-                      if (/^##[ \t]+novedades[ \t]*\n(.*?)(?=^#{1,2}[ \t]|\z)/ims) {
-                          $s = $1; $s =~ s/^\s+|\s+$//g; print $s;
+                      if (/^##[ \t]+novedades[ \t]*\n(.*?)(?=^#{1,2}[ \t]|^-{3,}[ \t]*$|\z)/ims) {
+                          $s = $1;
+                          $s =~ s/^(?:\xf0\x9f\xa4\x96|Generated with\b|Co-Authored-By:|(?:Close[sd]?|Fix(?:e[sd])?|Resolve[sd]?)[ \t]+#\d+).*$//gim;
+                          $s =~ s/^\s+|\s+$//g; print $s;
                       }')
                   if [ -z "$notes" ]; then
                       echo "::error::Falta qué cambia para el cliente. Añade al cuerpo del PR una sección «## Novedades» con una frase por cambio, sin jerga (sale tal cual en el anuncio a clientes), o pon la etiqueta «sin-novedades» si el cliente no nota nada."
