@@ -7,8 +7,8 @@
 #
 # Pasa si el cuerpo del PR tiene `## Novedades` con algo escrito (los
 # comentarios HTML no cuentan: la plantilla se explica en uno; tampoco la firma
-# de la herramienta ni un `Closes #123`, que suelen quedar debajo de la sección
-# y no son texto de cliente), o si lleva la etiqueta
+# de la herramienta, un `Closes #123` ni una regla `---`, que suelen quedar
+# debajo de la sección y no son texto de cliente), o si lleva la etiqueta
 # `sin-novedades` (refactor, CI, docs, tests…). El PR de release
 # (`release/next`) no se mira: su cuerpo ya ES el changelog.
 #
@@ -39,9 +39,10 @@ jobs:
                   fi
                   notes=$(printf '%s\n' "$BODY" | perl -0777 -ne '
                       s/\r//g; s/<!--.*?-->//gs;
-                      if (/^##[ \t]+novedades[ \t]*\n(.*?)(?=^#{1,2}[ \t]|^-{3,}[ \t]*$|\z)/ims) {
+                      if (/^##[ \t]+novedades[ \t]*\n(.*?)(?=^#{1,2}[ \t]|\z)/ims) {
                           $s = $1;
                           $s =~ s/^(?:\xf0\x9f\xa4\x96|Generated with\b|Co-Authored-By:|(?:Close[sd]?|Fix(?:e[sd])?|Resolve[sd]?)[ \t]+#\d+).*$//gim;
+                          $s =~ s/^[-*_]{3,}[ \t]*$//gm;
                           $s =~ s/^\s+|\s+$//g; print $s;
                       }')
                   if [ -z "$notes" ]; then
