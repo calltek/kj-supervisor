@@ -49,6 +49,17 @@
 > Al revisar, una línea con jerga o un `sin-novedades` en algo que el cliente
 > nota se pide corregir. El PR `release/next` de `kj-app` **no lo mergea ningún
 > agente**. Norma completa en `kj-backend/CLAUDE.md` §6 (decisión 2026-09-15).
+>
+> **Y si el cambio se nota desde fuera, la documentación va con él
+> (2026-09-16).** Aquí es menos habitual que en el panel, pero pasa: el
+> instalador y sus comandos, el CLI `kujira`, lo que el cliente ve en
+> **Servidores**, un requisito nuevo de la máquina. Antes de dar el PR por
+> terminado, mira si `kj-docs` (`docs.kujira.so`) cuenta algo de lo que has
+> tocado; si ha dejado de ser verdad, o si lo que añades no está en ninguna
+> página, el PR de `kj-docs` se abre en la misma tanda y se mergea detrás. No lo
+> vigila ningún check: el manual no se construye con el producto, así que el
+> desfase no sale en rojo en ninguna parte — lo descubre quien sigue la página.
+> Norma completa en `kj-backend/CLAUDE.md` §6 (decisión 2026-09-16).
 
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
 una conexión WebSocket persistente con el control (`kj-backend`) y
