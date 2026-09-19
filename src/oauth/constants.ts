@@ -31,6 +31,23 @@ export const CLAUDE_OAUTH_REDIRECT_URI = 'https://console.anthropic.com/oauth/co
 export const CLAUDE_OAUTH_TOKEN_ENDPOINT = 'https://console.anthropic.com/v1/oauth/token'
 
 /**
+ * The lifetime we ask for, in seconds: one year, the same `expires_in` that
+ * `claude setup-token` sends (checked in the CLI 2.1.x binary). Without it the
+ * endpoint hands out an ordinary ~8 h access token — no refresh token reaches
+ * the agent, so the connection dies overnight with "OAuth access token has
+ * expired" (connection #29, 2026-09-18 → 19).
+ */
+export const CLAUDE_OAUTH_TOKEN_LIFETIME_S = 31_536_000
+
+/**
+ * Below this, the token we got back is not the long-lived one we asked for,
+ * and storing it only postpones the failure to the agent's first turn after
+ * it expires. Refuse it instead, so the operator sees it while the browser
+ * tab is still open.
+ */
+export const CLAUDE_OAUTH_MIN_LIFETIME_S = 7 * 24 * 60 * 60
+
+/**
  * How long we wait for the token endpoint before giving up and
  * returning a recoverable error. The authorisation code stays valid
  * on Anthropic's side for several minutes, so a failed retry is safe.
