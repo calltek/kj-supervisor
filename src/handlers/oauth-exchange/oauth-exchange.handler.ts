@@ -23,7 +23,9 @@
 import type { KJLogger } from '../../logger'
 import {
     CLAUDE_OAUTH_CLIENT_ID,
+    CLAUDE_OAUTH_MIN_LIFETIME_S,
     CLAUDE_OAUTH_REDIRECT_URI,
+    CLAUDE_OAUTH_TOKEN_LIFETIME_S,
     CLAUDE_OAUTH_TOKEN_ENDPOINT,
     OAUTH_EXCHANGE_TIMEOUT_MS,
 } from '../../oauth/constants'
@@ -106,6 +108,8 @@ export class OAuthExchangeHandler {
             code_verifier,
             client_id: CLAUDE_OAUTH_CLIENT_ID,
             redirect_uri: CLAUDE_OAUTH_REDIRECT_URI,
+            // What makes it a `setup-token` and not an 8 h login.
+            expires_in: CLAUDE_OAUTH_TOKEN_LIFETIME_S,
         })
 
         // Debug: log shapes (not values) of every field so we can
@@ -215,11 +219,28 @@ export class OAuthExchangeHandler {
             }
         }
 
-        this.logger.info({ request_id }, 'oauth exchange ok')
+        // The lifetime is a number, not a secret, and it is the one thing that
+        // says whether this token will still work tomorrow.
+        const expires_in = payload_response.expires_in
+        if (typeof expires_in === 'number' && expires_in < CLAUDE_OAUTH_MIN_LIFETIME_S) {
+            this.logger.warn(
+                { request_id, expires_in },
+                'oauth exchange returned a short-lived token'
+            )
+            return {
+                ok: false,
+                error: {
+                    code: WS_ERROR_CODES.INTERNAL_ERROR,
+                    message: `Anthropic issued a token that expires in ${Math.round(expires_in / 3600)}h instead of a long-lived one. Generate it with \`claude setup-token\` and paste it instead.`,
+                    retryable: false,
+                },
+            }
+        }
 
-        // We deliberately don't log scopes/expires/refresh — keep the
-        // surface area small and the token itself out of structured
-        // log fields.
+        this.logger.info({ request_id, expires_in }, 'oauth exchange ok')
+
+        // Scopes and the refresh token stay out of the logs — keep the surface
+        // area small and anything secret out of structured log fields.
         return {
             ok: true,
             access_token: payload_response.access_token,
