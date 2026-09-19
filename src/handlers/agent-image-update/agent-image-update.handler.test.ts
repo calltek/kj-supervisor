@@ -11,6 +11,8 @@
  *  - Pull fails AND image cached locally → fallback continues with
  *    the cached copy (dev workflow + transitional missing creds).
  *  - Pull fails AND no cache → status ERROR / STOPPED, no swap.
+ *  - The drain's limit comes from the control: absent → the old
+ *    behaviour, `null` → no limit, a number → that (bottom block).
  */
 
 import type {
@@ -36,7 +38,8 @@ const silentLogger = KJLogger.create('error')
 
 interface InspectInfo {
     Config?: { Env?: string[] | null }
-    State?: { Running?: boolean }
+    State?: { Running?: boolean; Restarting?: boolean; StartedAt?: string }
+    RestartCount?: number
 }
 
 class FakeDocker {
@@ -58,6 +61,8 @@ class FakeDocker {
     public recreate_returns: string = 'new-container-1'
     public next_recreate_error: Error | null = null
     public next_inspect: InspectInfo | null = null
+    /** When set, wins over `next_inspect` — lets a test move the container along. */
+    public inspect_fn: ((container_id: string) => InspectInfo) | null = null
 
     async pullImage(
         image_tag: string,
@@ -95,7 +100,8 @@ class FakeDocker {
         return this.recreate_returns
     }
 
-    async inspect(_container_id: string): Promise<InspectInfo> {
+    async inspect(container_id: string): Promise<InspectInfo> {
+        if (this.inspect_fn) return this.inspect_fn(container_id)
         return this.next_inspect ?? {}
     }
 }
@@ -291,8 +297,10 @@ describe('AgentImageUpdateHandler', () => {
         const docker = new FakeDocker()
         docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
         docker.recreate_returns = 'c-new'
-        // The wrapper "exits" immediately → the drain poll sees it gone.
-        docker.next_inspect = { State: { Running: false } }
+        // Running when the drain starts; the wrapper then "exits" → the next
+        // poll sees it gone.
+        let inspects = 0
+        docker.inspect_fn = () => ({ State: { Running: inspects++ === 0 } })
         const client = new FakeClient()
 
         const controls: Array<{ agent_id: number; envelope: unknown }> = []
@@ -481,6 +489,179 @@ describe('AgentImageUpdateHandler', () => {
 
         expect(docker.pulled).toHaveLength(1)
         expect(docker.pulled[0]?.auth).toBeUndefined()
+    })
+})
+
+/**
+ * The drain's limit comes from the control (`drain_timeout_ms`, kj-backend §6
+ * 2026-09-19): a task can run for hours, and the drain used to cut anything
+ * past 3 minutes. Absent → the old behaviour; `null` → no limit; a number →
+ * that. The default is shrunk to a few ms here so "waits past the default"
+ * is observable without waiting 3 minutes.
+ */
+describe('AgentImageUpdateHandler: drain limit from the control', () => {
+    const DEFAULT_MS = 30
+    const POLL_MS = 2
+
+    /** A container that stays busy (running, same run) until `exit()` is called. */
+    function busyContainer(docker: FakeDocker): { exit: () => void; restart: () => void } {
+        let state: InspectInfo = {
+            State: { Running: true, StartedAt: '2026-09-19T08:00:00Z' },
+            RestartCount: 0,
+        }
+        docker.inspect_fn = () => state
+        return {
+            exit: () => {
+                state = { State: { Running: false, StartedAt: '2026-09-19T08:00:00Z' } }
+            },
+            // What production actually sees: the wrapper exits and the restart
+            // policy (unless-stopped) has Docker start it again ~100 ms later.
+            restart: () => {
+                state = {
+                    State: { Running: true, StartedAt: '2026-09-19T09:30:00Z' },
+                    RestartCount: 1,
+                }
+            },
+        }
+    }
+
+    function makeDrainHandler(docker: FakeDocker, client: FakeClient) {
+        const controls: unknown[] = []
+        const handler = new AgentImageUpdateHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            tracker: new OperationTracker(),
+            streams: {
+                writeControl: (_agent_id: number, envelope: unknown) => {
+                    controls.push(envelope)
+                    return true
+                },
+                detach: () => {},
+            } as never,
+            logger: silentLogger,
+            default_drain_timeout_ms: DEFAULT_MS,
+            drain_poll_ms: POLL_MS,
+        })
+        return { handler, controls }
+    }
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+    test('null → no limit: still waiting well past the default, then stops once the agent exits', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        const agent = busyContainer(docker)
+        const client = new FakeClient()
+        const { handler, controls } = makeDrainHandler(docker, client)
+
+        const ack = await handler.handle(
+            makePayload({ restart_after: false, drain_timeout_ms: null })
+        )
+        // The ack is out before the drain even starts: the control must not
+        // read a long drain as a lost ack.
+        expectAck(ack)
+        expect(docker.stopped).toEqual([])
+
+        // Five times the default and the agent is still mid-turn: nothing cut.
+        await sleep(DEFAULT_MS * 5)
+        expect(controls).toEqual([{ type: 'drain' }])
+        expect(docker.stopped).toEqual([])
+        expect(statuses(client).some((s) => s.status === 'STOPPED')).toBe(false)
+        expect(statuses(client).at(-1)?.last_action).toContain('waiting for the current turn')
+
+        agent.exit()
+        await waitForFinalStatus(client, 'STOPPED')
+        expect(docker.stopped).toEqual([{ container_id: 'c-old', force: true }])
+        expect(docker.removed).toEqual(['c-old'])
+    })
+
+    test('the restart-policy restart counts as the exit (the container is never seen stopped)', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        const agent = busyContainer(docker)
+        const client = new FakeClient()
+        const { handler } = makeDrainHandler(docker, client)
+
+        await handler.handle(makePayload({ restart_after: false, drain_timeout_ms: null }))
+        await sleep(DEFAULT_MS * 2)
+        expect(docker.stopped).toEqual([])
+
+        // Running again, with a new start: without this check a drain with no
+        // limit would wait for ever on an agent that already finished.
+        agent.restart()
+        await waitForFinalStatus(client, 'STOPPED')
+        expect(docker.stopped).toEqual([{ container_id: 'c-old', force: true }])
+    })
+
+    test('a number caps the drain at that, not at the default', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        busyContainer(docker) // never exits
+        const client = new FakeClient()
+        const handler = new AgentImageUpdateHandler({
+            docker: docker as never,
+            status: new AgentStatusReporter(client, silentLogger),
+            tracker: new OperationTracker(),
+            streams: { writeControl: () => true, detach: () => {} } as never,
+            logger: silentLogger,
+            // A default this long would time the test out: only the number
+            // from the control can end the drain in time.
+            default_drain_timeout_ms: 60_000,
+            drain_poll_ms: POLL_MS,
+        })
+
+        const started = Date.now()
+        await handler.handle(makePayload({ restart_after: false, drain_timeout_ms: 40 }))
+        await waitForFinalStatus(client, 'STOPPED')
+
+        expect(Date.now() - started).toBeGreaterThanOrEqual(40)
+        // Forced: the agent never exited, so the stop cuts it.
+        expect(docker.stopped).toEqual([{ container_id: 'c-old', force: true }])
+    })
+
+    test('absent → the default still applies on a swap (older control)', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        docker.recreate_returns = 'c-new'
+        busyContainer(docker) // never exits
+        const client = new FakeClient()
+        const { handler, controls } = makeDrainHandler(docker, client)
+
+        await handler.handle(makePayload({ restart_after: true }))
+        await waitForFinalStatus(client, 'RUNNING')
+
+        expect(controls).toEqual([{ type: 'drain' }])
+        expect(docker.recreated).toHaveLength(1)
+    })
+
+    test('absent + restart_after=false → stops straight away, as before (older control)', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        busyContainer(docker)
+        const client = new FakeClient()
+        const { handler, controls } = makeDrainHandler(docker, client)
+
+        await handler.handle(makePayload({ restart_after: false }))
+        await waitForFinalStatus(client, 'STOPPED')
+
+        // That control only waits 3 min for the STOPPED before respawning:
+        // draining here could leave the agent updated but stopped.
+        expect(controls).toEqual([])
+        expect(docker.stopped).toEqual([{ container_id: 'c-old', force: true }])
+    })
+
+    test('0 → no wait: drain is asked for, and the stop follows at once', async () => {
+        const docker = new FakeDocker()
+        docker.containers = [{ container_id: 'c-old', agent_id: 42 }]
+        busyContainer(docker)
+        const client = new FakeClient()
+        const { handler, controls } = makeDrainHandler(docker, client)
+
+        await handler.handle(makePayload({ restart_after: false, drain_timeout_ms: 0 }))
+        await waitForFinalStatus(client, 'STOPPED')
+
+        expect(controls).toEqual([{ type: 'drain' }])
+        expect(docker.stopped).toEqual([{ container_id: 'c-old', force: true }])
     })
 })
 

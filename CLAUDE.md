@@ -545,6 +545,28 @@ reenvía `mcp:request` y entrega el `agent:input` resultante — agnóstico
 al transporte. (Si la escala lo pide algún día, el conector podría
 moverse a un `kj-channel-core` MCP en el VPS; hoy centralizado.)
 
+### Tareas largas: el drenaje lo mide el control, y puede no tener límite (2026-09-19)
+Una tarea de un agente puede durar horas, y el drenaje de `agent:image:update`
+la cortaba a los 3 minutos. Ahora el plazo llega en el payload
+(`drain_timeout_ms`, un ajuste de plataforma del backend): un número, o `null`
+= sin límite, hasta que el turno acabe. Ausente = un control viejo, y se hace
+exactamente lo de antes. Detalle en kj-backend §6 (2026-09-19). Tres cosas que
+no se ven leyendo el handler:
+- **El control manda siempre `restart_after=false`** (recrea con un `agent:spawn`
+  completo para resembrar el volumen, kj-backend#608, 2026-09-03), y el drenaje
+  sólo corría con `true`: desde entonces no se ejecutaba. Con `drain_timeout_ms`
+  presente se drena en los dos caminos.
+- **Un contenedor que sale solo no se ve parado.** La política `unless-stopped`
+  lo vuelve a arrancar a los ~100 ms, así que el sondeo cada 2 s casi nunca lo
+  pillaba en `Running=false` y todo drenaje agotaba su plazo; sin límite habría
+  esperado para siempre. La salida se detecta también por un arranque nuevo
+  (`StartedAt` / `RestartCount` cambian).
+- **El ack sale antes del drenaje**, como siempre: el trabajo va en segundo plano
+  y un drenaje de horas no se confunde con un ack perdido.
+
+`agent:input` lleva además `stall_limit_ms` y `background_task_limit_ms`, que se
+reenvían tal cual al wrapper (igual que `max_context_tokens`).
+
 ---
 
 ## 9. Hoja de ruta

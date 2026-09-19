@@ -149,6 +149,33 @@ describe('AgentStreamManager.resolveTarget (KUJI-84)', () => {
     })
 })
 
+/** Un gestor con una sesión enganchada, devolviendo lo que se le escribe. */
+async function attached(): Promise<{ manager: AgentStreamManager; written: () => string[] }> {
+    const lines: string[] = []
+    const stream = new PassThrough()
+    stream.on('data', (chunk: Buffer) => lines.push(chunk.toString()))
+    const manager = new AgentStreamManager({
+        docker: {
+            attachContainer: async () => stream,
+            demuxAttachStream: () => {},
+        } as never,
+        client: new FakeClient(),
+        logger: silentLogger,
+        mcp: new McpDispatcher({
+            sendRequest: async () => ({ ok: true, data: {} }),
+            writeToContainer: () => true,
+            resolveTarget: () => ({}),
+            logger: silentLogger,
+        }),
+    })
+    await manager.attach({
+        agent_id: 1,
+        container_id: 'c1',
+        session_id: 's1',
+    })
+    return { manager, written: () => lines }
+}
+
 /**
  * #277 — el nivel de razonamiento por conversación tiene que LLEGAR al
  * contenedor. Viajaba en el turno desde el control y se quedaba aquí: el
@@ -160,33 +187,6 @@ describe('AgentStreamManager.resolveTarget (KUJI-84)', () => {
  * solo reciclado cubra los dos.
  */
 describe('el turno lleva modelo Y esfuerzo al contenedor (#277)', () => {
-    /** Un gestor con una sesión enganchada, devolviendo lo que se le escribe. */
-    async function attached(): Promise<{ manager: AgentStreamManager; written: () => string[] }> {
-        const lines: string[] = []
-        const stream = new PassThrough()
-        stream.on('data', (chunk: Buffer) => lines.push(chunk.toString()))
-        const manager = new AgentStreamManager({
-            docker: {
-                attachContainer: async () => stream,
-                demuxAttachStream: () => {},
-            } as never,
-            client: new FakeClient(),
-            logger: silentLogger,
-            mcp: new McpDispatcher({
-                sendRequest: async () => ({ ok: true, data: {} }),
-                writeToContainer: () => true,
-                resolveTarget: () => ({}),
-                logger: silentLogger,
-            }),
-        })
-        await manager.attach({
-            agent_id: 1,
-            container_id: 'c1',
-            session_id: 's1',
-        })
-        return { manager, written: () => lines }
-    }
-
     test('el esfuerzo llega, junto al modelo', async () => {
         const { manager, written } = await attached()
 
@@ -216,6 +216,63 @@ describe('el turno lleva modelo Y esfuerzo al contenedor (#277)', () => {
 
         const envelope = JSON.parse(written().join('').trim())
         expect('effort' in envelope).toBe(false)
+    })
+})
+
+/**
+ * Los límites de las tareas largas (kj-backend §6, 2026-09-19): el control los
+ * estampa en cada turno y el wrapper los aplica por sesión. Si se quedaran
+ * aquí, como le pasó al esfuerzo (#277), el ajuste de «Ajustes globales» no
+ * llegaría nunca y el contenedor seguiría cortando a los 30 minutos.
+ */
+describe('el turno lleva los límites de las tareas largas al contenedor', () => {
+    test('los dos llegan', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'descarga esto',
+            conversation_session_id: 's1',
+            stall_limit_ms: 1_800_000,
+            background_task_limit_ms: 21_600_000,
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.stall_limit_ms).toBe(1_800_000)
+        expect(envelope.background_task_limit_ms).toBe(21_600_000)
+    })
+
+    test('un 0 también viaja: sólo se omite lo que no viene', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+            stall_limit_ms: 0,
+            background_task_limit_ms: 0,
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.stall_limit_ms).toBe(0)
+        expect(envelope.background_task_limit_ms).toBe(0)
+    })
+
+    test('sin límites en el turno, las claves no viajan (el contenedor usa los suyos)', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect('stall_limit_ms' in envelope).toBe(false)
+        expect('background_task_limit_ms' in envelope).toBe(false)
     })
 })
 
