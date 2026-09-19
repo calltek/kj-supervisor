@@ -56,6 +56,19 @@ describe('oauth:exchange', () => {
         if (!ack.ok) expect(ack.error.message).toContain('claude setup-token')
     })
 
+    test('an 8 h lifetime sent as a string is refused too', async () => {
+        stubTokenEndpoint({ access_token: 'tok', expires_in: '28800' })
+        const ack = await new OAuthExchangeHandler({ logger: fakeLogger }).handle(payload)
+        expect(ack.ok).toBe(false)
+    })
+
+    test('a lifetime that is not a number is refused', async () => {
+        stubTokenEndpoint({ access_token: 'tok', expires_in: 'soon' })
+        const ack = await new OAuthExchangeHandler({ logger: fakeLogger }).handle(payload)
+        expect(ack.ok).toBe(false)
+        if (!ack.ok) expect(ack.error.message).toContain('no readable lifetime')
+    })
+
     test('a response without expires_in is still accepted', async () => {
         stubTokenEndpoint({ access_token: 'tok' })
         const ack = await new OAuthExchangeHandler({ logger: fakeLogger }).handle(payload)
