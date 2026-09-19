@@ -33,6 +33,7 @@ import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycl
 import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
 import { AgentSyncHandler } from './handlers/agent-sync/agent-sync.handler'
 import { OAuthExchangeHandler } from './handlers/oauth-exchange/oauth-exchange.handler'
+import { OAuthRevokeHandler } from './handlers/oauth-revoke/oauth-revoke.handler'
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
 import { KJLogger } from './logger'
 import {
@@ -59,6 +60,8 @@ import {
     type McpRequestPayload,
     type OAuthExchangeAck,
     type OAuthExchangePayload,
+    type OAuthRevokeAck,
+    type OAuthRevokePayload,
     PROTOCOL_VERSION,
     type ServerHelloAck,
     type ServerHelloPayload,
@@ -292,6 +295,7 @@ async function main(): Promise<void> {
         logger,
     })
     const oauthExchangeHandler = new OAuthExchangeHandler({ logger })
+    const oauthRevokeHandler = new OAuthRevokeHandler({ logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,
         logger,
@@ -361,6 +365,9 @@ async function main(): Promise<void> {
     )
     client.onCommand<OAuthExchangePayload, OAuthExchangeAck>('oauth:exchange', (payload) =>
         oauthExchangeHandler.handle(payload)
+    )
+    client.onCommand<OAuthRevokePayload, OAuthRevokeAck>('oauth:revoke', (payload) =>
+        oauthRevokeHandler.handle(payload)
     )
 
     // Push event (not a command), no ack — handler returns void.
