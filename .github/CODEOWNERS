@@ -15,4 +15,5 @@ package.json             @n0v4-SYS @SOKY-SYS
 /src/client/auth/                                @n0v4-SYS @SOKY-SYS
 /src/oauth/                                      @n0v4-SYS @SOKY-SYS
 /src/handlers/oauth-exchange/                    @n0v4-SYS @SOKY-SYS
+/src/handlers/oauth-revoke/                      @n0v4-SYS @SOKY-SYS
 /src/docker/                                     @n0v4-SYS @SOKY-SYS

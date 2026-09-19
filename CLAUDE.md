@@ -30,7 +30,7 @@
 > `build` (build + `bun test`). Revisan **@n0v4-SYS** (Nova) todo y **@SOKY-SYS**
 > (SOKI) además `/.github/`, `Dockerfile*`, `docker*.yml`, `.env.example`,
 > `package.json`, `/src/client/auth/`, `/src/oauth/`,
-> `/src/handlers/oauth-exchange/` y `/src/docker/`. Verde y aprobado →
+> `/src/handlers/oauth-exchange/`, `/src/handlers/oauth-revoke/` y `/src/docker/`. Verde y aprobado →
 > `gh pr merge <n> --squash --delete-branch`; rojo → `gh run view <id>
 > --log-failed` antes de tocar nada; comentarios → aplicarlos o contestar. Los
 > comentarios de revisión son **en línea** y no salen en `gh pr view`:
