@@ -53,3 +53,17 @@ export const CLAUDE_OAUTH_MIN_LIFETIME_S = 7 * 24 * 60 * 60
  * on Anthropic's side for several minutes, so a failed retry is safe.
  */
 export const OAUTH_EXCHANGE_TIMEOUT_MS = 10_000
+
+/**
+ * Where a token is revoked: the token endpoint + `/revoke`, the call
+ * `claude /logout` makes (checked in the CLI 2.1.x binary).
+ *
+ * `platform.claude.com`, NOT the `console.anthropic.com` host the exchange
+ * uses: that host answers this path with a Cloudflare challenge, while
+ * `platform.claude.com` answers `200 {}` (probed 2026-09-19 with a made-up
+ * token and our client_id). It is also the `TOKEN_URL` the current CLI ships.
+ */
+export const CLAUDE_OAUTH_REVOKE_ENDPOINT = 'https://platform.claude.com/v1/oauth/token/revoke'
+
+/** Same budget the CLI gives its own revoke call. */
+export const OAUTH_REVOKE_TIMEOUT_MS = 5_000
