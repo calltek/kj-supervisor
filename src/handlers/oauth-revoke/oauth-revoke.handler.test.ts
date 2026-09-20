@@ -67,6 +67,14 @@ describe('oauth:revoke', () => {
             token: TOKEN,
         })
         expect(!down.ok && down.error.retryable).toBe(true)
+
+        // And a rate limit, which is not a 5xx and is the textbook retry.
+        stubRevokeEndpoint(429)
+        const limited = await new OAuthRevokeHandler({ logger: fakeLogger }).handle({
+            request_id: 'r3',
+            token: TOKEN,
+        })
+        expect(!limited.ok && limited.error.retryable).toBe(true)
     })
 
     test('an unreachable endpoint is a retryable error', async () => {

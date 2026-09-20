@@ -95,7 +95,10 @@ export class OAuthRevokeHandler {
                 error: {
                     code: WS_ERROR_CODES.INTERNAL_ERROR,
                     message: `Revoke endpoint returned ${response.status}`,
-                    retryable: response.status >= 500,
+                    // 429 too, not just 5xx: a rate limit is the textbook case
+                    // for trying again, and this call is not on anyone's
+                    // critical path (SOKI, calltek/kj-supervisor#41).
+                    retryable: response.status >= 500 || response.status === 429,
                 },
             }
         }
