@@ -435,6 +435,15 @@ export class AgentStreamManager {
         // (0 = no cap, so forward it too — only skip when absent).
         if (payload.max_context_tokens !== undefined)
             envelope.max_context_tokens = payload.max_context_tokens
+        // Long-task limits (kj-backend §6, 2026-09-19): how long a turn may go
+        // without progress before the wrapper gives it up, and how long work it
+        // left in the background is protected after it closes. The control
+        // stamps them on every input; the wrapper applies them per session.
+        // Pure passthrough, same rule as the context cap: only skip when absent
+        // (absent = the container default).
+        if (payload.stall_limit_ms !== undefined) envelope.stall_limit_ms = payload.stall_limit_ms
+        if (payload.background_task_limit_ms !== undefined)
+            envelope.background_task_limit_ms = payload.background_task_limit_ms
         const line = `${JSON.stringify(envelope)}\n`
 
         try {

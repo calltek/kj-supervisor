@@ -2,16 +2,22 @@
  * Handler for `agent:image:update`. Pulls a fresh copy of the agent's
  * image from the registry and recreates the container if requested.
  *
- *   1. Find the existing container (if any).
- *   2. Ack { ok: true, accepted: true }.
- *   3. In the background:
+ *   1. Ack { ok: true, accepted: true } — straight away, before any of
+ *      the work below. The drain in particular can take as long as the
+ *      agent's turn, and the control must not read that as a lost ack.
+ *   2. In the background:
+ *      - Find the existing container (if any).
  *      - Push status SPAWNING + "pulling <tag>" while docker pulls.
+ *      - If a container existed, drain it first when asked to (see
+ *        `drainTimeoutFor`): the agent finishes its turn and exits on
+ *        its own instead of having it cut.
  *      - If a container existed AND restart_after is true, recreate
  *        it under the same name preserving env / mounts / labels.
  *        Reattach stdio so the conversation keeps flowing.
  *      - If a container existed AND restart_after is false, stop +
- *        remove it and leave the agent STOPPED. The operator can
- *        start it back from the panel.
+ *        remove it and leave the agent STOPPED. The control starts it
+ *        again with a full agent:spawn (that is how it reseeds the
+ *        volume), so today this is the path every update takes.
  *      - If no container existed, just leave the agent STOPPED — the
  *        pull populates the local cache for the next spawn.
  *
@@ -34,14 +40,19 @@ import type { AgentImageUpdatePayload, ControlCommandAck, WsErrorPayload } from 
 import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
 import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
 
-// Graceful image swap (KJ-22): before recreating, ask the agent to finish its
-// turn(s) and exit on its own (no turn cut). We wait up to this long for the
-// container to go away; past it we force the swap (a turn longer than this, or
-// an OLD wrapper that predates `drain` and ignores it, gets the forced swap —
-// harmless if the agent was idle). Configurable so a rollout can tune it; the
-// default trades "don't cut a normal turn" against "don't stall the first
-// rollout (old wrapper) too long".
-const DRAIN_TIMEOUT_MS =
+// Graceful image swap (KJ-22): before replacing the container, ask the agent
+// to finish its turn(s) and exit on its own (no turn cut). How long we wait
+// for that comes from the control (`drain_timeout_ms`, a platform setting —
+// kj-backend §6, 2026-09-19): a number of ms, or `null` for no limit at all,
+// because a task can legitimately run for hours and cutting it loses it. A
+// turn that stops making progress is given up by the wrapper itself, so it
+// does not hold the swap forever.
+//
+// This default only applies to a control that predates the field: it keeps
+// the old behaviour (at most 3 min, then force the swap — which also covers
+// an OLD wrapper that predates `drain` and ignores it; harmless if the agent
+// was idle). Tunable by env for that transition.
+const DEFAULT_DRAIN_TIMEOUT_MS =
     Number.parseInt(process.env.KJ_IMAGE_SWAP_DRAIN_TIMEOUT_MS ?? '', 10) || 180_000
 const DRAIN_POLL_MS = 2_000
 
@@ -51,6 +62,10 @@ export interface AgentImageUpdateHandlerDeps {
     streams: AgentStreamManager
     tracker: OperationTracker
     logger: KJLogger
+    /** Tests only: the drain limit used when the control sends none. */
+    default_drain_timeout_ms?: number
+    /** Tests only: how often the drain checks whether the agent exited. */
+    drain_poll_ms?: number
 }
 
 export class AgentImageUpdateHandler {
@@ -59,6 +74,8 @@ export class AgentImageUpdateHandler {
     private readonly streams: AgentStreamManager
     private readonly tracker: OperationTracker
     private readonly logger: KJLogger
+    private readonly default_drain_timeout_ms: number
+    private readonly drain_poll_ms: number
 
     constructor(deps: AgentImageUpdateHandlerDeps) {
         this.docker = deps.docker
@@ -66,6 +83,8 @@ export class AgentImageUpdateHandler {
         this.streams = deps.streams
         this.tracker = deps.tracker
         this.logger = deps.logger.child({ component: 'agent-image-update' })
+        this.default_drain_timeout_ms = deps.default_drain_timeout_ms ?? DEFAULT_DRAIN_TIMEOUT_MS
+        this.drain_poll_ms = deps.drain_poll_ms ?? DRAIN_POLL_MS
     }
 
     async handle(payload: AgentImageUpdatePayload): Promise<ControlCommandAck> {
@@ -171,16 +190,30 @@ export class AgentImageUpdateHandler {
             return
         }
 
-        // 3. Operator asked to keep it stopped → stop + remove.
+        // 3. There is a container to replace. Track it across the whole
+        //    drain + stop/swap: its drain-exit, kill and destroy are all OURS.
+        //    Without this the events-watcher sees the old container die and
+        //    pushes a spurious "external die" STOPPED that races (and usually
+        //    beats) the status we push next — on a swap, a healthy freshly-
+        //    imaged agent shown as STOPPED (and a fleet rollout's canary
+        //    aborted). We only track the OLD id; a NEW container stays
+        //    untracked so a genuine crash of it IS reported.
+        this.tracker.track(existing)
+
+        //    Drain it first (KJ-22): ask the wrapper to finish its in-flight
+        //    turn(s) and exit on its own, so no conversation is cut mid-reply.
+        const drain_timeout_ms = this.drainTimeoutFor(payload, log)
+        if (drain_timeout_ms !== false) {
+            await this.gracefulDrain(payload.agent_id, existing, drain_timeout_ms, log)
+        }
+
+        // 4. restart_after=false → stop + remove. The control brings it back
+        //    with a full agent:spawn once it sees the STOPPED.
         if (!payload.restart_after) {
             log.info(
                 { container_id: existing },
                 'pull complete, stopping container per restart_after=false'
             )
-            // Track the container so the events-watcher treats the die/destroy
-            // as OURS, not as an external crash (otherwise it'd push a spurious
-            // "external die" STOPPED on top of ours — same race as the swap).
-            this.tracker.track(existing)
             try {
                 await this.docker.stopContainer(existing, { force: true })
                 await this.docker.removeContainer(existing)
@@ -206,24 +239,9 @@ export class AgentImageUpdateHandler {
             return
         }
 
-        // 4. Restart_after=true: swap the running container with one
-        //    based on the freshly-pulled image, preserving its env +
-        //    mounts so the agent reconnects to the same session and
-        //    volume. First drain it gracefully (KJ-22) — ask the wrapper to
-        //    finish its in-flight turn(s) and exit on its own, so no
-        //    conversation is cut mid-reply. Times out to a forced swap.
-        //
-        // Track the OLD container across the whole drain+swap: its drain-exit,
-        // kill and destroy are all OURS. Without this the events-watcher sees
-        // the old container die and pushes a spurious "external die" STOPPED
-        // that races (and usually beats) the RUNNING we push for the NEW
-        // container — leaving a healthy, freshly-imaged agent shown as STOPPED
-        // (and aborting a fleet rollout's canary). We only track the OLD id; the
-        // NEW one stays untracked so a genuine crash of it IS reported.
-        this.tracker.track(existing)
-
-        await this.gracefulDrain(payload.agent_id, existing, log)
-
+        // 5. restart_after=true: swap the container with one based on the
+        //    freshly-pulled image, preserving its env + mounts so the agent
+        //    reconnects to the same session and volume.
         const swapHeartbeat = new StatusHeartbeat({
             reporter: this.status,
             agent_id: payload.agent_id,
@@ -304,42 +322,125 @@ export class AgentImageUpdateHandler {
     }
 
     /**
-     * Graceful drain before an image swap (KJ-22). Send a `drain` control
+     * How long to drain before replacing the container: a number of ms,
+     * `null` for no limit, or `false` for no drain at all.
+     *
+     *  - The control sent `drain_timeout_ms` → honour it, whatever
+     *    `restart_after` says: `null` waits for as long as the turn takes, a
+     *    number caps the wait. Every update goes out with restart_after=false
+     *    today (the control respawns to reseed the volume), so without this
+     *    the drain would never run at all.
+     *  - It didn't (a control that predates the field) → exactly what this
+     *    supervisor did before: drain with the default cap on a swap, and stop
+     *    straight away on restart_after=false. That control only waits a
+     *    fixed 3 min for the STOPPED before respawning, so draining there
+     *    could leave the agent updated but stopped.
+     */
+    private drainTimeoutFor(
+        payload: AgentImageUpdatePayload,
+        log: KJLogger
+    ): number | null | false {
+        const requested = payload.drain_timeout_ms
+        if (requested === undefined) {
+            return payload.restart_after ? this.default_drain_timeout_ms : false
+        }
+        if (requested === null) return null
+        if (typeof requested === 'number' && Number.isFinite(requested) && requested >= 0) {
+            return requested
+        }
+        log.warn(
+            { drain_timeout_ms: requested },
+            'invalid drain_timeout_ms from the control — using the default'
+        )
+        return this.default_drain_timeout_ms
+    }
+
+    /**
+     * Graceful drain before an image update (KJ-22). Send a `drain` control
      * envelope to the wrapper; it finishes any in-flight turn and exits on its
-     * own (the container stops). We poll until the container is gone, up to
-     * DRAIN_TIMEOUT_MS. On timeout (or no live stream) we just return — the
-     * caller's recreate force-kills, same as before. So this never blocks the
-     * swap forever; it only avoids cutting a turn when the agent is busy.
+     * own. We poll until that exit, up to `timeout_ms` — or with no deadline
+     * at all when it is `null`. On timeout (or no live stream) we just return
+     * and the caller's stop/recreate force-kills, cutting the turn.
+     *
+     * With no limit this waits for as long as the turn runs, on purpose: the
+     * wrapper gives up a turn that stops making progress, so a hung one does
+     * not hold it forever. What it would hold for ever is a wrapper that
+     * predates `drain` (2026-06-26) and ignores it: an image pinned to an
+     * older build, or a `:latest` container nobody has respawned since (the
+     * spawn re-pulls mutable tags).
      */
     private async gracefulDrain(
         agent_id: number,
         container_id: string,
+        timeout_ms: number | null,
         log: KJLogger
     ): Promise<void> {
-        const sent = this.streams.writeControl(agent_id, { type: 'drain' })
-        if (!sent) {
-            log.debug('drain: no live stream to the agent — recreating without draining')
+        // Read the container's current run BEFORE asking it to drain. The
+        // wrapper exits, but the agent's restart policy (unless-stopped) has
+        // Docker start it again ~100 ms later, so a poll every 2 s almost never
+        // catches it "not running": a new start (StartedAt / RestartCount
+        // moved) is the exit too. Checking only for "not running" left every
+        // drain running to its deadline — and a drain with no limit, forever.
+        const before = await this.containerRun(container_id)
+        if (!before?.running) {
+            log.debug('drain: container not running — nothing to drain')
             return
         }
-        log.info({ timeout_ms: DRAIN_TIMEOUT_MS }, 'draining agent before swap — waiting for idle')
-        const deadline = Date.now() + DRAIN_TIMEOUT_MS
-        while (Date.now() < deadline) {
-            if (!(await this.isContainerRunning(container_id))) {
-                log.info('drain: agent exited cleanly — proceeding to swap')
+        const sent = this.streams.writeControl(agent_id, { type: 'drain' })
+        if (!sent) {
+            log.debug('drain: no live stream to the agent — replacing it without draining')
+            return
+        }
+        // It can be a long wait: say what we're waiting for instead of
+        // leaving the pull's last line up. Same status the pull left.
+        this.status.push({
+            agent_id,
+            status: 'SPAWNING',
+            container_id,
+            last_action: 'waiting for the current turn to finish before updating',
+            last_action_at: Date.now(),
+        })
+        log.info(
+            { timeout_ms: timeout_ms ?? 'none' },
+            'draining agent before the update — waiting for its turn to end'
+        )
+        const deadline = timeout_ms === null ? Number.POSITIVE_INFINITY : Date.now() + timeout_ms
+        for (;;) {
+            const now = await this.containerRun(container_id)
+            if (
+                !now?.running ||
+                now.restarting ||
+                now.started_at !== before.started_at ||
+                now.restart_count > before.restart_count
+            ) {
+                log.info('drain: agent exited cleanly — proceeding')
                 return
             }
-            await new Promise((r) => setTimeout(r, DRAIN_POLL_MS))
+            if (Date.now() >= deadline) {
+                log.warn('drain: timed out waiting for idle — forcing it (in-flight turn cut)')
+                return
+            }
+            await new Promise((r) => setTimeout(r, this.drain_poll_ms))
         }
-        log.warn('drain: timed out waiting for idle — forcing the swap (in-flight turn cut)')
     }
 
-    /** True while the container is still running (gone/unreadable → false). */
-    private async isContainerRunning(container_id: string): Promise<boolean> {
+    /** The container's current run, or null when it's gone/unreadable. */
+    private async containerRun(container_id: string): Promise<{
+        running: boolean
+        restarting: boolean
+        started_at: string | undefined
+        restart_count: number
+    } | null> {
         try {
             const info = await this.docker.inspect(container_id)
-            return info.State?.Running === true
+            return {
+                running: info.State?.Running === true,
+                restarting: info.State?.Restarting === true,
+                started_at: info.State?.StartedAt,
+                restart_count: info.RestartCount ?? 0,
+            }
         } catch {
-            return false
+            return null
         }
     }
 }
