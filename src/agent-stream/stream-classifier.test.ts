@@ -103,13 +103,14 @@ describe('classifyStreamEvent', () => {
     })
 
     test('the nested cache_creation split travels, and the flat field stands down', () => {
-        // Newer Claude Code versions report cache writes as
-        // `cache_creation.{ephemeral_5m,ephemeral_1h}`; older ones as the
-        // flat `cache_creation_input_tokens`. Whether a version emits both
-        // at once is not something we have pinned down, so the split wins
-        // and the flat field stands down: if both ever travel, sending
-        // them both would charge the same write twice, and at 1.25x and 2x
-        // input that is not a rounding difference.
+        // The shape below is the real one, keys included: Claude Code sends
+        // the nested split AND the flat field on every turn, the flat one
+        // being the sum of the pair (it backfills it when the API omits it
+        // — verified in the 2.1.219 bundle the fleet runs, and over ~109k
+        // turns from 18 CLI versions, 2.1.235 → 2.1.277: no exceptions).
+        // So the split wins and the flat field stands down: sending both
+        // would charge the same write twice, and at 1.25x and 2x input that
+        // is not a rounding difference.
         const out = classifyStreamEvent(
             {
                 type: 'result',
@@ -117,7 +118,10 @@ describe('classifyStreamEvent', () => {
                     input_tokens: 100,
                     output_tokens: 250,
                     cache_creation_input_tokens: 50,
-                    cache_creation: { ephemeral_5m: 30, ephemeral_1h: 20 },
+                    cache_creation: {
+                        ephemeral_5m_input_tokens: 30,
+                        ephemeral_1h_input_tokens: 20,
+                    },
                     cache_read_input_tokens: 1000,
                 },
                 total_cost_usd: 0.01234,
