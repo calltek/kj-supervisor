@@ -117,6 +117,12 @@ export function classifyStreamEvent(
                 agent_id: ctx.agent_id,
                 tokens_delta: tokens_delta.toString(),
                 cost_delta_micro: cost_delta_micro.toString(),
+                // The same tokens, split by what they cost. The sum above is
+                // still the source of truth for "tokens used"; this is what
+                // lets the control PRICE them, because `total_cost_usd` is
+                // computed at Anthropic's rates whatever model actually ran
+                // — see kj-backend#755.
+                usage_delta: splitUsageTokens(event.usage),
             }
         }
     }
@@ -147,6 +153,48 @@ function sumUsageTokens(usage: unknown): bigint {
         }
     }
     return total
+}
+
+/**
+ * The same tokens `sumUsageTokens` adds up, kept apart by what each one
+ * costs (kj-backend#755).
+ *
+ * The control needs the split because the four components carry wildly
+ * different rates — a cache read is a tenth of an input token, an output
+ * token five times one — and those ratios are NOT the same across models.
+ * Claude Code reports a single `total_cost_usd` computed at Anthropic's
+ * rates whatever model actually answered, so without the split the control
+ * can do no better than scale that one number by one factor. Measured
+ * against OpenRouter: a Haiku turn reported at $0.365 and billed at $0.0731.
+ *
+ * Cache writes arrive in two shapes depending on the Claude Code version:
+ * the newer nested `cache_creation.{ephemeral_5m,ephemeral_1h}` split, or
+ * the older flat `cache_creation_input_tokens`. Both travel — the control
+ * prices the split exactly and the flat one at the 5-minute rate — and a
+ * turn may legitimately carry both.
+ */
+function splitUsageTokens(usage: unknown): AgentMetricsReport['usage_delta'] {
+    const u = (usage && typeof usage === 'object' ? usage : {}) as Record<string, unknown>
+    const creation = (
+        u.cache_creation && typeof u.cache_creation === 'object' ? u.cache_creation : {}
+    ) as Record<string, unknown>
+    const n = (v: unknown): number => {
+        if (typeof v !== 'number' || !Number.isFinite(v)) return 0
+        return Math.max(0, Math.round(v))
+    }
+    return {
+        input: n(u.input_tokens),
+        output: n(u.output_tokens),
+        cache_read: n(u.cache_read_input_tokens),
+        cache_write_5m: n(creation.ephemeral_5m),
+        cache_write_1h: n(creation.ephemeral_1h),
+        // Only when the nested split is absent: sending both would count
+        // the same cache write twice.
+        cache_write_flat:
+            creation.ephemeral_5m == null && creation.ephemeral_1h == null
+                ? n(u.cache_creation_input_tokens)
+                : 0,
+    }
 }
 
 /** USD float → integer micro-units (1 USD = 1_000_000). */

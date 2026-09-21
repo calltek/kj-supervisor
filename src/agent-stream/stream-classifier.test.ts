@@ -88,6 +88,74 @@ describe('classifyStreamEvent', () => {
             agent_id: 42,
             tokens_delta: '1400',
             cost_delta_micro: '12340',
+            // The same 1400 tokens, kept apart by what each one costs. The
+            // control needs the split to price them: `total_cost_usd` is
+            // computed at Anthropic's rates whatever model actually ran.
+            usage_delta: {
+                input: 100,
+                output: 250,
+                cache_read: 1000,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_flat: 50,
+            },
+        })
+    })
+
+    test('the nested cache_creation split travels, and the flat field stands down', () => {
+        // Newer Claude Code versions report cache writes as
+        // `cache_creation.{ephemeral_5m,ephemeral_1h}`; older ones as the
+        // flat `cache_creation_input_tokens`. Whether a version emits both
+        // at once is not something we have pinned down, so the split wins
+        // and the flat field stands down: if both ever travel, sending
+        // them both would charge the same write twice, and at 1.25x and 2x
+        // input that is not a rounding difference.
+        const out = classifyStreamEvent(
+            {
+                type: 'result',
+                usage: {
+                    input_tokens: 100,
+                    output_tokens: 250,
+                    cache_creation_input_tokens: 50,
+                    cache_creation: { ephemeral_5m: 30, ephemeral_1h: 20 },
+                    cache_read_input_tokens: 1000,
+                },
+                total_cost_usd: 0.01234,
+            },
+            ctx()
+        )
+        expect(out.metrics?.usage_delta).toEqual({
+            input: 100,
+            output: 250,
+            cache_read: 1000,
+            cache_write_5m: 30,
+            cache_write_1h: 20,
+            cache_write_flat: 0,
+        })
+    })
+
+    test('a usage field that is not a number counts as zero, it does not drop the turn', () => {
+        // The stream is the other side of a pipe: a malformed field cannot
+        // cost us the whole turn's cost, only its own component.
+        const out = classifyStreamEvent(
+            {
+                type: 'result',
+                usage: {
+                    input_tokens: 100,
+                    output_tokens: 'many',
+                    cache_read_input_tokens: -5,
+                },
+                total_cost_usd: 0.01234,
+            },
+            ctx()
+        )
+        expect(out.metrics?.usage_delta).toEqual({
+            input: 100,
+            output: 0,
+            cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_flat: 0,
         })
     })
 
