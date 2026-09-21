@@ -567,6 +567,33 @@ no se ven leyendo el handler:
 `agent:input` lleva además `stall_limit_ms` y `background_task_limit_ms`, que se
 reenvían tal cual al wrapper (igual que `max_context_tokens`).
 
+### El coste de un turno lo tarifa el control, y necesita el reparto (2026-09-21)
+El `agent:metrics` mandaba un `cost_delta_micro` sacado del `total_cost_usd` de
+Claude Code, que tarifica **a precio de Anthropic corra lo que corra**: contra
+un endpoint compatible el CLI cree que sigue hablando con Claude. Medido contra
+OpenRouter: un turno de Haiku reportado a 0,365 $ y facturado a 0,0731 $.
+
+Ahora el reporte lleva también `usage_delta` —los mismos tokens de
+`tokens_delta`, separados en entrada, salida, lectura y escritura de caché— y el
+control los tarifa uno a uno con la tarifa que publica la pasarela. Hace falta
+el reparto porque las cuatro tarifas de un modelo no guardan entre sí la misma
+proporción que las de Opus, así que escalar el total por un factor no es lo
+mismo que tarifar cada componente.
+
+- **El supervisor ya tenía el dato delante**: `sumUsageTokens` recorre el
+  `usage` campo a campo y tiraba el desglose. Sólo deja de tirarlo.
+- **La escritura de caché llega en dos formas** según la versión del CLI: la
+  partida (`cache_creation.{ephemeral_5m,ephemeral_1h}`) y la plana
+  (`cache_creation_input_tokens`). Manda la partida y la plana se queda a cero:
+  si alguna vez viajaran las dos, mandar ambas cobraría dos veces la misma
+  escritura, y a 1,25× y 2× la entrada eso no es un redondeo.
+- **Un campo ilegible cuenta como cero**, no tira el turno: el stream es el otro
+  lado de un tubo, y un componente malo no puede costar el coste entero.
+- **El campo es opcional en el protocolo**, así que un control anterior lo
+  ignora. Y **este PR no compila hasta que el backend esté desplegado**, porque
+  `protocol.ts` se descarga de producción (§5). Detalle en kj-backend §6
+  (2026-09-21).
+
 ---
 
 ## 9. Hoja de ruta
