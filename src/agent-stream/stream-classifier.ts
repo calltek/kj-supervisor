@@ -135,6 +135,15 @@ export function classifyStreamEvent(
  * input + output + cache because the cost field already amortises
  * cache reads vs writes; for "tokens used" the operator wants the
  * total throughput, not the billable subset.
+ *
+ * The flat `cache_creation_input_tokens` counted here IS the whole cache
+ * write, not a legacy half of it: Claude Code backfills it from the nested
+ * split when the API omits it (`cache_creation_input_tokens ?? ephemeral_1h
+ * + ephemeral_5m`), so the two always agree. Measured over ~109k turns from
+ * 18 CLI versions (2.1.235 → 2.1.277): both shapes present in every single
+ * one, flat exactly equal to the sum of the nested pair, zero exceptions.
+ * So this total does not under-count cache writes — the split below exists
+ * to PRICE them, not to find tokens this sum misses.
  */
 function sumUsageTokens(usage: unknown): bigint {
     if (!usage || typeof usage !== 'object') return 0n
@@ -167,11 +176,16 @@ function sumUsageTokens(usage: unknown): bigint {
  * can do no better than scale that one number by one factor. Measured
  * against OpenRouter: a Haiku turn reported at $0.365 and billed at $0.0731.
  *
- * Cache writes arrive in two shapes depending on the Claude Code version:
- * the newer nested `cache_creation.{ephemeral_5m,ephemeral_1h}` split, or
- * the older flat `cache_creation_input_tokens`. Both travel — the control
- * prices the split exactly and the flat one at the 5-minute rate — and a
- * turn may legitimately carry both.
+ * Cache writes arrive in two shapes at once, not one or the other: the
+ * nested `cache_creation.{ephemeral_5m_input_tokens,ephemeral_1h_input_tokens}`
+ * split AND the flat `cache_creation_input_tokens`, which Claude Code
+ * backfills from the split when the API omits it. Measured over ~109k turns
+ * from 18 CLI versions (2.1.235 → 2.1.277): both present every time, flat
+ * always exactly the sum of the pair. So the split wins and the flat field
+ * stands down — sending both would charge the same write twice, and at
+ * 1.25x vs 2x input that is not a rounding difference. The flat fallback
+ * only fires for a version old enough not to send the split at all, where
+ * the control prices it at the 5-minute rate.
  */
 function splitUsageTokens(usage: unknown): AgentMetricsReport['usage_delta'] {
     const u = (usage && typeof usage === 'object' ? usage : {}) as Record<string, unknown>
@@ -186,12 +200,12 @@ function splitUsageTokens(usage: unknown): AgentMetricsReport['usage_delta'] {
         input: n(u.input_tokens),
         output: n(u.output_tokens),
         cache_read: n(u.cache_read_input_tokens),
-        cache_write_5m: n(creation.ephemeral_5m),
-        cache_write_1h: n(creation.ephemeral_1h),
+        cache_write_5m: n(creation.ephemeral_5m_input_tokens),
+        cache_write_1h: n(creation.ephemeral_1h_input_tokens),
         // Only when the nested split is absent: sending both would count
         // the same cache write twice.
         cache_write_flat:
-            creation.ephemeral_5m == null && creation.ephemeral_1h == null
+            creation.ephemeral_5m_input_tokens == null && creation.ephemeral_1h_input_tokens == null
                 ? n(u.cache_creation_input_tokens)
                 : 0,
     }
