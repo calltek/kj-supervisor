@@ -50,8 +50,18 @@ const ANTHROPIC_VERSION = '2023-06-01'
  */
 const MAX_BODY_BYTES = 32 * 1024
 
-/** How many model names are worth sending back from an Ollama. */
-const MAX_MODELS = 20
+/**
+ * How many model names are worth sending back from an Ollama.
+ *
+ * It is a size guard, not a display limit: the control decides «that model is
+ * not downloaded» by looking through this list, so a cap that cut it short
+ * would make the control tell someone to `ollama pull` 20 GB of a model they
+ * already have. Truncating the list IS a verdict — trimming it for display is
+ * the control's job, and it already does that. Whenever the cap bites, the
+ * count of what was actually there travels alongside so the control knows it
+ * did not see everything.
+ */
+const MAX_MODELS = 200
 
 export interface ConnectionTestHandlerDeps {
     logger: KJLogger
@@ -74,7 +84,14 @@ export class ConnectionTestHandler {
         check: ConnectionTestCheck
     }): Promise<ConnectionTestAck> {
         const { request_id, check } = payload
-        const timeout_ms = payload.timeout_ms > 0 ? payload.timeout_ms : 10_000
+        // ONE instant for the whole check, not a fresh budget per request.
+        // The Ollama path makes three calls in a row, so a per-request timeout
+        // let this handler spend 3 × `timeout_ms` against a control that only
+        // waits for 1.5 × — a live-but-slow Ollama (a big model loading makes
+        // `/api/show` and `/api/ps` crawl) blew past the control's own
+        // deadline, whose `catch` reads as «update your server». The customer
+        // would be told to fix a supervisor that is perfectly fine.
+        const deadline = Date.now() + (payload.timeout_ms > 0 ? payload.timeout_ms : 10_000)
 
         try {
             if (check.kind === 'anthropic_oauth') {
@@ -87,7 +104,7 @@ export class ConnectionTestHandler {
                             'anthropic-version': ANTHROPIC_VERSION,
                         },
                     },
-                    timeout_ms
+                    deadline
                 )
                 // Never the token, never the body — only what happened.
                 this.logger.info({ request_id, status: result.http_status }, 'subscription checked')
@@ -107,13 +124,13 @@ export class ConnectionTestHandler {
                         },
                         ...(check.body !== undefined ? { body: JSON.stringify(check.body) } : {}),
                     },
-                    timeout_ms
+                    deadline
                 )
                 this.logger.info({ request_id, status: result.http_status }, 'endpoint checked')
                 return { ok: true, result }
             }
 
-            const result = await this.ollama(check.base_url, check.model, timeout_ms)
+            const result = await this.ollama(check.base_url, check.model, deadline)
             this.logger.info(
                 { request_id, models: result.ollama?.models.length ?? 0 },
                 'engine checked'
@@ -123,7 +140,13 @@ export class ConnectionTestHandler {
             // A failure of OURS, not of the connection. The control turns this
             // into "the check could not be run", which sends whoever reads it
             // somewhere other than their own credential.
-            this.logger.error({ request_id, err: (err as Error)?.message }, 'check blew up')
+            //
+            // The NAME of the error, not its message: with `kind: 'http'` the
+            // headers are composed by the control and can carry the
+            // credential, and a message about an invalid header is exactly
+            // where one would surface in a log that nobody expects to hold
+            // secrets.
+            this.logger.error({ request_id, err: (err as Error)?.name }, 'check blew up')
             return {
                 ok: false,
                 error: {
@@ -136,40 +159,53 @@ export class ConnectionTestHandler {
     }
 
     /**
-     * One request, with a deadline, no redirects and a capped body.
+     * One request, against the shared deadline, no redirects, capped body.
      *
      * Never throws for a network failure: not reaching the address IS the
      * answer to the question being asked, so it comes back classified.
+     *
+     * The abort stays armed **until the body has been read**. Headers arriving
+     * fast says nothing about the body: an endpoint that dribbles it out — or
+     * simply holds the stream open, which model endpoints do all the time —
+     * would leave the read hanging forever, so the handler would never ack and
+     * the socket would stay open. The 32 KB cap protects the memory; only the
+     * deadline protects the time, and the argument for having it is the same:
+     * the address is written by whoever configures the connection.
      */
     private async request(
         url: string,
         init: RequestInit,
-        timeout_ms: number
+        deadline: number
     ): Promise<ConnectionTestResultPayload> {
+        const left = deadline - Date.now()
+        // The budget is already spent: calling anyway would overrun the
+        // control's own deadline, which reads as «update your server».
+        if (left <= 0) return { http_status: null, network_error: 'timeout' }
+
         const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), timeout_ms)
-        let res: Response
+        const timer = setTimeout(() => controller.abort(), left)
         try {
-            res = await this.fetchImpl(url, {
+            const res = await this.fetchImpl(url, {
                 ...init,
                 signal: controller.signal,
                 redirect: 'manual',
             })
+
+            if (res.status >= 300 && res.status < 400) {
+                // Where it points is NOT reported: the destination is chosen
+                // by the other side, and this supervisor sits inside the
+                // customer's network — echoing it back would be handing out a
+                // map of it.
+                await res.body?.cancel().catch(() => {})
+                return { http_status: res.status, redirected: true }
+            }
+
+            return { http_status: res.status, body: await readCapped(res) }
         } catch (err) {
             return { http_status: null, network_error: classifyNetworkError(err) }
         } finally {
             clearTimeout(timer)
         }
-
-        if (res.status >= 300 && res.status < 400) {
-            // Where it points is NOT reported: the destination is chosen by the
-            // other side, and this supervisor sits inside the customer's
-            // network — echoing it back would be handing out a map of it.
-            await res.body?.cancel().catch(() => {})
-            return { http_status: res.status, redirected: true }
-        }
-
-        return { http_status: res.status, body: await readCapped(res) }
     }
 
     /**
@@ -196,17 +232,22 @@ export class ConnectionTestHandler {
     private async ollama(
         base_url: string,
         model: string | null,
-        timeout_ms: number
+        deadline: number
     ): Promise<ConnectionTestResultPayload> {
         const base = base_url.replace(/\/+$/, '')
-        const tags = await this.request(`${base}/api/tags`, { method: 'GET' }, timeout_ms)
+        const tags = await this.request(`${base}/api/tags`, { method: 'GET' }, deadline)
         if (tags.network_error || tags.redirected) return tags
         if (tags.http_status !== 200) return tags
 
-        const ollama: OllamaProbeResult = { models: modelNames(tags.body) }
+        const { names, total } = modelNames(tags.body)
+        const ollama: OllamaProbeResult = { models: names }
+        // Only when the cap actually bit. Sending it always would be noise;
+        // sending it here is what stops the control from concluding «that
+        // model is not downloaded» out of a list it did not see whole.
+        if (total > names.length) ollama.models_total = total
         if (model) {
-            ollama.model_max_context = await this.modelMaxContext(base, model, timeout_ms)
-            ollama.served_context = await this.servedContext(base, model, timeout_ms)
+            ollama.model_max_context = await this.modelMaxContext(base, model, deadline)
+            ollama.served_context = await this.servedContext(base, model, deadline)
         }
         return { http_status: 200, ollama }
     }
@@ -215,7 +256,7 @@ export class ConnectionTestHandler {
     private async modelMaxContext(
         base: string,
         model: string,
-        timeout_ms: number
+        deadline: number
     ): Promise<number | undefined> {
         const show = await this.request(
             `${base}/api/show`,
@@ -224,7 +265,7 @@ export class ConnectionTestHandler {
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ model }),
             },
-            timeout_ms
+            deadline
         )
         if (show.http_status !== 200) return undefined
         const info = jsonOf(show.body)?.model_info as Record<string, unknown> | undefined
@@ -243,9 +284,9 @@ export class ConnectionTestHandler {
     private async servedContext(
         base: string,
         model: string,
-        timeout_ms: number
+        deadline: number
     ): Promise<number | undefined> {
-        const ps = await this.request(`${base}/api/ps`, { method: 'GET' }, timeout_ms)
+        const ps = await this.request(`${base}/api/ps`, { method: 'GET' }, deadline)
         if (ps.http_status !== 200) return undefined
         const running = jsonOf(ps.body)?.models
         if (!Array.isArray(running)) return undefined
@@ -289,8 +330,13 @@ async function readCapped(res: Response): Promise<string> {
             const { done, value } = await reader.read()
             if (done) break
             if (!value) continue
-            chunks.push(value)
-            size += value.byteLength
+            // Trimmed as it arrives, not at the end: checking before reading
+            // meant the buffer could hold 32 KB plus a whole last chunk, and a
+            // chunk is whatever the other side decided to send.
+            const room = MAX_BODY_BYTES - size
+            const piece = value.byteLength > room ? value.subarray(0, room) : value
+            chunks.push(piece)
+            size += piece.byteLength
         }
     } catch {
         // A cut halfway does not invalidate what was already read.
@@ -303,7 +349,7 @@ async function readCapped(res: Response): Promise<string> {
         joined.set(chunk, at)
         at += chunk.byteLength
     }
-    return new TextDecoder('utf-8', { fatal: false }).decode(joined.slice(0, MAX_BODY_BYTES))
+    return new TextDecoder('utf-8', { fatal: false }).decode(joined)
 }
 
 /** The body as JSON, or undefined. */
@@ -317,12 +363,18 @@ function jsonOf(body: string | undefined): Record<string, any> | undefined {
     }
 }
 
-/** The model names in an `/api/tags` body. */
-function modelNames(body: string | undefined): string[] {
+/**
+ * The model names in an `/api/tags` body, and how many there were.
+ *
+ * The count is the point: the control looks through this list to decide «that
+ * model is not downloaded», so it has to be able to tell a short list from a
+ * shortened one.
+ */
+function modelNames(body: string | undefined): { names: string[]; total: number } {
     const models = jsonOf(body)?.models
-    if (!Array.isArray(models)) return []
-    return models
+    if (!Array.isArray(models)) return { names: [], total: 0 }
+    const all = models
         .map((m: any) => (typeof m?.name === 'string' ? m.name : m?.model))
         .filter((n: unknown): n is string => typeof n === 'string')
-        .slice(0, MAX_MODELS)
+    return { names: all.slice(0, MAX_MODELS), total: all.length }
 }

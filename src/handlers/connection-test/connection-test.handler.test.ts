@@ -206,3 +206,133 @@ describe('un Ollama', () => {
         expect(ack.result.ollama?.served_context).toBeUndefined()
     })
 })
+
+describe('lo que la revisión de #45 dejó claro', () => {
+    test('una lista recortada viaja con su cuenta, para no hacer de veredicto', async () => {
+        // El control decide «ese modelo no está descargado» mirando esta
+        // lista. Recortarla sin decirlo mandaría a hacer un pull de 20 GB de
+        // algo que ya está ahí.
+        const muchos = Array.from({ length: 250 }, (_, i) => ({ name: `modelo-${i}:latest` }))
+        const { impl } = stub({ '/api/tags': () => Response.json({ models: muchos }) })
+        const ack = await run({ kind: 'ollama', base_url: 'http://x:11434', model: null }, impl)
+        if (!ack.ok) throw new Error('debería haber contestado')
+        expect(ack.result.ollama?.models).toHaveLength(200)
+        expect(ack.result.ollama?.models_total).toBe(250)
+    })
+
+    test('una lista que cabe entera no lleva cuenta: sería ruido', async () => {
+        const { impl } = stub({
+            '/api/tags': () => Response.json({ models: [{ name: 'qwen3-coder:30b' }] }),
+        })
+        const ack = await run({ kind: 'ollama', base_url: 'http://x:11434', model: null }, impl)
+        if (!ack.ok) throw new Error('debería haber contestado')
+        expect(ack.result.ollama?.models_total).toBeUndefined()
+    })
+
+    test('el plazo es de la COMPROBACIÓN, no de cada petición', async () => {
+        // El camino de Ollama hace tres llamadas seguidas. Con un plazo por
+        // petición se gastaba el triple de lo que el control espera, y el
+        // cliente leía «actualiza tu servidor» teniendo un Ollama lento.
+        const plazos: number[] = []
+        const impl = (async (_url: unknown, init?: RequestInit) => {
+            const signal = init?.signal as AbortSignal & { reason?: unknown }
+            plazos.push(Date.now())
+            // Que el AbortSignal existe y cada llamada hereda lo que queda se
+            // comprueba por el efecto: la tercera ya no tiene presupuesto.
+            expect(signal).toBeDefined()
+            await new Promise((r) => setTimeout(r, 12))
+            return Response.json({ models: [{ name: 'm' }] })
+        }) as unknown as typeof fetch
+
+        const handler = new ConnectionTestHandler({ logger: fakeLogger, fetchImpl: impl })
+        const ack = await handler.handle({
+            request_id: 'r1',
+            timeout_ms: 20,
+            check: { kind: 'ollama', base_url: 'http://x:11434', model: 'm' },
+        })
+        if (!ack.ok) throw new Error('debería haber contestado')
+        // `/api/tags` contesta; para cuando le toca a `/api/ps` el presupuesto
+        // se agotó, así que ni se llama. Lo que NO pasa es gastar 3 × 20 ms.
+        expect(plazos.length).toBeLessThan(3)
+        expect(ack.result.ollama?.served_context).toBeUndefined()
+    })
+
+    test('el cuerpo se lee con el plazo puesto, no después de desarmarlo', async () => {
+        // Un endpoint que manda las cabeceras rápido y luego el cuerpo a
+        // goteo dejaba el `read()` colgado para siempre: el handler no ackeaba
+        // nunca y el socket se quedaba abierto.
+        const impl = (async (_url: unknown, init?: RequestInit) => {
+            const signal = init?.signal as AbortSignal
+            return new Response(
+                new ReadableStream({
+                    start(controller) {
+                        controller.enqueue(new TextEncoder().encode('{'))
+                        // Nunca cierra. Sólo el abort puede sacarlo de aquí.
+                        signal?.addEventListener('abort', () =>
+                            controller.error(new Error('aborted'))
+                        )
+                    },
+                }),
+                { status: 200 }
+            )
+        }) as unknown as typeof fetch
+
+        const handler = new ConnectionTestHandler({ logger: fakeLogger, fetchImpl: impl })
+        const ack = await handler.handle({
+            request_id: 'r1',
+            timeout_ms: 30,
+            check: { kind: 'http', url: 'http://x/v1/models' },
+        })
+        // Lo que se comprueba es que CONTESTA: sin el arreglo, esto no
+        // terminaría y el test se quedaría colgado hasta el tope de la suite.
+        expect(ack.ok).toBe(true)
+    })
+
+    test('el tope del cuerpo no se pasa por el tamaño del último trozo', async () => {
+        const gordo = new Uint8Array(100 * 1024).fill(65)
+        const impl = (async () => new Response(gordo, { status: 200 })) as unknown as typeof fetch
+        const ack = await run({ kind: 'http', url: 'http://x/v1/models' }, impl)
+        if (!ack.ok) throw new Error('debería haber contestado')
+        expect((ack.result.body ?? '').length).toBe(32 * 1024)
+    })
+
+    test('lo que se loguea de un fallo propio es el NOMBRE, no el mensaje', async () => {
+        // Con `kind: 'http'` las cabeceras las compone el control y pueden
+        // llevar la credencial; un error de undici sobre una cabecera mala es
+        // por donde eso asomaría.
+        const visto: unknown[] = []
+        const logger = {
+            child: () => logger,
+            info: () => {},
+            warn: () => {},
+            error: (...args: unknown[]) => visto.push(args),
+        } as unknown as KJLogger
+        // Un fallo de RED se clasifica y nunca llega al `catch` general, así
+        // que para ejercitar esa línea hace falta un fallo propio. El que se
+        // usa lleva el secreto en el mensaje, que es lo que se comprueba que
+        // no se escribe.
+        const explosivo = {
+            kind: 'ollama',
+            model: 'm',
+            get base_url(): string {
+                throw new Error('invalid header x-api-key: clave-secreta')
+            },
+        }
+
+        const handler = new ConnectionTestHandler({
+            logger,
+            fetchImpl: (async () => new Response('{}')) as unknown as typeof fetch,
+        })
+        const ack = await handler.handle({
+            request_id: 'r1',
+            timeout_ms: 100,
+            check: explosivo as never,
+        })
+
+        expect(ack.ok).toBe(false)
+        expect(visto).toHaveLength(1)
+        expect(JSON.stringify(visto)).not.toContain('clave-secreta')
+        // Y sí se dice QUÉ pasó, que es para lo que sirve el registro.
+        expect(JSON.stringify(visto)).toContain('Error')
+    })
+})
