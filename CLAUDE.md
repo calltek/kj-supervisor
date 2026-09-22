@@ -631,6 +631,25 @@ las dos cosas dice nada malo de la conexión.
 `protocol.ts` se descarga de producción (§5). Detalle en kj-backend §6
 (2026-09-22).
 
+### Un proveedor de modelo por conversación: el supervisor sólo lo deja pasar (2026-09-22)
+
+Dos conversaciones del mismo contenedor pueden correr contra proveedores
+distintos. El control manda en cada `agent:input` un `session_env`
+(`Record<string, string | null>`, `null` = quitar la variable) y el wrapper se
+lo aplica al proceso de ESA conversación. Aquí no se interpreta: va al sobre del
+stdin tal cual, y sólo se omite cuando no viene (un `{}` también viaja).
+
+- **Lleva claves de API, así que no toca un log.** El handler sólo loguea ids, y
+  `REDACT_PATHS` (`logger.ts`) tapa `session_env` como red para el día que
+  alguien vuelque un payload entero. Un test entrega un turno, lo hace fallar al
+  escribir y comprueba que la clave no sale en ninguna línea.
+- **`agent:metrics` lleva `conversation_id`** cuando la sesión está mapeada (la
+  misma clave que `agent:output`): el control tarifa cada turno con lo que cobra
+  el proveedor que lo sirvió, y sin esto no sabría cuál fue.
+- **Compila sin esperar al backend**, a diferencia de los dos anteriores: los
+  dos campos se leen con tipos locales (`stream-manager.ts`) hasta que lleguen
+  con el `protocol.ts`, y entonces se quitan.
+
 ---
 
 ## 9. Hoja de ruta

@@ -8,7 +8,16 @@ import pino from 'pino'
 
 import type { KJLogLevel } from './config/settings'
 
-const REDACT_PATHS = ['auth.agent_token', 'agent_token', '*.agent_token']
+// `session_env` is the env a conversation's model provider runs with, API keys
+// included (agent:input). Nothing logs it today; this is the backstop for the
+// day someone logs a payload whole.
+export const REDACT_PATHS = [
+    'auth.agent_token',
+    'agent_token',
+    '*.agent_token',
+    'session_env',
+    '*.session_env',
+]
 
 type LogMethod = (objOrMsg: unknown, msg?: string) => void
 

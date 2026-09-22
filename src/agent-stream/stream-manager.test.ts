@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { PassThrough } from 'node:stream'
 
+import { AgentInputHandler } from '../handlers/agent-input/agent-input.handler'
 import { McpDispatcher } from './mcp-dispatcher'
 import { AgentStreamManager } from './stream-manager'
 
@@ -381,5 +382,202 @@ describe('AgentStreamManager: generación de credenciales (#529)', () => {
     test('una variable con basura se ignora, no se manda un NaN', async () => {
         const salida = await avisoDeUnContenedorCon(['KJ_CREDENTIALS_EPOCH=ayer'])
         expect(salida && 'credentials_epoch' in salida).toBe(false)
+    })
+})
+
+/**
+ * Proveedor de modelo por conversación: el control manda en el turno el entorno
+ * con el que corre ESA conversación (dirección, clave, modelos) y el wrapper se
+ * lo aplica sólo a su proceso. Aquí no se interpreta nada: tiene que llegar al
+ * contenedor tal cual, y a ningún otro sitio — lleva claves de API.
+ */
+describe('el turno lleva el entorno de la conversación al contenedor', () => {
+    const PISTA = 'zzzz-no-debe-salir-zzzz'
+
+    test('llega tal cual, con los null que quitan una variable', async () => {
+        const { manager, written } = await attached()
+        const session_env = {
+            ANTHROPIC_BASE_URL: 'https://proveedor.example/api',
+            ANTHROPIC_AUTH_TOKEN: PISTA,
+            CLAUDE_CODE_OAUTH_TOKEN: null,
+        }
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+            session_env,
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.session_env).toEqual(session_env)
+    })
+
+    test('uno vacío también viaja: sólo se omite lo que no viene', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+            session_env: {},
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.session_env).toEqual({})
+    })
+
+    test('sin entorno en el turno, la clave no viaja (la conversación usa el del contenedor)', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect('session_env' in envelope).toBe(false)
+    })
+
+    test('no sale en ningún log, ni al entregarse ni al fallar', async () => {
+        const logged: string[] = []
+        const record =
+            (level: string) =>
+            (obj: unknown, msg?: string): void => {
+                logged.push(`${level} ${JSON.stringify(obj)} ${msg ?? ''}`)
+            }
+        const capture = {
+            info: record('info'),
+            warn: record('warn'),
+            error: record('error'),
+            debug: record('debug'),
+            fatal: record('fatal'),
+            trace: record('trace'),
+            child: (bindings: unknown) => {
+                logged.push(`child ${JSON.stringify(bindings)}`)
+                return capture
+            },
+        }
+        const logger = capture as unknown as typeof silentLogger
+
+        // Un stdin que revienta al escribir: el camino del fallo es el que
+        // loguea, así que es el que más fácil se llevaría el turno entero.
+        let roto = false
+        const stream = new PassThrough()
+        const write = stream.write.bind(stream)
+        stream.write = ((...args: Parameters<typeof stream.write>) => {
+            if (roto) throw new Error('EPIPE')
+            return write(...args)
+        }) as typeof stream.write
+        const manager = new AgentStreamManager({
+            docker: { attachContainer: async () => stream, demuxAttachStream: () => {} } as never,
+            client: new FakeClient(),
+            logger,
+        })
+        await manager.attach({ agent_id: 1, container_id: 'c1', session_id: 's1' })
+        const handler = new AgentInputHandler({ streams: manager, logger })
+        const turno = {
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+            session_env: { ANTHROPIC_AUTH_TOKEN: PISTA },
+        } as never
+
+        expect(handler.handle(turno).ok).toBe(true)
+        roto = true
+        expect(handler.handle(turno).ok).toBe(false)
+        manager.detach(1)
+        expect(handler.handle(turno).ok).toBe(false)
+
+        // Que se haya logueado algo: si no, el test pasaría sin mirar nada.
+        expect(logged.some((l) => l.includes('agent:input delivered'))).toBe(true)
+        expect(logged.some((l) => l.includes('failed to write to agent stdin'))).toBe(true)
+        expect(logged.join('\n')).not.toContain(PISTA)
+    })
+})
+
+/**
+ * Con un proveedor por conversación, el control tarifa cada turno con lo que
+ * cobra el proveedor que lo sirvió, así que el `agent:metrics` del turno tiene
+ * que decir de qué conversación es. La misma clave que ya lleva `agent:output`.
+ */
+describe('agent:metrics dice de qué conversación es el turno', () => {
+    async function metricasDe(
+        linea: Record<string, unknown>
+    ): Promise<Record<string, unknown> | undefined> {
+        const duplex = new PassThrough()
+        const pushed: Array<{ event: string; payload: Record<string, unknown> }> = []
+        const manager = new AgentStreamManager({
+            docker: {
+                attachContainer: async () => duplex,
+                demuxAttachStream: (s: NodeJS.ReadWriteStream, stdout: NodeJS.WritableStream) => {
+                    s.pipe(stdout)
+                },
+                inspect: async () => ({ Config: { Env: [] } }),
+            } as never,
+            client: {
+                push(event: string, payload: unknown) {
+                    pushed.push({ event, payload: payload as Record<string, unknown> })
+                },
+            },
+            logger: silentLogger,
+        })
+        await manager.attach({
+            agent_id: 7,
+            container_id: 'c1',
+            session_id: 'agent-default',
+            conversations: [{ session_id: 'sess-a', conversation_id: 148 }],
+        })
+        // Una conversación que el control da a conocer con el turno, no al
+        // engancharse: el mapa se llena por los dos lados. El turno sale por el
+        // mismo duplex, así que se vacía antes de meter la línea del agente.
+        manager.write({
+            request_id: 'r1',
+            agent_id: 7,
+            message: 'hola',
+            conversation_id: 149,
+            conversation_session_id: 'sess-b',
+        })
+        await new Promise((r) => setTimeout(r, 20))
+        pushed.length = 0
+
+        duplex.write(`${JSON.stringify(linea)}\n`)
+        await new Promise((r) => setTimeout(r, 20))
+
+        return pushed.find((p) => p.event === 'agent:metrics')?.payload
+    }
+
+    const RESULT = {
+        type: 'result',
+        usage: { input_tokens: 100, output_tokens: 20 },
+        total_cost_usd: 0.01,
+    }
+
+    test('una conversación sembrada al engancharse', async () => {
+        const m = await metricasDe({ conversation_session_id: 'sess-a', event: RESULT })
+        expect(m?.conversation_id).toBe(148)
+        expect(m?.tokens_delta).toBe('120')
+    })
+
+    test('una conversación que llegó con el turno', async () => {
+        const m = await metricasDe({ conversation_session_id: 'sess-b', event: RESULT })
+        expect(m?.conversation_id).toBe(149)
+    })
+
+    test('una sesión que no conocemos no se inventa conversación', async () => {
+        const m = await metricasDe({ conversation_session_id: 'sess-x', event: RESULT })
+        expect(m).toBeDefined()
+        expect(m && 'conversation_id' in m).toBe(false)
+    })
+
+    test('un evento sin sobre (imagen vieja) tampoco', async () => {
+        const m = await metricasDe(RESULT)
+        expect(m).toBeDefined()
+        expect(m && 'conversation_id' in m).toBe(false)
     })
 })
