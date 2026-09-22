@@ -594,6 +594,43 @@ mismo que tarifar cada componente.
   `protocol.ts` se descarga de producción (§5). Detalle en kj-backend §6
   (2026-09-21).
 
+### Probar una conexión: el supervisor mira, el control decide (2026-09-22)
+
+`connection:test` comprueba desde la máquina del cliente lo que el control no
+puede comprobar desde la suya. Son los tres casos de §6 del backend
+(2026-09-21) que contestaban «esto no se comprueba desde Kujira»: **una
+suscripción de Claude** (su token sólo se usa desde aquí, como el canje y la
+revocación), **un motor local** cuya dirección puede ser una LAN, y **cualquier
+conexión declarada privada**. El más común de los tres es la suscripción, y un
+botón cuya única respuesta posible es que no puede responder no es un botón.
+
+Tres cosas que no se leen en el handler:
+
+- **Reporta, no juzga.** Devuelve el código, el cuerpo y las cifras de un
+  Ollama; el código que lee una persona lo compone el control, con el mismo
+  catálogo que usa para lo que prueba él. Si los dos lados clasificaran, la
+  misma conexión diría dos cosas distintas según por dónde se comprobó.
+- **La dirección de Anthropic va fija aquí**, no en el payload. Mandarla desde
+  el control dejaría que una fila de la base decidiera a dónde va el token del
+  cliente.
+- **No se sigue una redirección** (`redirect: 'manual'`), y **a dónde apuntaba
+  no se dice**. Es la misma razón por la que el control tampoco las sigue
+  (§6 del backend, 2026-09-21), agravada: este supervisor está DENTRO de la red
+  del cliente, así que devolver el destino sería repartir un mapa de ella. El
+  cuerpo se lee con tope (32 KB) porque la dirección la escribe quien configura.
+
+De un Ollama se preguntan **tres** endpoints porque uno no contesta la pregunta
+que importa: `/api/tags` (qué hay descargado — sin esto, «el modelo no está» no
+se distingue de «el motor está caído»), `/api/show` (el máximo del MODELO) y
+`/api/ps` (lo que el servidor sirve de verdad). Sólo `/api/tags` decide si el
+motor contestó; los otros dos son mejor-esfuerzo — un Ollama viejo no reporta
+la ventana y un modelo que no está cargado no sale en `/api/ps`, y ninguna de
+las dos cosas dice nada malo de la conexión.
+
+**Este PR no compila hasta que el backend esté desplegado**, porque
+`protocol.ts` se descarga de producción (§5). Detalle en kj-backend §6
+(2026-09-22).
+
 ---
 
 ## 9. Hoja de ruta
