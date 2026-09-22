@@ -22,10 +22,31 @@ import { PassThrough } from 'node:stream'
 
 import type { KJDocker } from '../docker/client/client'
 import type { KJLogger } from '../logger'
-import type { AgentInputPayload, AgentInterruptPayload } from '../protocol'
+import type {
+    AgentInputPayload,
+    AgentInterruptPayload,
+    AgentMetricsReport,
+    AgentWarmupPayload,
+} from '../protocol'
 import { isMcpEnvelope, type McpDispatcher, type McpEnvelope } from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
+
+/**
+ * Model provider per conversation: the environment the wrapper applies to ONE
+ * conversation's claude process (endpoint, API key, model mapping…). A `null`
+ * value unsets that variable for the conversation.
+ *
+ * Local stand-ins until the control ships these fields: `protocol.ts` is pulled
+ * from PRODUCTION at build time (CLAUDE.md §5), so a type the backend hasn't
+ * deployed yet doesn't exist here, and naming it would turn CI red. Drop them
+ * for the protocol's own types once `session_env` (on `AgentInputPayload` and
+ * `AgentWarmupPayload`) and `AgentMetricsReport.conversation_id` arrive with it.
+ */
+type SessionEnv = Record<string, string | null>
+type AgentInputWithSessionEnv = AgentInputPayload & { session_env?: SessionEnv }
+type AgentWarmupWithSessionEnv = AgentWarmupPayload & { session_env?: SessionEnv }
+type AgentMetricsWithConversation = AgentMetricsReport & { conversation_id?: number }
 
 export interface AgentStreamClient {
     push(event: string, payload: unknown): void
@@ -381,6 +402,27 @@ export class AgentStreamManager {
         return ok ? { ok: true } : { ok: false, reason: 'write_failed' }
     }
 
+    /**
+     * Warm a conversation's session before a call starts (llamadas): the
+     * wrapper (re)spawns it with the model/effort — and, with a provider per
+     * conversation, the `session_env` — it must run with, so the recycle
+     * happens while the UI rings instead of mid-sentence. Pure passthrough,
+     * built field by field like the `agent:input` envelope; `session_env`
+     * carries API keys and goes to stdin only. Returns false when no stream
+     * exists (agent not attached locally).
+     */
+    warmup(payload: AgentWarmupPayload): boolean {
+        const session_env = (payload as AgentWarmupWithSessionEnv).session_env
+        return this.writeControl(payload.agent_id, {
+            type: 'warmup',
+            conversation_session_id: payload.conversation_session_id,
+            ...(payload.model ? { model: payload.model } : {}),
+            ...(payload.effort ? { effort: payload.effort } : {}),
+            // Same rule as agent:input: only skip when absent.
+            ...(session_env !== undefined ? { session_env } : {}),
+        })
+    }
+
     write(payload: AgentInputPayload): { ok: boolean; reason?: string } {
         const entry = this.streams.get(payload.agent_id)
         if (!entry) return { ok: false, reason: 'no_stream' }
@@ -444,6 +486,14 @@ export class AgentStreamManager {
         if (payload.stall_limit_ms !== undefined) envelope.stall_limit_ms = payload.stall_limit_ms
         if (payload.background_task_limit_ms !== undefined)
             envelope.background_task_limit_ms = payload.background_task_limit_ms
+        // Model provider per conversation: the wrapper applies this env to THIS
+        // conversation's claude process only, so two conversations of the same
+        // container can run against different providers. Pure passthrough, and
+        // it carries API keys: it goes to stdin and NOWHERE else — never into a
+        // log line (the handler logs ids only, and the logger redacts the key
+        // as a backstop). Only skip when absent, same rule as the limits above.
+        const session_env = (payload as AgentInputWithSessionEnv).session_env
+        if (session_env !== undefined) envelope.session_env = session_env
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
@@ -553,7 +603,15 @@ export class AgentStreamManager {
             this.client.push('agent:error', classified.error)
         }
         if (classified.metrics) {
-            this.client.push('agent:metrics', classified.metrics)
+            // With a provider per conversation the control prices each turn at
+            // the rates of the provider that SERVED it, so it needs to know
+            // which conversation the turn belongs to. Same routing key as
+            // agent:output; optional on the wire, an older control ignores it.
+            const metrics: AgentMetricsWithConversation =
+                conversation_id !== undefined
+                    ? { ...classified.metrics, conversation_id }
+                    : classified.metrics
+            this.client.push('agent:metrics', metrics)
         }
     }
 }
