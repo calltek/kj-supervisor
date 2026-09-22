@@ -491,13 +491,66 @@ describe('el turno lleva el entorno de la conversación al contenedor', () => {
         expect(handler.handle(turno).ok).toBe(true)
         roto = true
         expect(handler.handle(turno).ok).toBe(false)
+        // El warmup lleva el mismo entorno y falla por el otro camino de escritura.
+        expect(manager.warmup(turno)).toBe(false)
         manager.detach(1)
         expect(handler.handle(turno).ok).toBe(false)
 
         // Que se haya logueado algo: si no, el test pasaría sin mirar nada.
         expect(logged.some((l) => l.includes('agent:input delivered'))).toBe(true)
         expect(logged.some((l) => l.includes('failed to write to agent stdin'))).toBe(true)
+        expect(logged.some((l) => l.includes('failed to write control envelope'))).toBe(true)
         expect(logged.join('\n')).not.toContain(PISTA)
+    })
+})
+
+/**
+ * El warmup de una llamada prepara la sesión ANTES de que empiece: el wrapper
+ * la recicla con el modelo y el esfuerzo de la llamada mientras suena. Con un
+ * proveedor por conversación, el entorno tiene que viajar también aquí — si no,
+ * la sesión se calentaría contra el proveedor equivocado y el primer turno de la
+ * llamada tendría que reciclarla otra vez.
+ */
+describe('el warmup lleva el entorno de la conversación al contenedor', () => {
+    test('llega tal cual, junto al modelo y el esfuerzo', async () => {
+        const { manager, written } = await attached()
+        const session_env = { ANTHROPIC_BASE_URL: 'https://proveedor.example/api', X: null }
+
+        const ok = manager.warmup({
+            request_id: 'r1',
+            agent_id: 1,
+            conversation_session_id: 's1',
+            model: 'claude-haiku-4-5',
+            effort: 'low',
+            session_env,
+        } as never)
+
+        expect(ok).toBe(true)
+        expect(JSON.parse(written().join('').trim())).toEqual({
+            type: 'warmup',
+            conversation_session_id: 's1',
+            model: 'claude-haiku-4-5',
+            effort: 'low',
+            session_env,
+        })
+    })
+
+    test('sin entorno, el sobre es el de siempre', async () => {
+        const { manager, written } = await attached()
+
+        manager.warmup({ request_id: 'r1', agent_id: 1, conversation_session_id: 's1' })
+
+        expect(JSON.parse(written().join('').trim())).toEqual({
+            type: 'warmup',
+            conversation_session_id: 's1',
+        })
+    })
+
+    test('sin agente enganchado no se entrega', () => {
+        const m = makeManager()
+        expect(m.warmup({ request_id: 'r1', agent_id: 99, conversation_session_id: 's1' })).toBe(
+            false
+        )
     })
 })
 

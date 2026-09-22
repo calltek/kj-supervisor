@@ -637,7 +637,10 @@ Dos conversaciones del mismo contenedor pueden correr contra proveedores
 distintos. El control manda en cada `agent:input` un `session_env`
 (`Record<string, string | null>`, `null` = quitar la variable) y el wrapper se
 lo aplica al proceso de ESA conversación. Aquí no se interpreta: va al sobre del
-stdin tal cual, y sólo se omite cuando no viene (un `{}` también viaja).
+stdin tal cual, y sólo se omite cuando no viene (un `{}` también viaja). **Y
+también en el `agent:warmup`** de las llamadas (`streams.warmup`): si no, la
+sesión se calentaría contra el proveedor equivocado y el primer turno de la
+llamada tendría que reciclarla otra vez.
 
 - **Lleva claves de API, así que no toca un log.** El handler sólo loguea ids, y
   `REDACT_PATHS` (`logger.ts`) tapa `session_env` como red para el día que

@@ -22,7 +22,12 @@ import { PassThrough } from 'node:stream'
 
 import type { KJDocker } from '../docker/client/client'
 import type { KJLogger } from '../logger'
-import type { AgentInputPayload, AgentInterruptPayload, AgentMetricsReport } from '../protocol'
+import type {
+    AgentInputPayload,
+    AgentInterruptPayload,
+    AgentMetricsReport,
+    AgentWarmupPayload,
+} from '../protocol'
 import { isMcpEnvelope, type McpDispatcher, type McpEnvelope } from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
@@ -35,12 +40,12 @@ import { NDJSONStreamParser } from './stream-parser'
  * Local stand-ins until the control ships these fields: `protocol.ts` is pulled
  * from PRODUCTION at build time (CLAUDE.md §5), so a type the backend hasn't
  * deployed yet doesn't exist here, and naming it would turn CI red. Drop them
- * for the protocol's own types once `AgentInputPayload.session_env` and
- * `AgentMetricsReport.conversation_id` arrive with it.
+ * for the protocol's own types once `session_env` (on `AgentInputPayload` and
+ * `AgentWarmupPayload`) and `AgentMetricsReport.conversation_id` arrive with it.
  */
-type AgentInputWithSessionEnv = AgentInputPayload & {
-    session_env?: Record<string, string | null>
-}
+type SessionEnv = Record<string, string | null>
+type AgentInputWithSessionEnv = AgentInputPayload & { session_env?: SessionEnv }
+type AgentWarmupWithSessionEnv = AgentWarmupPayload & { session_env?: SessionEnv }
 type AgentMetricsWithConversation = AgentMetricsReport & { conversation_id?: number }
 
 export interface AgentStreamClient {
@@ -395,6 +400,27 @@ export class AgentStreamManager {
             payload.conversation_session_id ?? entry.last_active_session_id ?? entry.session_id
         const ok = this.writeControl(payload.agent_id, { type: 'interrupt', session_id })
         return ok ? { ok: true } : { ok: false, reason: 'write_failed' }
+    }
+
+    /**
+     * Warm a conversation's session before a call starts (llamadas): the
+     * wrapper (re)spawns it with the model/effort — and, with a provider per
+     * conversation, the `session_env` — it must run with, so the recycle
+     * happens while the UI rings instead of mid-sentence. Pure passthrough,
+     * built field by field like the `agent:input` envelope; `session_env`
+     * carries API keys and goes to stdin only. Returns false when no stream
+     * exists (agent not attached locally).
+     */
+    warmup(payload: AgentWarmupPayload): boolean {
+        const session_env = (payload as AgentWarmupWithSessionEnv).session_env
+        return this.writeControl(payload.agent_id, {
+            type: 'warmup',
+            conversation_session_id: payload.conversation_session_id,
+            ...(payload.model ? { model: payload.model } : {}),
+            ...(payload.effort ? { effort: payload.effort } : {}),
+            // Same rule as agent:input: only skip when absent.
+            ...(session_env !== undefined ? { session_env } : {}),
+        })
     }
 
     write(payload: AgentInputPayload): { ok: boolean; reason?: string } {

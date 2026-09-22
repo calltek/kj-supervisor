@@ -389,14 +389,11 @@ async function main(): Promise<void> {
     // costs a session recycle — happens while the UI rings and the mic is shut,
     // instead of as silence in the middle of the caller's first sentence. Pure
     // passthrough: the wrapper decides whether it needs to respawn, and reports
-    // back when it's ready.
+    // back when it's ready. The envelope is built in `streams.warmup` — it may
+    // carry the conversation's `session_env` (API keys), so the log line below
+    // names ids only and must stay that way.
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
-        const delivered = streams.writeControl(payload.agent_id, {
-            type: 'warmup',
-            conversation_session_id: payload.conversation_session_id,
-            ...(payload.model ? { model: payload.model } : {}),
-            ...(payload.effort ? { effort: payload.effort } : {}),
-        })
+        const delivered = streams.warmup(payload)
         logger
             .child({ agent_id: payload.agent_id, component: 'warmup' })
             .info(
