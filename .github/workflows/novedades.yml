@@ -7,9 +7,9 @@
 #
 # Pasa si el cuerpo del PR tiene `## Novedades` con algo escrito (los
 # comentarios HTML no cuentan: la plantilla se explica en uno; tampoco la firma
-# de la herramienta, un `Closes #123` ni una regla `---`, que suelen quedar
-# debajo de la sección y no son texto de cliente), o si lleva la etiqueta
-# `sin-novedades` (refactor, CI, docs, tests…). El PR de release
+# de la herramienta, un `Closes #123`, una regla `---` ni un marcador
+# `sin-novedades` escrito como texto, que no son texto de cliente), o si lleva
+# la etiqueta `sin-novedades` (refactor, CI, docs, tests…). El PR de release
 # (`release/next`) no se mira: su cuerpo ya ES el changelog.
 #
 # Este fichero es idéntico en kj-app, kj-backend, kj-supervisor y
@@ -43,6 +43,7 @@ jobs:
                           $s = $1;
                           $s =~ s/^(?:\xf0\x9f\xa4\x96|Generated with\b|Co-Authored-By:|(?:Close[sd]?|Fix(?:e[sd])?|Resolve[sd]?)[ \t]+#\d+).*$//gim;
                           $s =~ s/^[-*_]{3,}[ \t]*$//gm;
+                          $s =~ s/^[ \t]*[-*+][ \t]*sin[- ]novedades\.?[ \t]*$//gim;
                           $s =~ s/^\s+|\s+$//g; print $s;
                       }')
                   if [ -z "$notes" ]; then
