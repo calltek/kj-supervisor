@@ -7,13 +7,13 @@
 *                        @n0v4-SYS
 
 # Superficie de seguridad -> Nova + SOKI
-/.github/                @n0v4-SYS @SOKY-SYS
-Dockerfile*              @n0v4-SYS @SOKY-SYS
-docker*.yml              @n0v4-SYS @SOKY-SYS
-.env.example             @n0v4-SYS @SOKY-SYS
-package.json             @n0v4-SYS @SOKY-SYS
-/src/client/auth/                                @n0v4-SYS @SOKY-SYS
-/src/oauth/                                      @n0v4-SYS @SOKY-SYS
-/src/handlers/oauth-exchange/                    @n0v4-SYS @SOKY-SYS
-/src/handlers/oauth-revoke/                      @n0v4-SYS @SOKY-SYS
-/src/docker/                                     @n0v4-SYS @SOKY-SYS
+/.github/                @n0v4-SYS @SOKY-SYS @50l3r
+Dockerfile*              @n0v4-SYS @SOKY-SYS @50l3r
+docker*.yml              @n0v4-SYS @SOKY-SYS @50l3r
+.env.example             @n0v4-SYS @SOKY-SYS @50l3r
+package.json             @n0v4-SYS @SOKY-SYS @50l3r
+/src/client/auth/                                @n0v4-SYS @SOKY-SYS @50l3r
+/src/oauth/                                      @n0v4-SYS @SOKY-SYS @50l3r
+/src/handlers/oauth-exchange/                    @n0v4-SYS @SOKY-SYS @50l3r
+/src/handlers/oauth-revoke/                      @n0v4-SYS @SOKY-SYS @50l3r
+/src/docker/                                     @n0v4-SYS @SOKY-SYS @50l3r
