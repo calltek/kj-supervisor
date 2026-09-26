@@ -46,6 +46,16 @@ describe('oauth:exchange', () => {
         expect(ack).toEqual({ ok: true, access_token: 'tok' })
     })
 
+    test('returns the account email when the token endpoint sends it', async () => {
+        stubTokenEndpoint({
+            access_token: 'tok',
+            expires_in: 31_536_000,
+            account: { email_address: 'ana@calltek.es' },
+        })
+        const ack = await new OAuthExchangeHandler({ logger: fakeLogger }).handle(payload)
+        expect(ack).toEqual({ ok: true, access_token: 'tok', account_email: 'ana@calltek.es' })
+    })
+
     test('refuses a token that dies in hours instead of storing it', async () => {
         // What the exchange returned before this fix: an 8 h access token that
         // took the connection down the next morning.

@@ -38,6 +38,9 @@ interface AnthropicTokenResponse {
     token_type?: string
     expires_in?: number
     scope?: string
+    // The account the code was authorised for. The token endpoint returns it
+    // next to the token (the CLI stores it as its own `oauthAccount`).
+    account?: { email_address?: string }
 }
 
 /**
@@ -251,13 +254,23 @@ export class OAuthExchangeHandler {
             }
         }
 
-        this.logger.info({ request_id, expires_in }, 'oauth exchange ok')
+        // The email goes back so the panel can tell two connections apart. Only
+        // whether it was there is logged: a missing one is the signal that the
+        // token endpoint does not send it and the flow needs `user:profile`.
+        const account_email = payload_response.account?.email_address
+        this.logger.info(
+            { request_id, expires_in, account_email_present: typeof account_email === 'string' },
+            'oauth exchange ok'
+        )
 
         // Scopes and the refresh token stay out of the logs — keep the surface
         // area small and anything secret out of structured log fields.
         return {
             ok: true,
             access_token: payload_response.access_token,
+            ...(typeof account_email === 'string' && account_email
+                ? { account_email: account_email.slice(0, 254) }
+                : {}),
         }
     }
 }
