@@ -93,7 +93,7 @@ Ver [CLAUDE.md §6](CLAUDE.md#6-estructura-del-repo-planeada).
 
 ## Licencia
 
-Propietario de [Calltek Systems S.L.](LICENSE). Este repositorio es
+Propietario de [CALLTEK NETWORK SL](LICENSE). Este repositorio es
 público para transparencia y revisión de código; el fichero
 [`LICENSE`](LICENSE) declara los términos (sin otorgamiento de
 licencia de uso, copia o distribución sin permiso escrito previo).
