@@ -336,3 +336,97 @@ describe('lo que la revisión de #45 dejó claro', () => {
         expect(JSON.stringify(visto)).toContain('Error')
     })
 })
+
+describe('los modelos de un Ollama, para el selector (`detail`)', () => {
+    const tags = () =>
+        Response.json({
+            models: [
+                { name: 'gpt-oss:20b', size: 13_000_000_000 },
+                { name: 'qwen2.5-coder:14b', size: 9_000_000_000 },
+                { name: 'lento:latest', size: 1 },
+            ],
+        })
+    const show = (init?: RequestInit) => {
+        const model = JSON.parse(String(init?.body ?? '{}')).model
+        if (model === 'gpt-oss:20b') {
+            return Response.json({
+                capabilities: ['completion', 'tools'],
+                model_info: { 'gptoss.context_length': 131072 },
+            })
+        }
+        if (model === 'qwen2.5-coder:14b') {
+            return Response.json({
+                capabilities: ['completion'],
+                model_info: { 'qwen2.context_length': 32768 },
+            })
+        }
+        return new Response('boom', { status: 500 })
+    }
+    /** Like `stub`, but the handler for /api/show sees the request. */
+    function stubShow() {
+        const calls: string[] = []
+        const impl = (async (url: unknown, init?: RequestInit) => {
+            const u = String(url)
+            calls.push(u)
+            if (u.includes('/api/tags')) return tags()
+            if (u.includes('/api/show')) return show(init)
+            return new Response('not stubbed', { status: 404 })
+        }) as unknown as typeof fetch
+        return { impl, calls }
+    }
+
+    test('cada modelo con su ventana, su tamaño y si usa herramientas', async () => {
+        const { impl } = stubShow()
+        const ack = await run(
+            { kind: 'ollama', base_url: 'http://x:11434', model: null, detail: true },
+            impl
+        )
+        if (!ack.ok) throw new Error('debería haber contestado')
+        expect(
+            (ack.result.ollama as { models_detail?: unknown } | undefined)?.models_detail
+        ).toEqual([
+            {
+                name: 'gpt-oss:20b',
+                size_bytes: 13_000_000_000,
+                context_length: 131072,
+                tools: true,
+            },
+            {
+                name: 'qwen2.5-coder:14b',
+                size_bytes: 9_000_000_000,
+                context_length: 32768,
+                tools: false,
+            },
+            // El que no contesta sigue en la lista, sin ventana: si faltara se
+            // leería como «no está descargado».
+            { name: 'lento:latest', size_bytes: 1 },
+        ])
+    })
+
+    test('sin `detail` no se pregunta por cada modelo: «Probar» sigue igual de barato', async () => {
+        const { impl, calls } = stubShow()
+        const ack = await run({ kind: 'ollama', base_url: 'http://x:11434', model: null }, impl)
+        if (!ack.ok) throw new Error('debería haber contestado')
+        expect(
+            (ack.result.ollama as { models_detail?: unknown } | undefined)?.models_detail
+        ).toBeUndefined()
+        expect(calls.filter((u) => u.includes('/api/show'))).toHaveLength(0)
+    })
+})
+
+describe('parseShow', () => {
+    test('lee la ventana y las herramientas aunque el cuerpo llegue cortado', async () => {
+        // Ollama pone la licencia y el Modelfile ANTES de `model_info`: un
+        // cuerpo cortado ya no es JSON, pero los números siguen ahí.
+        const { parseShow } = await import('./connection-test.handler')
+        const cortado = `{"license":"${'x'.repeat(50)}","model_info":{"llama.context_length":131072,"llama.embedding_length":4096},"capabilities":["completion","tools"],"tensors":[{"name":"blk.0`
+        expect(parseShow(cortado)).toEqual({ context_length: 131072, tools: true })
+    })
+
+    test('sin capabilities, las herramientas no se saben', async () => {
+        const { parseShow } = await import('./connection-test.handler')
+        expect(parseShow('{"model_info":{"qwen3.context_length":40960}}')).toEqual({
+            context_length: 40960,
+        })
+    })
+})
