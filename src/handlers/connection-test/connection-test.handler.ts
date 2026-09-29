@@ -33,6 +33,7 @@ import {
     type ConnectionTestAck,
     type ConnectionTestCheck,
     type ConnectionTestResultPayload,
+    type OllamaModelInfo,
     type OllamaProbeResult,
     WS_ERROR_CODES,
 } from '../../protocol'
@@ -62,6 +63,26 @@ const MAX_BODY_BYTES = 32 * 1024
  * did not see everything.
  */
 const MAX_MODELS = 200
+
+/**
+ * How many models get their details read when the control asks for them
+ * (`detail`, the connection form's model picker). One `/api/show` each, all
+ * against the same deadline, so this caps the work a single press can cause.
+ * A machine with more than this is not a machine anyone picks from a list.
+ */
+const MAX_DETAIL = 60
+
+/** How many `/api/show` run at once: enough to be quick, not a stampede. */
+const DETAIL_CONCURRENCY = 4
+
+/**
+ * How much of an `/api/show` body is read. Bigger than `MAX_BODY_BYTES` on
+ * purpose: Ollama puts the license and the whole Modelfile (which repeats the
+ * template and the license) BEFORE `model_info`, and a 32 KB cut lands in the
+ * middle of the license of half the catalogue — the window then reads as
+ * unknown for a model that does declare it.
+ */
+const MAX_SHOW_BYTES = 1024 * 1024
 
 export interface ConnectionTestHandlerDeps {
     logger: KJLogger
@@ -130,7 +151,12 @@ export class ConnectionTestHandler {
                 return { ok: true, result }
             }
 
-            const result = await this.ollama(check.base_url, check.model, deadline)
+            const result = await this.ollama(
+                check.base_url,
+                check.model,
+                deadline,
+                check.detail === true
+            )
             this.logger.info(
                 { request_id, models: result.ollama?.models.length ?? 0 },
                 'engine checked'
@@ -175,7 +201,8 @@ export class ConnectionTestHandler {
     private async request(
         url: string,
         init: RequestInit,
-        deadline: number
+        deadline: number,
+        max_bytes = MAX_BODY_BYTES
     ): Promise<ConnectionTestResultPayload> {
         const left = deadline - Date.now()
         // The budget is already spent: calling anyway would overrun the
@@ -200,7 +227,7 @@ export class ConnectionTestHandler {
                 return { http_status: res.status, redirected: true }
             }
 
-            return { http_status: res.status, body: await readCapped(res) }
+            return { http_status: res.status, body: await readCapped(res, max_bytes) }
         } catch (err) {
             return { http_status: null, network_error: classifyNetworkError(err) }
         } finally {
@@ -232,7 +259,8 @@ export class ConnectionTestHandler {
     private async ollama(
         base_url: string,
         model: string | null,
-        deadline: number
+        deadline: number,
+        detail = false
     ): Promise<ConnectionTestResultPayload> {
         const base = base_url.replace(/\/+$/, '')
         const tags = await this.request(`${base}/api/tags`, { method: 'GET' }, deadline)
@@ -245,19 +273,25 @@ export class ConnectionTestHandler {
         // sending it here is what stops the control from concluding «that
         // model is not downloaded» out of a list it did not see whole.
         if (total > names.length) ollama.models_total = total
+        if (detail) {
+            ollama.models_detail = await this.modelsDetail(base, tagEntries(tags.body), deadline)
+        }
         if (model) {
-            ollama.model_max_context = await this.modelMaxContext(base, model, deadline)
+            ollama.model_max_context = (await this.showInfo(base, model, deadline)).context_length
             ollama.served_context = await this.servedContext(base, model, deadline)
         }
         return { http_status: 200, ollama }
     }
 
-    /** The model's own maximum, from `/api/show`. Undefined if it cannot be read. */
-    private async modelMaxContext(
+    /**
+     * What `/api/show` says about a model: its own maximum window and whether
+     * it declares tool use. Either is undefined when it cannot be read.
+     */
+    private async showInfo(
         base: string,
         model: string,
         deadline: number
-    ): Promise<number | undefined> {
+    ): Promise<{ context_length?: number; tools?: boolean }> {
         const show = await this.request(
             `${base}/api/show`,
             {
@@ -265,19 +299,44 @@ export class ConnectionTestHandler {
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ model }),
             },
-            deadline
+            deadline,
+            MAX_SHOW_BYTES
         )
-        if (show.http_status !== 200) return undefined
-        const info = jsonOf(show.body)?.model_info as Record<string, unknown> | undefined
-        if (!info) return undefined
-        // The key is prefixed with the architecture (`qwen3.context_length`,
-        // `llama.context_length`), so it is found by its suffix rather than by
-        // guessing the family — a new architecture would silently read as
-        // "unknown" otherwise.
-        for (const [key, value] of Object.entries(info)) {
-            if (key.endsWith('.context_length') && typeof value === 'number') return value
+        if (show.http_status !== 200 || !show.body) return {}
+        return parseShow(show.body)
+    }
+
+    /**
+     * Each downloaded model with its window, for the connection form's picker.
+     *
+     * Best-effort per model: one that does not answer in time still comes back
+     * with its name and size, so the picker lists it as «window unknown»
+     * instead of leaving it out — missing would read as «not downloaded».
+     */
+    private async modelsDetail(
+        base: string,
+        entries: Array<{ name: string; size?: number }>,
+        deadline: number
+    ): Promise<OllamaModelInfo[]> {
+        const todo = entries.slice(0, MAX_DETAIL)
+        const out: OllamaModelInfo[] = todo.map((e) => ({
+            name: e.name,
+            ...(e.size !== undefined ? { size_bytes: e.size } : {}),
+        }))
+        let next = 0
+        const worker = async () => {
+            while (next < todo.length) {
+                const i = next++
+                const entry = todo[i]
+                const slot = out[i]
+                if (!entry || !slot) continue
+                const info = await this.showInfo(base, entry.name, deadline)
+                if (info.context_length !== undefined) slot.context_length = info.context_length
+                if (info.tools !== undefined) slot.tools = info.tools
+            }
         }
-        return undefined
+        await Promise.all(Array.from({ length: DETAIL_CONCURRENCY }, worker))
+        return out
     }
 
     /** What the server is serving for that model right now, from `/api/ps`. */
@@ -320,20 +379,20 @@ function classifyNetworkError(err: unknown): ConnectionTestResultPayload['networ
 }
 
 /** The body, up to the cap, without ever holding more than that. */
-async function readCapped(res: Response): Promise<string> {
+async function readCapped(res: Response, max_bytes = MAX_BODY_BYTES): Promise<string> {
     const reader = res.body?.getReader()
     if (!reader) return ''
     const chunks: Uint8Array[] = []
     let size = 0
     try {
-        while (size < MAX_BODY_BYTES) {
+        while (size < max_bytes) {
             const { done, value } = await reader.read()
             if (done) break
             if (!value) continue
             // Trimmed as it arrives, not at the end: checking before reading
             // meant the buffer could hold 32 KB plus a whole last chunk, and a
             // chunk is whatever the other side decided to send.
-            const room = MAX_BODY_BYTES - size
+            const room = max_bytes - size
             const piece = value.byteLength > room ? value.subarray(0, room) : value
             chunks.push(piece)
             size += piece.byteLength
@@ -377,4 +436,56 @@ function modelNames(body: string | undefined): { names: string[]; total: number 
         .map((m: any) => (typeof m?.name === 'string' ? m.name : m?.model))
         .filter((n: unknown): n is string => typeof n === 'string')
     return { names: all.slice(0, MAX_MODELS), total: all.length }
+}
+
+/**
+ * The models in an `/api/tags` body with their on-disk size, capped like
+ * `modelNames` and in the same order.
+ */
+function tagEntries(body: string | undefined): Array<{ name: string; size?: number }> {
+    const models = jsonOf(body)?.models
+    if (!Array.isArray(models)) return []
+    const out: Array<{ name: string; size?: number }> = []
+    for (const m of models as any[]) {
+        const name = typeof m?.name === 'string' ? m.name : m?.model
+        if (typeof name !== 'string') continue
+        out.push(typeof m?.size === 'number' ? { name, size: m.size } : { name })
+        if (out.length >= MAX_MODELS) break
+    }
+    return out
+}
+
+/**
+ * The window and the tool support out of an `/api/show` body.
+ *
+ * The window key is prefixed with the architecture (`qwen3.context_length`,
+ * `llama.context_length`), so it is found by its suffix rather than by
+ * guessing the family — a new architecture would silently read as «unknown»
+ * otherwise.
+ *
+ * And it survives a body cut short: if the cap bit (a model whose license is
+ * the size of a book), `JSON.parse` fails, but the numbers are still there in
+ * the text — reading them is better than reporting «unknown» for a model that
+ * declares them.
+ */
+export function parseShow(body: string): { context_length?: number; tools?: boolean } {
+    const json = jsonOf(body)
+    if (json) {
+        const out: { context_length?: number; tools?: boolean } = {}
+        const info = json.model_info as Record<string, unknown> | undefined
+        for (const [key, value] of Object.entries(info ?? {})) {
+            if (key.endsWith('.context_length') && typeof value === 'number') {
+                out.context_length = value
+                break
+            }
+        }
+        if (Array.isArray(json.capabilities)) out.tools = json.capabilities.includes('tools')
+        return out
+    }
+    const out: { context_length?: number; tools?: boolean } = {}
+    const ctx = body.match(/"[\w.-]+\.context_length"\s*:\s*(\d+)/)
+    if (ctx?.[1]) out.context_length = Number(ctx[1])
+    const caps = body.match(/"capabilities"\s*:\s*\[([^\]]*)\]/)
+    if (caps?.[1] !== undefined) out.tools = /"tools"/.test(caps[1])
+    return out
 }
