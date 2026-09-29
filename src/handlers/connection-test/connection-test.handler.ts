@@ -33,10 +33,31 @@ import {
     type ConnectionTestAck,
     type ConnectionTestCheck,
     type ConnectionTestResultPayload,
-    type OllamaModelInfo,
     type OllamaProbeResult,
     WS_ERROR_CODES,
 } from '../../protocol'
+
+/*
+ * `detail` and `models_detail` come from calltek/kj-backend#842. They are
+ * declared here, not imported, because the build pulls the protocol of the
+ * DEPLOYED control, and until that PR is live the fields do not exist there —
+ * the build would be red for something that is not a bug. Once it is, these
+ * are the same shapes as the protocol's and can be replaced by the import.
+ */
+
+/** One downloaded model, as the connection form's picker needs it. */
+interface OllamaModelInfo {
+    name: string
+    context_length?: number
+    size_bytes?: number
+    tools?: boolean
+}
+
+/** The Ollama check, with the `detail` flag the control may send. */
+type OllamaCheck = Extract<ConnectionTestCheck, { kind: 'ollama' }> & { detail?: boolean }
+
+/** What an Ollama reports, with the per-model details when asked for. */
+type OllamaProbe = OllamaProbeResult & { models_detail?: OllamaModelInfo[] }
 
 /** Where a Claude subscription is checked. Not configurable, like the CLI's ids. */
 const ANTHROPIC_MODELS_ENDPOINT = 'https://api.anthropic.com/v1/models?limit=1'
@@ -155,7 +176,7 @@ export class ConnectionTestHandler {
                 check.base_url,
                 check.model,
                 deadline,
-                check.detail === true
+                (check as OllamaCheck).detail === true
             )
             this.logger.info(
                 { request_id, models: result.ollama?.models.length ?? 0 },
@@ -268,7 +289,7 @@ export class ConnectionTestHandler {
         if (tags.http_status !== 200) return tags
 
         const { names, total } = modelNames(tags.body)
-        const ollama: OllamaProbeResult = { models: names }
+        const ollama: OllamaProbe = { models: names }
         // Only when the cap actually bit. Sending it always would be noise;
         // sending it here is what stops the control from concluding «that
         // model is not downloaded» out of a list it did not see whole.

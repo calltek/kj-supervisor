@@ -382,7 +382,9 @@ describe('los modelos de un Ollama, para el selector (`detail`)', () => {
             impl
         )
         if (!ack.ok) throw new Error('debería haber contestado')
-        expect(ack.result.ollama?.models_detail).toEqual([
+        expect(
+            (ack.result.ollama as { models_detail?: unknown } | undefined)?.models_detail
+        ).toEqual([
             {
                 name: 'gpt-oss:20b',
                 size_bytes: 13_000_000_000,
@@ -405,7 +407,9 @@ describe('los modelos de un Ollama, para el selector (`detail`)', () => {
         const { impl, calls } = stubShow()
         const ack = await run({ kind: 'ollama', base_url: 'http://x:11434', model: null }, impl)
         if (!ack.ok) throw new Error('debería haber contestado')
-        expect(ack.result.ollama?.models_detail).toBeUndefined()
+        expect(
+            (ack.result.ollama as { models_detail?: unknown } | undefined)?.models_detail
+        ).toBeUndefined()
         expect(calls.filter((u) => u.includes('/api/show'))).toHaveLength(0)
     })
 })
