@@ -14,7 +14,7 @@ export interface StatusClient {
 
 /** Told about every container that comes up RUNNING (see AgentImageReporter). */
 export interface RunningListener {
-    report(agent_id: number, container_id: string): void
+    report(agent_id: number, container_id: string, opts?: { force?: boolean }): void
 }
 
 export class AgentStatusReporter {

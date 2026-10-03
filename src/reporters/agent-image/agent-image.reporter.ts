@@ -59,9 +59,17 @@ export class AgentImageReporter {
         this.logger = logger.child({ component: 'agent-image' })
     }
 
-    /** Never throws and never blocks the caller: the read runs behind. */
-    report(agent_id: number, container_id: string): void {
-        if (this.reported.get(agent_id) === container_id) return
+    /**
+     * Never throws and never blocks the caller: the read runs behind.
+     *
+     * `force` skips the once-per-container memory. The `agent:sync` re-attach
+     * passes it: it follows every reconnect, and a reconnect is often a new
+     * control behind it — one that may never have kept what we sent before
+     * (it predated the event, or restarted mid-flight). Cheap: one sync per
+     * reconnect.
+     */
+    report(agent_id: number, container_id: string, opts: { force?: boolean } = {}): void {
+        if (!opts.force && this.reported.get(agent_id) === container_id) return
         this.reported.set(agent_id, container_id)
         void this.read(container_id)
             .then((build) => {
