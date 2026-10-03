@@ -12,13 +12,20 @@ export interface StatusClient {
     push(event: string, payload: unknown): void
 }
 
+/** Told about every container that comes up RUNNING (see AgentImageReporter). */
+export interface RunningListener {
+    report(agent_id: number, container_id: string): void
+}
+
 export class AgentStatusReporter {
     private readonly client: StatusClient
     private readonly logger: KJLogger
+    private readonly running?: RunningListener
 
-    constructor(client: StatusClient, logger: KJLogger) {
+    constructor(client: StatusClient, logger: KJLogger, running?: RunningListener) {
         this.client = client
         this.logger = logger.child({ component: 'agent-status' })
+        this.running = running
     }
 
     push(report: AgentStatusReport): void {
@@ -32,5 +39,10 @@ export class AgentStatusReporter {
             'agent:status push'
         )
         this.client.push('agent:status', report)
+        // After the status, never instead of it: the listener's work runs
+        // behind and must not hold this push back.
+        if (report.status === 'RUNNING' && report.container_id) {
+            this.running?.report(report.agent_id, report.container_id)
+        }
     }
 }

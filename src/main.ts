@@ -77,6 +77,7 @@ import {
     type AgentMetricsHandle,
     startAgentMetricsLoop,
 } from './reporters/agent-metrics/agent-metrics.reporter'
+import { AgentImageReporter } from './reporters/agent-image/agent-image.reporter'
 import { AgentStatusReporter } from './reporters/agent-status/agent-status.reporter'
 import { type HealthLoopHandle, startHealthLoop } from './reporters/health/health.reporter'
 import {
@@ -225,7 +226,8 @@ async function main(): Promise<void> {
     // connection state, so we don't rebuild them per reconnect.
     const docker = new KJDocker(logger)
     const tracker = new OperationTracker()
-    const statusReporter = new AgentStatusReporter(client, logger)
+    const imageReporter = new AgentImageReporter(client, docker, logger)
+    const statusReporter = new AgentStatusReporter(client, logger, imageReporter)
 
     // kj-mcp wiring: the dispatcher relays MCP traffic in both
     // directions. Stream manager and dispatcher reference each other
@@ -290,7 +292,7 @@ async function main(): Promise<void> {
     })
     const inputHandler = new AgentInputHandler({ streams, logger })
     const execHandler = new AgentExecHandler({ docker, logger })
-    const syncHandler = new AgentSyncHandler({ streams, logger })
+    const syncHandler = new AgentSyncHandler({ streams, logger, running: imageReporter })
     const backupHandler = new AgentBackupHandler({
         docker,
         status: statusReporter,

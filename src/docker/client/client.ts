@@ -334,6 +334,11 @@ export class KJDocker {
      * have in production (saves the registry round-trip on every
      * spawn after the first).
      */
+    /** `docker image inspect` — by id or by tag. */
+    async inspectImage(image: string): Promise<Docker.ImageInspectInfo> {
+        return this.docker.getImage(image).inspect()
+    }
+
     async imageExistsLocally(image_tag: string): Promise<boolean> {
         try {
             await this.docker.getImage(image_tag).inspect()
