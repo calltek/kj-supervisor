@@ -93,6 +93,16 @@ describe('AgentImageReporter', () => {
         ).toEqual(['c-new', 'c-local'])
     })
 
+    test('force reports again a container already reported (the re-attach after a reconnect)', async () => {
+        const client = new FakeClient()
+        const reporter = new AgentImageReporter(client, new FakeDocker(), silentLogger)
+        reporter.report(7, 'c-new')
+        await settle()
+        reporter.report(7, 'c-new', { force: true })
+        await settle()
+        expect(client.pushed).toHaveLength(2)
+    })
+
     test('a failed read pushes nothing and lets the next RUNNING retry', async () => {
         const client = new FakeClient()
         const docker = new FakeDocker()

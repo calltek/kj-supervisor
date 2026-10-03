@@ -94,6 +94,6 @@ export class AgentSyncHandler {
             session_id: entry.session_id,
             conversations: entry.conversations,
         })
-        this.running?.report(entry.agent_id, entry.container_id)
+        this.running?.report(entry.agent_id, entry.container_id, { force: true })
     }
 }
