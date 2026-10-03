@@ -17,7 +17,18 @@
  */
 
 import type { KJLogger } from '../../logger'
-import type { AgentImageReport } from '../../protocol'
+
+/**
+ * Local copy of `AgentImageReport` (kj-backend#873) until it ships in the
+ * `protocol.ts` pulled from production — then import it from there and
+ * drop this. Same move as `session_env` in stream-manager.ts.
+ */
+interface AgentImageReport {
+    agent_id: number
+    container_id: string
+    revision: string | null
+    built_at: string | null
+}
 
 const REVISION_LABEL = 'org.opencontainers.image.revision'
 const CREATED_LABEL = 'org.opencontainers.image.created'
