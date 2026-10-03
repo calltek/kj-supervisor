@@ -18,18 +18,27 @@
 import type { KJLogger } from '../../logger'
 import type { AgentSyncEntry, AgentSyncPayload, ControlCommandAck } from '../../protocol'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
+import type { RunningListener } from '../../reporters/agent-status/agent-status.reporter'
 
 export interface AgentSyncHandlerDeps {
     streams: AgentStreamManager
     logger: KJLogger
+    /**
+     * Told about every container re-attached here. These never go through a
+     * RUNNING status push (they were already running), so without this an
+     * agent that predates the image report would wait for its next recreate.
+     */
+    running?: RunningListener
 }
 
 export class AgentSyncHandler {
     private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
+    private readonly running?: RunningListener
 
     constructor(deps: AgentSyncHandlerDeps) {
         this.streams = deps.streams
+        this.running = deps.running
         this.logger = deps.logger.child({ component: 'agent-sync' })
     }
 
@@ -85,5 +94,6 @@ export class AgentSyncHandler {
             session_id: entry.session_id,
             conversations: entry.conversations,
         })
+        this.running?.report(entry.agent_id, entry.container_id)
     }
 }
