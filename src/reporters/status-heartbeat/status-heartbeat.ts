@@ -17,7 +17,7 @@
  */
 
 import type { AgentStatusReport } from '../../protocol'
-import type { AgentStatusReporter } from '../agent-status/agent-status.reporter'
+import type { AgentStatusPush, AgentStatusReporter } from '../agent-status/agent-status.reporter'
 
 export interface StatusHeartbeatOptions {
     reporter: AgentStatusReporter
@@ -74,7 +74,7 @@ export class StatusHeartbeat {
     }
 
     private push(): void {
-        const report: AgentStatusReport = {
+        const report: AgentStatusPush = {
             agent_id: this.agent_id,
             status: this.status,
             container_id: this.container_id,

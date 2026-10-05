@@ -278,6 +278,42 @@ describe('el turno lleva los límites de las tareas largas al contenedor', () =>
 })
 
 /**
+ * Una sesión bifurcada desde un mensaje: el contenedor necesita saber de qué
+ * sesión viene y hasta qué mensaje copiar su transcript. Si se quedara aquí,
+ * la sesión nueva arrancaría sin memoria y nadie lo notaría hasta preguntarle.
+ */
+describe('el turno de una sesión bifurcada lleva su origen al contenedor', () => {
+    test('fork_from llega tal cual', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'sigue por aquí',
+            conversation_session_id: 's2',
+            fork_from: { session_id: 's1', message_uuid: 'u-42' },
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.fork_from).toEqual({ session_id: 's1', message_uuid: 'u-42' })
+    })
+
+    test('sin bifurcación, la clave no viaja', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect('fork_from' in envelope).toBe(false)
+    })
+})
+
+/**
  * #529 — la generación de credenciales se lee DEL CONTENEDOR al engancharse.
  *
  * Es la pieza que le permite al control distinguir el contenedor que lleva las
