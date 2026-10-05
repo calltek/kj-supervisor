@@ -106,6 +106,7 @@ export class AgentSpawnHandler {
                 status: 'ERROR',
                 container_id: null,
                 last_action: errMessage(err),
+                last_action_code: 'spawn_failed',
                 last_action_at: Date.now(),
             })
         })
@@ -193,6 +194,7 @@ export class AgentSpawnHandler {
                         status: 'ERROR',
                         container_id: null,
                         last_action: `image pull failed: ${errMessage(err)}`,
+                        last_action_code: 'image_pull_failed',
                         last_action_at: Date.now(),
                     })
                     return
@@ -310,6 +312,7 @@ export class AgentSpawnHandler {
                     status: 'ERROR',
                     container_id: null,
                     last_action: `volume seed failed: ${errMessage(err)}`,
+                    last_action_code: 'volume_seed_failed',
                     last_action_at: Date.now(),
                 })
                 return
@@ -356,6 +359,7 @@ export class AgentSpawnHandler {
                 status: 'ERROR',
                 container_id: null,
                 last_action: describeDockerRunFailure(err, 'docker run failed'),
+                last_action_code: 'docker_run_failed',
                 last_action_at: Date.now(),
             })
             return

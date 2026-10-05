@@ -20,12 +20,14 @@ import type {
     AgentDeletePayload,
     AgentPausePayload,
     AgentResumePayload,
-    AgentStatusReport,
     AgentStopPayload,
     ControlCommandAck,
     WsErrorPayload,
 } from '../../protocol'
-import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import type {
+    AgentStatusPush,
+    AgentStatusReporter,
+} from '../../reporters/agent-status/agent-status.reporter'
 import { StatusHeartbeat } from '../../reporters/status-heartbeat/status-heartbeat'
 
 export interface AgentLifecycleHandlerDeps {
@@ -135,6 +137,7 @@ export class AgentLifecycleHandler {
                 status: 'ERROR',
                 container_id,
                 last_action: `stop failed: ${errMessage(err)}`,
+                last_action_code: 'stop_failed',
                 last_action_at: Date.now(),
             })
             return
@@ -174,6 +177,7 @@ export class AgentLifecycleHandler {
                 status: 'ERROR',
                 container_id,
                 last_action: `pause failed: ${errMessage(err)}`,
+                last_action_code: 'pause_failed',
                 last_action_at: Date.now(),
             })
             return
@@ -212,6 +216,7 @@ export class AgentLifecycleHandler {
                 status: 'ERROR',
                 container_id,
                 last_action: `resume failed: ${errMessage(err)}`,
+                last_action_code: 'resume_failed',
                 last_action_at: Date.now(),
             })
             return
@@ -293,7 +298,7 @@ export class AgentLifecycleHandler {
         }
     }
 
-    private push(report: AgentStatusReport): void {
+    private push(report: AgentStatusPush): void {
         this.status.push(report)
     }
 }
