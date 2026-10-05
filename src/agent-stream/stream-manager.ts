@@ -47,6 +47,10 @@ type SessionEnv = Record<string, string | null>
 type AgentInputWithSessionEnv = AgentInputPayload & { session_env?: SessionEnv }
 type AgentWarmupWithSessionEnv = AgentWarmupPayload & { session_env?: SessionEnv }
 type AgentMetricsWithConversation = AgentMetricsReport & { conversation_id?: number }
+/** Same stand-in for `fork_from` on `AgentInputPayload`, until the control ships it. */
+type AgentInputWithFork = AgentInputPayload & {
+    fork_from?: { session_id: string; message_uuid: string }
+}
 
 export interface AgentStreamClient {
     push(event: string, payload: unknown): void
@@ -494,6 +498,11 @@ export class AgentStreamManager {
         // as a backstop). Only skip when absent, same rule as the limits above.
         const session_env = (payload as AgentInputWithSessionEnv).session_env
         if (session_env !== undefined) envelope.session_env = session_env
+        // A conversation forked from another at a message: the wrapper seeds its
+        // first transcript from the source one, cut there. Pure passthrough; the
+        // control only sends it until the fork's first turn is delivered.
+        const fork_from = (payload as AgentInputWithFork).fork_from
+        if (fork_from) envelope.fork_from = fork_from
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
