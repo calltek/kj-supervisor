@@ -21,8 +21,10 @@
 import { KJ_LABEL_AGENT_ID, type DockerEvent, type KJDocker } from '../client/client'
 import type { OperationTracker } from '../operation-tracker/operation-tracker'
 import type { KJLogger } from '../../logger'
-import type { AgentStatusReport } from '../../protocol'
-import type { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import type {
+    AgentStatusPush,
+    AgentStatusReporter,
+} from '../../reporters/agent-status/agent-status.reporter'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 
 export interface KJDockerEventsWatcherDeps {
@@ -181,7 +183,7 @@ export class KJDockerEventsWatcher {
         event: DockerEvent,
         agent_id: number,
         container_id: string
-    ): AgentStatusReport | null {
+    ): AgentStatusPush | null {
         switch (event.Action) {
             case 'die':
             case 'stop':
