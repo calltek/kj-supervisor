@@ -7,6 +7,15 @@
 
 import type { AgentStatusReport } from '../../protocol'
 import type { KJLogger } from '../../logger'
+import type { LastActionCode } from './last-action-code'
+
+/**
+ * The status payload as the supervisor sends it. `last_action_code` is
+ * declared here and not only in the pulled protocol.ts: the control may
+ * not have deployed the field yet when this builds, and the push has to
+ * typecheck against either version.
+ */
+export type AgentStatusPush = AgentStatusReport & { last_action_code?: LastActionCode }
 
 export interface StatusClient {
     push(event: string, payload: unknown): void
@@ -28,13 +37,14 @@ export class AgentStatusReporter {
         this.running = running
     }
 
-    push(report: AgentStatusReport): void {
+    push(report: AgentStatusPush): void {
         this.logger.info(
             {
                 agent_id: report.agent_id,
                 status: report.status,
                 container_id: report.container_id,
                 last_action: report.last_action,
+                last_action_code: report.last_action_code,
             },
             'agent:status push'
         )

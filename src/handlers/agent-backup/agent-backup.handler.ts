@@ -199,6 +199,7 @@ export class AgentBackupHandler {
                 status: 'ERROR',
                 container_id: null,
                 last_action: `restore failed: ${errMessage(err)}`,
+                last_action_code: 'restore_failed',
             })
             return {
                 ok: false,

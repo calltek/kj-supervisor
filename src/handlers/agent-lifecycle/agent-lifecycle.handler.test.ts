@@ -4,7 +4,10 @@ import type { KJContainerSummary } from '../../docker/client/client'
 import { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
 import { KJLogger } from '../../logger'
 import type { AgentStatusReport } from '../../protocol'
-import { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import {
+    type AgentStatusPush,
+    AgentStatusReporter,
+} from '../../reporters/agent-status/agent-status.reporter'
 import { AgentLifecycleHandler } from './agent-lifecycle.handler'
 
 const silentLogger = KJLogger.create('error')
@@ -55,10 +58,10 @@ function makeHandler(docker: FakeDocker, client: FakeClient): AgentLifecycleHand
     })
 }
 
-function statuses(client: FakeClient): AgentStatusReport[] {
+function statuses(client: FakeClient): AgentStatusPush[] {
     return client.pushes
         .filter((p) => p.event === 'agent:status')
-        .map((p) => p.payload as AgentStatusReport)
+        .map((p) => p.payload as AgentStatusPush)
 }
 
 /** Collapse consecutive same-status pushes — heartbeats produce duplicates. */
@@ -137,6 +140,7 @@ describe('AgentLifecycleHandler.handleStop', () => {
         const seen = statuses(client)
         expect(seen.map((s) => s.status)).toEqual(['STOPPING', 'ERROR'])
         expect(seen[1]?.last_action).toContain('docker daemon down')
+        expect(seen[1]?.last_action_code).toBe('stop_failed')
     })
 })
 
@@ -178,6 +182,7 @@ describe('AgentLifecycleHandler.handlePause', () => {
         const seen = statuses(client)
         expect(seen.map((s) => s.status)).toEqual(['PAUSING', 'ERROR'])
         expect(seen[1]?.last_action).toContain('already paused')
+        expect(seen[1]?.last_action_code).toBe('pause_failed')
     })
 })
 
@@ -219,5 +224,6 @@ describe('AgentLifecycleHandler.handleResume', () => {
         const seen = statuses(client)
         expect(seen.map((s) => s.status)).toEqual(['RESUMING', 'ERROR'])
         expect(seen[1]?.last_action).toContain('not paused')
+        expect(seen[1]?.last_action_code).toBe('resume_failed')
     })
 })

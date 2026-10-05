@@ -23,7 +23,10 @@ import type {
 } from '../../protocol'
 import type { KJContainerSummary } from '../../docker/client/client'
 import { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
-import { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import {
+    type AgentStatusPush,
+    AgentStatusReporter,
+} from '../../reporters/agent-status/agent-status.reporter'
 import { AgentStreamManager } from '../../agent-stream/stream-manager'
 import { McpDispatcher } from '../../agent-stream/mcp-dispatcher'
 import { KJLogger } from '../../logger'
@@ -154,10 +157,10 @@ function makePayload(overrides: Partial<AgentImageUpdatePayload> = {}): AgentIma
     }
 }
 
-function statuses(client: FakeClient): AgentStatusReport[] {
+function statuses(client: FakeClient): AgentStatusPush[] {
     return client.pushes
         .filter((p) => p.event === 'agent:status')
-        .map((p) => p.payload as AgentStatusReport)
+        .map((p) => p.payload as AgentStatusPush)
 }
 
 function statusTransitions(client: FakeClient): AgentStatusReport['status'][] {
@@ -416,10 +419,11 @@ describe('AgentImageUpdateHandler', () => {
         await waitForFinalStatus(client, 'ERROR')
 
         expect(docker.recreated).toEqual([])
-        const final = statuses(client).at(-1) as AgentStatusReport
+        const final = statuses(client).at(-1) as AgentStatusPush
         expect(final.status).toBe('ERROR')
         expect(final.container_id).toBe('c-old')
         expect(final.last_action).toContain('image pull failed')
+        expect(final.last_action_code).toBe('image_pull_failed')
     })
 
     test('pull failure + no cache + no container → STOPPED with failure detail', async () => {
@@ -432,10 +436,11 @@ describe('AgentImageUpdateHandler', () => {
         await handler.handle(makePayload({ restart_after: true }))
         await waitForFinalStatus(client, 'STOPPED')
 
-        const final = statuses(client).at(-1) as AgentStatusReport
+        const final = statuses(client).at(-1) as AgentStatusPush
         expect(final.status).toBe('STOPPED')
         expect(final.container_id).toBeNull()
         expect(final.last_action).toContain('image pull failed')
+        expect(final.last_action_code).toBe('image_pull_failed')
     })
 
     test('recreate failure → ERROR (container existed, swap aborted)', async () => {
@@ -448,9 +453,10 @@ describe('AgentImageUpdateHandler', () => {
         await handler.handle(makePayload({ restart_after: true }))
         await waitForFinalStatus(client, 'ERROR')
 
-        const final = statuses(client).at(-1) as AgentStatusReport
+        const final = statuses(client).at(-1) as AgentStatusPush
         expect(final.status).toBe('ERROR')
         expect(final.last_action).toContain('recreate failed')
+        expect(final.last_action_code).toBe('recreate_failed')
     })
 
     test('propagates registry_credentials to pullImage when provided', async () => {
@@ -568,6 +574,7 @@ describe('AgentImageUpdateHandler: drain limit from the control', () => {
         expect(docker.stopped).toEqual([])
         expect(statuses(client).some((s) => s.status === 'STOPPED')).toBe(false)
         expect(statuses(client).at(-1)?.last_action).toContain('waiting for the current turn')
+        expect(statuses(client).at(-1)?.last_action_code).toBe('drain_wait')
 
         agent.exit()
         await waitForFinalStatus(client, 'STOPPED')

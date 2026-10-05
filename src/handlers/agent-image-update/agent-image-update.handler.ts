@@ -103,6 +103,7 @@ export class AgentImageUpdateHandler {
                 status: 'ERROR',
                 container_id: null,
                 last_action: `image update failed: ${errMessage(err)}`,
+                last_action_code: 'image_update_failed',
                 last_action_at: Date.now(),
             })
         })
@@ -164,6 +165,7 @@ export class AgentImageUpdateHandler {
                     status: existing ? 'ERROR' : 'STOPPED',
                     container_id: existing ?? null,
                     last_action: `image pull failed: ${errMessage(err)}`,
+                    last_action_code: 'image_pull_failed',
                     last_action_at: Date.now(),
                 })
                 return
@@ -233,6 +235,7 @@ export class AgentImageUpdateHandler {
                     status: 'ERROR',
                     container_id: existing,
                     last_action: `stop after pull failed: ${errMessage(err)}`,
+                    last_action_code: 'stop_after_pull_failed',
                     last_action_at: Date.now(),
                 })
             }
@@ -277,6 +280,7 @@ export class AgentImageUpdateHandler {
                 status: 'ERROR',
                 container_id: null,
                 last_action: describeDockerRunFailure(err, 'recreate failed'),
+                last_action_code: 'recreate_failed',
                 last_action_at: Date.now(),
             })
             return
@@ -398,6 +402,7 @@ export class AgentImageUpdateHandler {
             status: 'SPAWNING',
             container_id,
             last_action: 'waiting for the current turn to finish before updating',
+            last_action_code: 'drain_wait',
             last_action_at: Date.now(),
         })
         log.info(

@@ -4,7 +4,10 @@ import { AgentStreamManager } from '../../agent-stream/stream-manager'
 import { type KJContainerSummary } from '../../docker/client/client'
 import { KJLogger } from '../../logger'
 import type { AgentSpawnPayload, AgentStatusReport } from '../../protocol'
-import { AgentStatusReporter } from '../../reporters/agent-status/agent-status.reporter'
+import {
+    type AgentStatusPush,
+    AgentStatusReporter,
+} from '../../reporters/agent-status/agent-status.reporter'
 import { AgentSpawnHandler } from './agent-spawn.handler'
 
 const silentLogger = KJLogger.create('error')
@@ -155,10 +158,10 @@ function makeStreams(docker: FakeDocker, client: FakeClient): AgentStreamManager
     })
 }
 
-function statuses(client: FakeClient): AgentStatusReport[] {
+function statuses(client: FakeClient): AgentStatusPush[] {
     return client.pushes
         .filter((p) => p.event === 'agent:status')
-        .map((p) => p.payload as AgentStatusReport)
+        .map((p) => p.payload as AgentStatusPush)
 }
 
 /** Collapse consecutive same-status pushes — heartbeats produce duplicates. */
@@ -428,6 +431,7 @@ describe('AgentSpawnHandler', () => {
         expect(statusTransitions(client)).toEqual(['SPAWNING', 'ERROR'])
         const seen = statuses(client)
         expect(seen[seen.length - 1]?.last_action).toContain('manifest unknown')
+        expect(seen[seen.length - 1]?.last_action_code).toBe('image_pull_failed')
 
         // Container never started.
         expect(docker.ran).toHaveLength(0)
@@ -452,5 +456,6 @@ describe('AgentSpawnHandler', () => {
         expect(statusTransitions(client)).toEqual(['SPAWNING', 'ERROR'])
         const seen = statuses(client)
         expect(seen[seen.length - 1]?.last_action).toContain('no space left on device')
+        expect(seen[seen.length - 1]?.last_action_code).toBe('docker_run_failed')
     })
 })
