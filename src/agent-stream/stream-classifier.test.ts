@@ -27,7 +27,12 @@ describe('classifyStreamEvent', () => {
     test('authentication_failed sibling field triggers agent:auth_required', () => {
         const c = ctx()
         const result = classifyStreamEvent({ type: 'assistant', error: 'authentication_failed' }, c)
-        expect(result.auth_required).toEqual({ agent_id: 42, timestamp: result.output.timestamp })
+        expect(result.auth_required).toEqual({
+            agent_id: 42,
+            timestamp: result.output.timestamp,
+            // kj-backend#948: la sesión del rechazo, para saber qué conexión era.
+            session_id: '00000000-0000-0000-0000-000000000042',
+        })
         // Does NOT also classify as a generic agent:error.
         expect(result.error).toBeUndefined()
     })
