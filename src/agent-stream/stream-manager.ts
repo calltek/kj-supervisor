@@ -606,7 +606,12 @@ export class AgentStreamManager {
                 : classified.output
         this.client.push('agent:output', output)
         if (classified.auth_required) {
-            this.client.push('agent:auth_required', classified.auth_required)
+            this.client.push(
+                'agent:auth_required',
+                conversation_id !== undefined
+                    ? { ...classified.auth_required, conversation_id }
+                    : classified.auth_required
+            )
         }
         if (classified.error) {
             this.client.push('agent:error', classified.error)

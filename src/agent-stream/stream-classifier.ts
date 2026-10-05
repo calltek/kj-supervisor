@@ -83,6 +83,10 @@ export function classifyStreamEvent(
         classified.auth_required = {
             agent_id: ctx.agent_id,
             timestamp,
+            // kj-backend#948 — de qué sesión es el rechazo: si esa conversación
+            // corre con su propia conexión, la credencial rechazada es la suya y
+            // no la del agente, y el control no lo sella.
+            session_id: ctx.session_id,
             ...(ctx.credentials_epoch === undefined
                 ? {}
                 : { credentials_epoch: ctx.credentials_epoch }),
