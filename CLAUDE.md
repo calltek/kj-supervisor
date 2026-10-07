@@ -60,6 +60,13 @@
 > vigila ningún check: el manual no se construye con el producto, así que el
 > desfase no sale en rojo en ninguna parte — lo descubre quien sigue la página.
 > Norma completa en `kj-backend/CLAUDE.md` §6 (decisión 2026-09-16).
+>
+> **Pero lo que se entiende solo no lleva página (2026-10-07).** Un botón de
+> exportar o de eliminar, un icono con su globo, un filtro más: nada de eso se
+> documenta. El manual es para lo que no es evidente —cómo configurar algo, un
+> límite, un porqué—, no un inventario de botones; «la gente tampoco es tan
+> tonta». Lo que sigue siendo obligatorio es corregir la página que ha dejado
+> de ser verdad. Ante la duda con algo nuevo, no se abre.
 
 Container Docker que vive en cada VPS de un cliente de Kujira. Mantiene
 una conexión WebSocket persistente con el control (`kj-backend`) y
