@@ -1039,6 +1039,23 @@ export class KJDocker {
      * subtrees keep their own (the seed helper chowns each targetDir), so we
      * don't disturb the 0444 readonly files.
      */
+    /**
+     * Correr un guion de shell sobre un volumen (montado en `/v`) con el mismo
+     * ayudante aislado que las copias: sin capacidades salvo leer y cambiar
+     * dueños, sin escalar privilegios y borrado al terminar. El guion lo
+     * construye quien llama; el volumen no tiene que tener el agente vivo.
+     */
+    async runVolumeScript(opts: {
+        volume_name: string
+        script: string
+    }): Promise<{ code: number }> {
+        const { code } = await this.runVolumeHelper({
+            volume_name: opts.volume_name,
+            script: opts.script,
+        })
+        return { code }
+    }
+
     async ensureVolumeOwnership(volume_name: string): Promise<void> {
         const helperImage = 'alpine:3.20'
         const cached = await this.imageExistsLocally(helperImage)
