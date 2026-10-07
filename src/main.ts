@@ -33,7 +33,10 @@ import { AgentLifecycleHandler } from './handlers/agent-lifecycle/agent-lifecycl
 import { AgentSpawnHandler } from './handlers/agent-spawn/agent-spawn.handler'
 import { AgentSyncHandler } from './handlers/agent-sync/agent-sync.handler'
 import { ConnectionTestHandler } from './handlers/connection-test/connection-test.handler'
-import { AgentSessionsPurgeHandler } from './handlers/agent-sessions-purge/agent-sessions-purge.handler'
+import {
+    AgentSessionsPurgeHandler,
+    type AgentSessionsPurgePayload,
+} from './handlers/agent-sessions-purge/agent-sessions-purge.handler'
 import { OAuthExchangeHandler } from './handlers/oauth-exchange/oauth-exchange.handler'
 import { OAuthRevokeHandler } from './handlers/oauth-revoke/oauth-revoke.handler'
 import { SupervisorUpgradeHandler } from './handlers/supervisor-upgrade/supervisor-upgrade.handler'
@@ -49,7 +52,6 @@ import {
     type AgentRestorePayload,
     type AgentInputPayload,
     type AgentInterruptPayload,
-    type AgentSessionsPurgePayload,
     type AgentPausePayload,
     type AgentResumePayload,
     type AgentSkillsChangedPayload,

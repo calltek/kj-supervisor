@@ -19,12 +19,19 @@
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 import type { KJDocker } from '../../docker/client/client'
 import type { KJLogger } from '../../logger'
-import {
-    type AgentSessionsPurgePayload,
-    type ControlCommandAck,
-    WS_ERROR_CODES,
-} from '../../protocol'
+import { type ControlCommandAck, WS_ERROR_CODES } from '../../protocol'
 import { isValidSessionId, purgeScript } from './session-paths'
+
+/**
+ * Tipo local, como `session_env` en su día: `protocol.ts` se descarga de
+ * producción y este comando no existe allí hasta que se despliegue
+ * calltek/kj-backend#974. Cuando llegue, se cambia por el de `protocol.ts`.
+ */
+export interface AgentSessionsPurgePayload {
+    request_id: string
+    agent_id: number
+    session_ids: string[]
+}
 
 /** Lo que tarda el envoltorio en matar un proceso (SIGTERM, y SIGKILL a los 5 s). */
 const LIVE_KILL_GRACE_MS = 6_000
