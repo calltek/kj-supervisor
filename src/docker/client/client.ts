@@ -295,6 +295,28 @@ export function buildBackupScript(): string {
     ].join('\n')
 }
 
+/**
+ * The model credential goes in the container's Config.Env, and `docker exec`
+ * starts from there — not from PID 1, which kj-agent-base cleans
+ * (kj-agent-base#108, #111). A SCRIPT cron's command is written by the agent
+ * (`cronjob_create`), so `env` in one would hand the key back in the cron's
+ * thread. Every exec starts with them unset — except one this exec injects on
+ * purpose (KJ-38: a cron credential that happens to have that name).
+ */
+export const MODEL_CREDENTIAL_VARS = [
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+] as const
+
+export function execCmd(command: string, env?: Record<string, string>): string[] {
+    const unset = MODEL_CREDENTIAL_VARS.filter((name) => !(env && name in env)).flatMap((name) => [
+        '-u',
+        name,
+    ])
+    return ['env', ...unset, '/bin/sh', '-c', command]
+}
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -638,7 +660,7 @@ export class KJDocker {
         const maxBytes = opts.maxOutputBytes ?? 64 * 1024
         const container = this.docker.getContainer(opts.container_id)
         const exec = await container.exec({
-            Cmd: ['/bin/sh', '-c', opts.command],
+            Cmd: execCmd(opts.command, opts.env),
             AttachStdout: true,
             AttachStderr: true,
             Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,

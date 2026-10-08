@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import os from 'node:os'
 
 import { KJLogger } from '../../logger'
-import { KJDocker, buildBackupScript } from './client'
+import { KJDocker, buildBackupScript, execCmd } from './client'
 
 const silentLogger = KJLogger.create('error')
 
@@ -624,5 +624,29 @@ describe('backupVolume — markers parse from stdout only', () => {
             { part_number: 1, etag: 'abc' },
             { part_number: 2, etag: 'def' },
         ])
+    })
+})
+
+describe('execCmd — a docker exec never inherits the model credential', () => {
+    test('the three variables are unset before the shell starts', () => {
+        expect(execCmd('env')).toEqual([
+            'env',
+            '-u',
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            '-u',
+            'ANTHROPIC_API_KEY',
+            '-u',
+            'ANTHROPIC_AUTH_TOKEN',
+            '/bin/sh',
+            '-c',
+            'env',
+        ])
+    })
+
+    test('one the exec injects on purpose (a cron credential) is kept', () => {
+        const cmd = execCmd('run.sh', { ANTHROPIC_API_KEY: 'sk-cron' })
+        expect(cmd).not.toContain('ANTHROPIC_API_KEY')
+        expect(cmd).toContain('CLAUDE_CODE_OAUTH_TOKEN')
+        expect(cmd.slice(-3)).toEqual(['/bin/sh', '-c', 'run.sh'])
     })
 })
