@@ -751,7 +751,17 @@ export class KJDocker {
         // and the clone wrongly concludes it isn't a clone → never swaps → two
         // supervisors survive (incident 2026-06-24). Strip any stale value
         // inherited from the source (which may itself have been a clone).
-        const env = (source.Config.Env ?? []).filter((e) => !e.startsWith('KJ_OWN_CONTAINER='))
+        //
+        // The build identity (KJ_BUILD_REVISION / KJ_BUILT_AT) is baked into the
+        // IMAGE as ENV, but inspect() returns it as part of the source's Env, and
+        // an explicit Env on the clone overrides the new image's. Left in, a
+        // supervisor that just upgraded would keep reporting its old revision.
+        const env = (source.Config.Env ?? []).filter(
+            (e) =>
+                !e.startsWith('KJ_OWN_CONTAINER=') &&
+                !e.startsWith('KJ_BUILD_REVISION=') &&
+                !e.startsWith('KJ_BUILT_AT=')
+        )
         env.push(`KJ_OWN_CONTAINER=${opts.new_name}`)
 
         const created = await this.docker.createContainer({

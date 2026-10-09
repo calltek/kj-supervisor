@@ -48,7 +48,12 @@ describe('cloneContainerWithNewImage', () => {
         const fake = new FakeDocker()
         fake.containers['kj-supervisor'] = {
             Config: {
-                Env: ['FOO=1', 'KJ_OWN_CONTAINER=kj-supervisor-new-OLD'],
+                Env: [
+                    'FOO=1',
+                    'KJ_OWN_CONTAINER=kj-supervisor-new-OLD',
+                    'KJ_BUILD_REVISION=oldoldoldold',
+                    'KJ_BUILT_AT=2026-01-01T00:00:00Z',
+                ],
                 Cmd: null,
                 Entrypoint: null,
                 Labels: {},
@@ -78,6 +83,9 @@ describe('cloneContainerWithNewImage', () => {
         expect(env.filter((e) => e.startsWith('KJ_OWN_CONTAINER='))).toEqual([
             'KJ_OWN_CONTAINER=kj-supervisor-new-123',
         ])
+        // the old build's identity must not shadow the new image's
+        expect(env.some((e) => e.startsWith('KJ_BUILD_REVISION='))).toBe(false)
+        expect(env.some((e) => e.startsWith('KJ_BUILT_AT='))).toBe(false)
         expect(fake.createdSpec.name).toBe('kj-supervisor-new-123')
     })
 })
