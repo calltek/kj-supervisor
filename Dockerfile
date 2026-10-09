@@ -39,5 +39,13 @@ ENV NODE_ENV=production
 ENV KJ_CONFIG_DIR=/etc/kj-supervisor
 ENV KJ_LOG_LEVEL=info
 
+# Which build this image is, so the control can tell a supervisor on the
+# newest build from one that is behind (package.json's version never moves
+# between builds). Passed by the build workflow; empty for a local build.
+ARG KJ_BUILD_REVISION=""
+ARG KJ_BUILT_AT=""
+ENV KJ_BUILD_REVISION=$KJ_BUILD_REVISION
+ENV KJ_BUILT_AT=$KJ_BUILT_AT
+
 # The supervisor doesn't expose ports — only outbound to the control.
 ENTRYPOINT ["bun", "src/main.ts"]

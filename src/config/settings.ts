@@ -31,6 +31,9 @@ export class KJSettings {
     readonly config_dir: string
     readonly log_level: KJLogLevel
     readonly kj_agent_version: string
+    /** Revision and build time baked into this image; null on a local build. */
+    readonly image_revision: string | null
+    readonly image_built_at: string | null
     /**
      * Name of THIS supervisor's own Docker container. Only set when
      * running inside Docker; needed for the blue/green self-upgrade
@@ -44,12 +47,16 @@ export class KJSettings {
         config_dir: string
         log_level: KJLogLevel
         kj_agent_version: string
+        image_revision: string | null
+        image_built_at: string | null
         supervisor_container: string | null
     }) {
         this.control_url = values.control_url
         this.config_dir = values.config_dir
         this.log_level = values.log_level
         this.kj_agent_version = values.kj_agent_version
+        this.image_revision = values.image_revision
+        this.image_built_at = values.image_built_at
         this.supervisor_container = values.supervisor_container
     }
 
@@ -75,6 +82,8 @@ export class KJSettings {
             config_dir: KJSettings.optionalEnv('KJ_CONFIG_DIR') ?? '/etc/kj-supervisor',
             log_level: log_level_raw as KJLogLevel,
             kj_agent_version: pkg.version,
+            image_revision: KJSettings.optionalEnv('KJ_BUILD_REVISION'),
+            image_built_at: KJSettings.optionalEnv('KJ_BUILT_AT'),
             supervisor_container: KJSettings.optionalEnv('KJ_SUPERVISOR_CONTAINER'),
         })
     }
