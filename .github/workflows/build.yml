@@ -101,6 +101,13 @@ jobs:
               with:
                   images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
+            # The commit's own date, not the clock: both platform builds then
+            # carry the same value and a rebuild of the same commit is not
+            # mistaken for a newer one.
+            - name: Commit date
+              id: commit
+              run: echo "committed_at=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+
             - name: Build by digest
               id: build
               uses: docker/build-push-action@v6
@@ -109,6 +116,9 @@ jobs:
                   file: ./Dockerfile
                   platforms: ${{ matrix.platform }}
                   labels: ${{ steps.meta.outputs.labels }}
+                  build-args: |
+                      KJ_BUILD_REVISION=${{ github.sha }}
+                      KJ_BUILT_AT=${{ steps.commit.outputs.committed_at }}
                   outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
                   cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
                   cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}

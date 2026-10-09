@@ -538,6 +538,8 @@ async function main(): Promise<void> {
             protocol_version: PROTOCOL_VERSION,
             hostname: hostname(),
             ...(machine_id ? { machine_id } : {}),
+            ...(settings.image_revision ? { image_revision: settings.image_revision } : {}),
+            ...(settings.image_built_at ? { image_built_at: settings.image_built_at } : {}),
             containers: live_containers,
             // Host specs — let the control persist them so the
             // operator never has to type them on the create form.
