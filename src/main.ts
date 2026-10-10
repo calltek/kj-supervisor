@@ -88,6 +88,7 @@ import {
     type ServerMetricsHandle,
     startServerMetricsLoop,
 } from './reporters/server-metrics/server-metrics.reporter'
+import { type UpdateCheckHandle, startUpdateCheckLoop } from './update-check/update-check'
 
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_MISSING,
@@ -492,6 +493,7 @@ async function main(): Promise<void> {
     let healthHandle: HealthLoopHandle | null = null
     let serverMetricsHandle: ServerMetricsHandle | null = null
     let agentMetricsHandle: AgentMetricsHandle | null = null
+    let updateCheckHandle: UpdateCheckHandle | null = null
     // Blue/green self-upgrade: a fresh clone (`kj-supervisor-new-*`) finishes
     // the swap on its first handshake (remove the old + rename to canonical).
     // Runs at most once; until it succeeds we retry on each handshake.
@@ -504,6 +506,8 @@ async function main(): Promise<void> {
         healthHandle = null
         serverMetricsHandle = null
         agentMetricsHandle = null
+        updateCheckHandle?.stop()
+        updateCheckHandle = null
     }
 
     client.on('ready', async () => {
@@ -653,6 +657,13 @@ async function main(): Promise<void> {
             client,
             logger,
             interval_ms: AGENT_METRICS_INTERVAL_MS,
+        })
+        // Una sola instancia: stopLoops() al inicio de `ready` cancela la anterior.
+        updateCheckHandle = startUpdateCheckLoop({
+            revision: settings.image_revision,
+            emitWithAck: (event, payload, timeout_ms) =>
+                client.emitWithAck(event, payload, timeout_ms),
+            logger,
         })
     })
 
