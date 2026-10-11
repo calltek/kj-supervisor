@@ -148,9 +148,30 @@ export class KJControlClient extends EventEmitter {
                     if (ack) ack(prior.ack)
                     return
                 }
+                // Still running: wait for the first run and answer with its
+                // ack, never run the handler twice.
+                const running = this.dedup.inFlight(request_id)
+                if (running) {
+                    this.logger.debug(
+                        { event, request_id },
+                        'duplicate command — first still running'
+                    )
+                    const first = await running.catch((err) => ({
+                        ok: false,
+                        error: {
+                            code: 'INTERNAL_ERROR',
+                            message: err instanceof Error ? err.message : String(err),
+                            retryable: false,
+                        },
+                    }))
+                    if (ack) ack(first)
+                    return
+                }
             }
+            const run = Promise.resolve().then(() => handler(payload))
+            if (request_id) this.dedup.track(request_id, run)
             try {
-                const result = await handler(payload)
+                const result = await run
                 if (request_id) this.dedup.remember(request_id, result)
                 if (ack) ack(result)
             } catch (err) {
