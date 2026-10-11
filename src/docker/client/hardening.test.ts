@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { agentHardening, perUserIsolationCaps, privilegedNetworkingExtras } from './hardening'
+import {
+    agentHardening,
+    perUserIsolationCaps,
+    privilegedNetworkingExtras,
+    withoutIsolationCaps,
+} from './hardening'
 
 /**
  * El fallo que originó todo esto no fue un error de lógica: fue que el mismo
@@ -95,5 +100,34 @@ describe('agentHardening — per-conversation uid isolation (#107)', () => {
     test('a normal image gets exactly the baseline, no extra caps', () => {
         expect(agentHardening({ isolation: false }).CapAdd).toBeUndefined()
         expect(agentHardening().CapAdd).toBeUndefined()
+    })
+})
+
+describe('withoutIsolationCaps — recreate never carries isolation caps over (#63)', () => {
+    test('a source that isolated + VPN, recreated onto a non-isolating image, keeps only NET_ADMIN', () => {
+        const sourceCapAdd = [...perUserIsolationCaps(), 'NET_ADMIN']
+        const h = agentHardening({
+            CapAdd: withoutIsolationCaps(sourceCapAdd),
+            Devices: privilegedNetworkingExtras().Devices,
+            isolation: false,
+        })
+        expect(h.CapAdd).toEqual(['NET_ADMIN'])
+        expect(h.CapDrop).toEqual(['ALL'])
+    })
+
+    test('onto an isolating image, the caps come back from the label, once', () => {
+        const sourceCapAdd = [...perUserIsolationCaps(), 'NET_ADMIN']
+        const h = agentHardening({
+            CapAdd: withoutIsolationCaps(sourceCapAdd),
+            isolation: true,
+        })
+        expect(h.CapAdd?.filter((c) => c === 'SETUID')).toHaveLength(1)
+        expect(h.CapAdd).toContain('NET_ADMIN')
+        expect(h.CapAdd).toContain('SETUID')
+    })
+
+    test('leaves non-isolation caps untouched', () => {
+        expect(withoutIsolationCaps(['NET_ADMIN'])).toEqual(['NET_ADMIN'])
+        expect(withoutIsolationCaps(null)).toEqual([])
     })
 })

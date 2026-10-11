@@ -60,6 +60,19 @@ export function perUserIsolationCaps(): string[] {
 }
 
 /**
+ * Drop the isolation caps from a capability list. Used when recreating a
+ * container: the isolation caps must come ONLY from the DESTINATION image's
+ * label, never ride along from the source container's CapAdd — otherwise a
+ * move to an image that doesn't isolate would keep them (and perpetuate them
+ * on every later recreate). The invariant holds by construction, not by what
+ * the next image happens to be (SOKI, #63).
+ */
+export function withoutIsolationCaps(caps?: string[] | null): string[] {
+    const iso = new Set(perUserIsolationCaps())
+    return (caps ?? []).filter((c) => !iso.has(c))
+}
+
+/**
  * What an agent allowed to manage its own networking gets ON TOP of the
  * baseline: `NET_ADMIN` and `/dev/net/tun`, and nothing else — `CapDrop: ALL`
  * still strips every other capability, and `no-new-privileges` still stands.

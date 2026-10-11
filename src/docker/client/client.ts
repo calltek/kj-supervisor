@@ -17,6 +17,7 @@ import {
     agentHardening,
     privilegedNetworkingExtras,
     withoutDockerSocket,
+    withoutIsolationCaps,
 } from './hardening'
 import { agentHostAliases, withHostAlias } from './host-access'
 
@@ -924,7 +925,13 @@ export class KJDocker {
                 // control's intent: it is the source of truth for this agent's
                 // networking, so a VPN agent keeps /dev/net/tun + NET_ADMIN
                 // across an image update instead of losing them silently.
-                ...agentHardening({ CapAdd: host.CapAdd, Devices: host.Devices, isolation }),
+                // Strip any isolation caps the SOURCE carried: they must come only from
+                // the destination image's label, never ride over (SOKI, #63).
+                ...agentHardening({
+                    CapAdd: withoutIsolationCaps(host.CapAdd),
+                    Devices: host.Devices,
+                    isolation,
+                }),
             },
         })
 
