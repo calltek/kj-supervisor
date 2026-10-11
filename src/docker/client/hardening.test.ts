@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { agentHardening, privilegedNetworkingExtras } from './hardening'
+import { agentHardening, perUserIsolationCaps, privilegedNetworkingExtras } from './hardening'
 
 /**
  * El fallo que originó todo esto no fue un error de lógica: fue que el mismo
@@ -71,5 +71,29 @@ describe('agentHardening', () => {
         const h = agentHardening({ CapAdd: null, Devices: null })
 
         expect(h).toEqual({ CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'] })
+    })
+})
+
+describe('agentHardening — per-conversation uid isolation (#107)', () => {
+    test('an isolating image adds the uid caps, keeps the baseline', () => {
+        const h = agentHardening({ isolation: true })
+        expect(h.CapDrop).toEqual(['ALL'])
+        expect(h.SecurityOpt).toEqual(['no-new-privileges'])
+        expect(h.CapAdd).toEqual(perUserIsolationCaps())
+        expect(h.CapAdd).toContain('SETUID')
+        expect(h.CapAdd).toContain('CHOWN')
+        expect(h.CapAdd).toContain('KILL')
+    })
+
+    test('isolation and VPN stack without losing either', () => {
+        const h = agentHardening({ ...privilegedNetworkingExtras(), isolation: true })
+        expect(h.CapAdd).toContain('NET_ADMIN')
+        expect(h.CapAdd).toContain('SETUID')
+        expect(h.Devices?.[0]?.PathInContainer).toBe('/dev/net/tun')
+    })
+
+    test('a normal image gets exactly the baseline, no extra caps', () => {
+        expect(agentHardening({ isolation: false }).CapAdd).toBeUndefined()
+        expect(agentHardening().CapAdd).toBeUndefined()
     })
 })
