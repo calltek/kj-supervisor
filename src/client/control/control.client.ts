@@ -152,7 +152,10 @@ export class KJControlClient extends EventEmitter {
                 // ack, never run the handler twice.
                 const running = this.dedup.inFlight(request_id)
                 if (running) {
-                    this.logger.debug({ event, request_id }, 'duplicate command — first still running')
+                    this.logger.debug(
+                        { event, request_id },
+                        'duplicate command — first still running'
+                    )
                     const first = await running.catch((err) => ({
                         ok: false,
                         error: {
