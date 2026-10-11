@@ -34,6 +34,14 @@ export interface CommandDedupOptions {
 
 export class CommandDedup {
     private readonly entries = new Map<string, Entry>()
+    /**
+     * Commands still running. `remember` only lands once the handler
+     * resolves, so without this a repeat that arrives MEANWHILE (the
+     * control's reconnect re-delivery firing a turn that's still being
+     * written to the container) ran the handler a second time: the agent
+     * got the message twice and answered twice (2026-10-11).
+     */
+    private readonly running = new Map<string, Promise<unknown>>()
     private readonly maxEntries: number
     private readonly ttlMs: number
     private readonly now: () => number
@@ -58,6 +66,20 @@ export class CommandDedup {
             return undefined
         }
         return { ack: hit.ack }
+    }
+
+    /** The first run of this request_id, if it hasn't finished yet. */
+    inFlight(request_id: string): Promise<unknown> | undefined {
+        return this.running.get(request_id)
+    }
+
+    /** Mark a first run as in flight until it settles. */
+    track(request_id: string, run: Promise<unknown>): void {
+        this.running.set(request_id, run)
+        run.then(
+            () => this.running.delete(request_id),
+            () => this.running.delete(request_id)
+        )
     }
 
     /** Record the ack of a freshly-executed command for future replays. */
