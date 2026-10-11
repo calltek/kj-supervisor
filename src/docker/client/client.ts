@@ -11,7 +11,14 @@ import os from 'node:os'
 import Docker from 'dockerode'
 
 import type { KJLogger } from '../../logger'
-import { agentHardening, privilegedNetworkingExtras, withoutDockerSocket } from './hardening'
+import {
+    ISOLATION_LABEL,
+    ISOLATION_VALUE,
+    agentHardening,
+    privilegedNetworkingExtras,
+    withoutDockerSocket,
+    withoutIsolationCaps,
+} from './hardening'
 import { agentHostAliases, withHostAlias } from './host-access'
 
 /**
@@ -361,6 +368,25 @@ export class KJDocker {
         return this.docker.getImage(image).inspect()
     }
 
+    /**
+     * Whether an image asks to run each conversation as its own uid
+     * (ISOLATION_LABEL, kj-agent-base#107). The image is local by the time a
+     * container is created from it; a failed inspect means "no" — the container
+     * is then created as hardened as every other, never more.
+     */
+    async imageIsolatesByUser(image_tag: string): Promise<boolean> {
+        try {
+            const info = await this.inspectImage(image_tag)
+            return info.Config?.Labels?.[ISOLATION_LABEL] === ISOLATION_VALUE
+        } catch (err) {
+            this.logger.warn(
+                { image_tag, err: err instanceof Error ? err.message : err },
+                'could not inspect image for the isolation label — treating as not isolating'
+            )
+            return false
+        }
+    }
+
     async imageExistsLocally(image_tag: string): Promise<boolean> {
         try {
             await this.docker.getImage(image_tag).inspect()
@@ -430,6 +456,12 @@ export class KJDocker {
      */
     async runContainer(opts: KJContainerRunOptions): Promise<string> {
         const envArray = Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
+        const isolation = await this.imageIsolatesByUser(opts.image_tag)
+        if (isolation)
+            this.logger.info(
+                { image_tag: opts.image_tag },
+                'image isolates conversations by uid — adding the isolation capabilities'
+            )
 
         // Persistent /home/agent volume. Docker creates the named volume
         // on first use if it doesn't exist, so we don't need a separate
@@ -465,9 +497,10 @@ export class KJDocker {
                 // plus this agent's networking extras if it's entitled to them
                 // (KJ-156). Built by `agentHardening` so the recreate path gets
                 // the identical posture — see hardening.ts for why that matters.
-                ...agentHardening(
-                    opts.network_privileged ? privilegedNetworkingExtras() : undefined
-                ),
+                ...agentHardening({
+                    ...(opts.network_privileged ? privilegedNetworkingExtras() : {}),
+                    isolation,
+                }),
                 // Un nombre para la máquina donde corre, que es donde puede
                 // estar su modelo (un Ollama en el `11434` del host). Ver
                 // host-access.ts: no amplía lo que alcanza, lo nombra.
@@ -838,6 +871,9 @@ export class KJDocker {
         // ENV PATH wins because docker merges it when no PATH is provided here.
         const env = (config.Env ?? []).filter((e) => !e.startsWith('PATH='))
 
+        // The new image may start (or stop) isolating conversations by uid;
+        // read it from the image we are moving TO, not the one we are leaving.
+        const isolation = await this.imageIsolatesByUser(opts.new_image_tag)
         // Stop + remove old first; the name has to be free before we
         // can reuse it. Force is on by default — the operator already
         // accepted the downtime by clicking the button.
@@ -889,7 +925,13 @@ export class KJDocker {
                 // control's intent: it is the source of truth for this agent's
                 // networking, so a VPN agent keeps /dev/net/tun + NET_ADMIN
                 // across an image update instead of losing them silently.
-                ...agentHardening({ CapAdd: host.CapAdd, Devices: host.Devices }),
+                // Strip any isolation caps the SOURCE carried: they must come only from
+                // the destination image's label, never ride over (SOKI, #63).
+                ...agentHardening({
+                    CapAdd: withoutIsolationCaps(host.CapAdd),
+                    Devices: host.Devices,
+                    isolation,
+                }),
             },
         })
 

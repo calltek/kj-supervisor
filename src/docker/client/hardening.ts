@@ -36,6 +36,43 @@ export type AgentHardening = {
 }
 
 /**
+ * The image LABEL by which an agent image asks to run each conversation as its
+ * own Linux user (kj-agent-base#107). Only an image that declares it gets the
+ * extra capabilities below — every other image is created exactly as before.
+ */
+export const ISOLATION_LABEL = 'so.kujira.isolation'
+export const ISOLATION_VALUE = 'per-conversation-uid'
+
+/**
+ * What a container that isolates conversations by uid gets ON TOP of the
+ * baseline. The launcher stays root (PID 1) and drops each conversation's
+ * `claude` to its own uid; for that, and to keep the files tidy across uids,
+ * root needs these back after `CapDrop: ALL` stripped them:
+ *  - SETUID / SETGID — become the conversation's uid/gid;
+ *  - CHOWN / FOWNER — own the conversation's files and key files to that uid;
+ *  - DAC_OVERRIDE — the launcher reads/writes what it set up for each uid;
+ *  - KILL — stop a conversation's processes when it is recycled.
+ * `no-new-privileges` still stands: dropping TO a lower uid needs no setuid
+ * bit, so it keeps a compromised turn from GAINING any privilege.
+ */
+export function perUserIsolationCaps(): string[] {
+    return ['SETUID', 'SETGID', 'CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'KILL']
+}
+
+/**
+ * Drop the isolation caps from a capability list. Used when recreating a
+ * container: the isolation caps must come ONLY from the DESTINATION image's
+ * label, never ride along from the source container's CapAdd — otherwise a
+ * move to an image that doesn't isolate would keep them (and perpetuate them
+ * on every later recreate). The invariant holds by construction, not by what
+ * the next image happens to be (SOKI, #63).
+ */
+export function withoutIsolationCaps(caps?: string[] | null): string[] {
+    const iso = new Set(perUserIsolationCaps())
+    return (caps ?? []).filter((c) => !iso.has(c))
+}
+
+/**
  * What an agent allowed to manage its own networking gets ON TOP of the
  * baseline: `NET_ADMIN` and `/dev/net/tun`, and nothing else — `CapDrop: ALL`
  * still strips every other capability, and `no-new-privileges` still stands.
@@ -63,11 +100,14 @@ export function privilegedNetworkingExtras(): { CapAdd: string[]; Devices: Conta
 export function agentHardening(extras?: {
     CapAdd?: string[] | null
     Devices?: ContainerDevice[] | null
+    /** The image isolates conversations by uid (ISOLATION_LABEL): add its caps. */
+    isolation?: boolean | null
 }): AgentHardening {
+    const capAdd = [...(extras?.CapAdd ?? []), ...(extras?.isolation ? perUserIsolationCaps() : [])]
     return {
         CapDrop: ['ALL'],
         SecurityOpt: ['no-new-privileges'],
-        ...(extras?.CapAdd?.length ? { CapAdd: [...extras.CapAdd] } : {}),
+        ...(capAdd.length ? { CapAdd: capAdd } : {}),
         ...(extras?.Devices?.length ? { Devices: extras.Devices.map((d) => ({ ...d })) } : {}),
     }
 }
