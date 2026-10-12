@@ -44,6 +44,48 @@ export const ISOLATION_LABEL = 'so.kujira.isolation'
 export const ISOLATION_VALUE = 'per-conversation-uid'
 
 /**
+ * Where an isolating image keeps its root-owned state — the uid registry, the
+ * quarantine, and each conversation's isolated HOME (`conv/<sid>`). It is a
+ * SEPARATE volume from /home/agent on purpose (kj-agent-base#107 design B):
+ * the supervisor seeds, wipes and chowns /home/agent per spawn, so the per-uid
+ * state can't live there without being clobbered or exposed. Must match
+ * kj-agent-base's `KJ_ISO_ROOT` default. Only a labeled image mounts it.
+ */
+export const ISOLATION_STATE_MOUNT = '/var/lib/kj'
+const AGENT_HOME_MOUNT = '/home/agent'
+
+/** The isolation-state volume paired with an agent's home volume. */
+export function isolationVolumeName(homeVolumeName: string): string {
+    return `${homeVolumeName.replace(/-home$/, '')}-iso`
+}
+
+/**
+ * Ensure the isolation-state volume is mounted when (and only when) the image
+ * isolates. Used by the recreate path, which copies the source container's
+ * mounts: an image update that STARTS isolating has no such mount to inherit,
+ * so we add it (derived from the home volume already mounted); one that STOPS
+ * isolating keeps a harmless unused mount rather than orphaning its data on a
+ * swap back. Returns undefined for an empty list so the HostConfig matches a
+ * hand-written one.
+ */
+export function ensureIsolationMount<M extends { Type?: string; Source?: string; Target?: string }>(
+    mounts: M[] | null | undefined,
+    isolation: boolean
+): M[] | undefined {
+    const list = [...(mounts ?? [])]
+    if (!isolation) return list.length ? list : undefined
+    if (list.some((m) => m?.Target === ISOLATION_STATE_MOUNT)) return list
+    const home = list.find((m) => m?.Target === AGENT_HOME_MOUNT)
+    if (!home?.Source) return list.length ? list : undefined
+    list.push({
+        Type: 'volume',
+        Source: isolationVolumeName(home.Source),
+        Target: ISOLATION_STATE_MOUNT,
+    } as M)
+    return list
+}
+
+/**
  * What a container that isolates conversations by uid gets ON TOP of the
  * baseline. The launcher stays root (PID 1) and drops each conversation's
  * `claude` to its own uid; for that, and to keep the files tidy across uids,

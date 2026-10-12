@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
+    ISOLATION_STATE_MOUNT,
     agentHardening,
+    ensureIsolationMount,
+    isolationVolumeName,
     perUserIsolationCaps,
     privilegedNetworkingExtras,
     withoutIsolationCaps,
@@ -129,5 +132,47 @@ describe('withoutIsolationCaps — recreate never carries isolation caps over (#
     test('leaves non-isolation caps untouched', () => {
         expect(withoutIsolationCaps(['NET_ADMIN'])).toEqual(['NET_ADMIN'])
         expect(withoutIsolationCaps(null)).toEqual([])
+    })
+})
+
+describe('isolationVolumeName — the state volume paired with a home volume (#107)', () => {
+    test("swaps the -home suffix for -iso so it's clearly the same agent's", () => {
+        expect(isolationVolumeName('kj-agent-42-home')).toBe('kj-agent-42-iso')
+    })
+
+    test('a name without the suffix just gets -iso', () => {
+        expect(isolationVolumeName('kj-agent-42')).toBe('kj-agent-42-iso')
+    })
+})
+
+describe('ensureIsolationMount — recreate adds the state volume when the image starts isolating (#107)', () => {
+    const home = { Type: 'volume', Source: 'kj-agent-7-home', Target: '/home/agent' }
+
+    test('non-isolating image: mounts pass through untouched', () => {
+        expect(ensureIsolationMount([home], false)).toEqual([home])
+    })
+
+    test('an empty list stays undefined (matches a hand-written HostConfig)', () => {
+        expect(ensureIsolationMount([], false)).toBeUndefined()
+        expect(ensureIsolationMount(undefined, true)).toBeUndefined()
+    })
+
+    test('starts isolating: appends the -iso volume derived from the home mount', () => {
+        const out = ensureIsolationMount([home], true)
+        expect(out).toEqual([
+            home,
+            { Type: 'volume', Source: 'kj-agent-7-iso', Target: ISOLATION_STATE_MOUNT },
+        ])
+    })
+
+    test('already has the state mount: left as is, not duplicated', () => {
+        const iso = { Type: 'volume', Source: 'kj-agent-7-iso', Target: ISOLATION_STATE_MOUNT }
+        const out = ensureIsolationMount([home, iso], true)
+        expect(out).toEqual([home, iso])
+    })
+
+    test('isolating but no home mount to derive from: nothing is invented', () => {
+        const other = { Type: 'bind', Source: '/x', Target: '/y' }
+        expect(ensureIsolationMount([other], true)).toEqual([other])
     })
 })

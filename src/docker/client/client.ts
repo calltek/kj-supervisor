@@ -13,8 +13,11 @@ import Docker from 'dockerode'
 import type { KJLogger } from '../../logger'
 import {
     ISOLATION_LABEL,
+    ISOLATION_STATE_MOUNT,
     ISOLATION_VALUE,
     agentHardening,
+    ensureIsolationMount,
+    isolationVolumeName,
     privilegedNetworkingExtras,
     withoutDockerSocket,
     withoutIsolationCaps,
@@ -474,6 +477,20 @@ export class KJDocker {
                       Source: opts.home_volume_name,
                       Target: '/home/agent',
                   },
+                  // An isolating image keeps its root-owned state (uid registry,
+                  // quarantine, each conversation's isolated HOME) on a SEPARATE
+                  // volume, never on /home/agent — which the supervisor seeds and
+                  // wipes per spawn (kj-agent-base#107 design B). Created on first
+                  // use, removed with the agent (handleDelete).
+                  ...(isolation
+                      ? [
+                            {
+                                Type: 'volume' as const,
+                                Source: isolationVolumeName(opts.home_volume_name),
+                                Target: ISOLATION_STATE_MOUNT,
+                            },
+                        ]
+                      : []),
               ]
             : undefined
 
@@ -880,6 +897,8 @@ export class KJDocker {
         await this.stopContainer(opts.source_container, { force: opts.force_stop ?? true })
         await this.removeContainer(opts.source_container)
 
+        const sanitized = withoutDockerSocket(host)
+
         const created = await this.docker.createContainer({
             Image: opts.new_image_tag,
             name: opts.keep_name,
@@ -904,7 +923,12 @@ export class KJDocker {
                 // Los montajes se copian del contenedor de origen, así que el
                 // socket de Docker se colaría si alguien lo hubiera puesto ahí
                 // a mano: no es un montaje, es la máquina entera (#12).
-                ...withoutDockerSocket(host),
+                ...sanitized,
+                // Un cambio de imagen puede EMPEZAR a aislar: la fuente no
+                // trae el volumen de estado, así que se añade (derivado del de
+                // /home/agent que ya monta). Si deja de aislar, se queda un
+                // montaje sin usar en vez de huérfanar sus datos (#107).
+                Mounts: ensureIsolationMount(sanitized.Mounts, isolation),
                 RestartPolicy: host.RestartPolicy,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,
