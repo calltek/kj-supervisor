@@ -1260,10 +1260,15 @@ export class KJDocker {
                 // removes CAP_DAC_OVERRIDE, which root needs to write
                 // into a directory it doesn't own, and CAP_CHOWN, which
                 // it needs to hand the seeded tree back to UID 1000 so
-                // the agent can write into it (syncBuiltinSkills). Keep
-                // just those two so the helper stays heavily sandboxed.
+                // the agent can write into it (syncBuiltinSkills).
+                // CAP_FOWNER lets the helper DELETE/overwrite files it
+                // does not own inside a directory with the sticky bit —
+                // the isolation image (#107) hardens /home/agent to
+                // `root:bun 1771`, and without FOWNER the re-seed's
+                // `rm`/`find -delete` fails with EPERM and the agent
+                // never starts. Keep just these three; still sandboxed.
                 CapDrop: ['ALL'],
-                CapAdd: ['DAC_OVERRIDE', 'CHOWN'],
+                CapAdd: ['DAC_OVERRIDE', 'CHOWN', 'FOWNER'],
                 SecurityOpt: ['no-new-privileges'],
             },
         })
@@ -1374,7 +1379,10 @@ export class KJDocker {
                     },
                 ],
                 CapDrop: ['ALL'],
-                CapAdd: ['DAC_OVERRIDE', 'CHOWN'],
+                // FOWNER too: the isolation image hardens /home/agent to a
+                // sticky `root:bun 1771`, where deleting/overwriting files the
+                // helper doesn't own needs CAP_FOWNER (#107).
+                CapAdd: ['DAC_OVERRIDE', 'CHOWN', 'FOWNER'],
                 SecurityOpt: ['no-new-privileges'],
             },
         })
