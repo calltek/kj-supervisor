@@ -14,6 +14,7 @@
  */
 
 import type { KJDocker } from '../../docker/client/client'
+import { isolationVolumeName } from '../../docker/client/hardening'
 import type { OperationTracker } from '../../docker/operation-tracker/operation-tracker'
 import type { KJLogger } from '../../logger'
 import type {
@@ -265,7 +266,12 @@ export class AgentLifecycleHandler {
                     await this.docker.removeContainer(match.container_id)
                 }
                 await this.docker.removeVolume(volume_name)
-                log.info({ volume_name }, 'cleanup done')
+                // An isolating image also had a separate root-owned state
+                // volume (kj-agent-base#107). Best-effort: most agents never
+                // isolated, so a 404 here is the norm, not a failure.
+                const iso_volume_name = isolationVolumeName(volume_name)
+                await this.docker.removeVolume(iso_volume_name).catch(() => undefined)
+                log.info({ volume_name, iso_volume_name }, 'cleanup done')
             } catch (err) {
                 log.warn({ err: errMessage(err) }, 'cleanup failed')
             }
