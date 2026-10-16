@@ -27,7 +27,7 @@ describe('validateProtocolBody', () => {
     })
     test('rejects a body missing required exports', () => {
         const problems = validateProtocolBody('export const PROTOCOL_VERSION = 1\n', null)
-        expect(problems.join()).toContain('KJ_LABEL')
+        expect(problems.join()).toContain('AgentSpawnPayload')
     })
 })
 
