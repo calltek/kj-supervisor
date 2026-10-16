@@ -26,6 +26,21 @@ export type KJLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const VALID_LOG_LEVELS: ReadonlySet<KJLogLevel> = new Set(['debug', 'info', 'warn', 'error'])
 
+/**
+ * Hosts where plain http to the control is accepted without an explicit
+ * opt-in: loopback, `*.localhost`, and the Docker Desktop alias a dev
+ * container uses to reach the host's control.
+ */
+function isDevHost(hostname: string): boolean {
+    return (
+        hostname === 'localhost' ||
+        hostname.endsWith('.localhost') ||
+        hostname === '127.0.0.1' ||
+        hostname === '[::1]' ||
+        hostname === 'host.docker.internal'
+    )
+}
+
 export class KJSettings {
     readonly control_url: string
     readonly config_dir: string
@@ -67,7 +82,8 @@ export class KJSettings {
     static load(): KJSettings {
         const control_url = KJSettings.parseUrl(
             'KJ_CONTROL_URL',
-            KJSettings.requireEnv('KJ_CONTROL_URL')
+            KJSettings.requireEnv('KJ_CONTROL_URL'),
+            KJSettings.optionalEnv('KJ_ALLOW_INSECURE_CONTROL') === '1'
         )
 
         const log_level_raw = KJSettings.optionalEnv('KJ_LOG_LEVEL') ?? 'info'
@@ -102,7 +118,7 @@ export class KJSettings {
         return value.trim()
     }
 
-    private static parseUrl(name: string, raw: string): string {
+    private static parseUrl(name: string, raw: string, allow_insecure = false): string {
         let parsed: URL
         try {
             parsed = new URL(raw)
@@ -111,6 +127,16 @@ export class KJSettings {
         }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
             throw new Error(`${name} must use http(s), got: ${parsed.protocol}`)
+        }
+        // Over plain http anyone on the network path can impersonate the
+        // control and send agent:spawn / agent:exec to this host.
+        if (parsed.protocol === 'http:' && !allow_insecure && !isDevHost(parsed.hostname)) {
+            throw new Error(
+                `${name} must use https:// (got ${raw}): over plain http anyone on the ` +
+                    'network path could impersonate the control plane and run commands on ' +
+                    'this server. Use https://api.kujira.so. For a development control on a ' +
+                    'non-local host only, set KJ_ALLOW_INSECURE_CONTROL=1 (never in production).'
+            )
         }
         // Drop trailing slash so callers can append paths predictably.
         return raw.replace(/\/+$/, '')
