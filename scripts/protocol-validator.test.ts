@@ -39,3 +39,23 @@ describe('checkPin', () => {
         expect(checkPin(`${valid}// x`, sha256(valid))).toContain('mismatch')
     })
 })
+
+// Shape of the real https://api.kujira.so/protocol body (trimmed): the supervisor's own
+// constants (KJ_LABEL...) live in client.ts and must NOT be required from the endpoint.
+const realShaped = `/** Wire protocol. KJ_LABEL is not here. */
+export const PROTOCOL_VERSION = 7
+export const WS_ERROR_CODES = { A: 'a' } as const
+export interface AgentSpawnPayload { agent_id: string }
+export interface AgentInputPayload { agent_id: string }
+export interface AgentStatusReport { agent_id: string }
+`
+
+describe('real-shaped body', () => {
+    test('is accepted', () => {
+        expect(validateProtocolBody(realShaped, 'text/typescript')).toEqual([])
+    })
+    test('names only mentioned in comments do not count as exports', () => {
+        const commented = `// export const PROTOCOL_VERSION = 1\n/* export interface AgentSpawnPayload {} */\nexport const X = 1\n`
+        expect(validateProtocolBody(commented, null).join()).toContain('PROTOCOL_VERSION')
+    })
+})

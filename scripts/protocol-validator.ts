@@ -9,14 +9,16 @@ import { createHash } from 'node:crypto'
 /** Identifiers the supervisor cannot live without; a body lacking any is not our protocol. */
 export const REQUIRED_EXPORTS = [
     'PROTOCOL_VERSION',
-    'KJ_LABEL',
-    'KJ_LABEL_AGENT_ID',
     'AgentSpawnPayload',
+    'AgentInputPayload',
+    'AgentStatusReport',
 ] as const
 
 const MAX_BYTES = 2_000_000
 
-export function extractExports(source: string): Set<string> {
+export function extractExports(rawSource: string): Set<string> {
+    // Drop comments so a name mentioned only in a comment does not count as an export.
+    const source = rawSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
     const names = new Set<string>()
     const regex =
         /export\s+(?:type\s+|interface\s+|class\s+|const\s+|function\s+|enum\s+)?([A-Z_][A-Za-z0-9_]*)/g
