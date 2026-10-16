@@ -23,6 +23,7 @@ import {
     withoutIsolationCaps,
 } from './hardening'
 import { agentHostAliases, withHostAlias } from './host-access'
+import { buildSeedScript } from './seed-script'
 
 /**
  * Our own container id, read from /proc — works under `--network host` where
@@ -1215,50 +1216,9 @@ export class KJDocker {
             await this.pullImage(helperImage, () => {})
         }
 
-        // Encode each file as a heredoc the shell can run safely. Use
-        // base64 to avoid having to escape arbitrary markdown content
-        // (backticks, $, EOF markers, …) inside the heredoc.
-        const targetDir = opts.target_dir.replace(/^\/+/, '').replace(/\/+$/, '')
-        const lines: string[] = ['set -e', `mkdir -p "/v/${targetDir}"`]
-        if (opts.purge) {
-            // Wipe contents (recursive) but keep the directory itself
-            // so its existing ownership/permissions stay intact.
-            // `find` is more portable than `rm -rf glob` for hidden
-            // files and avoids the "argument list too long" trap.
-            lines.push(`find "/v/${targetDir}" -mindepth 1 -delete`)
-        }
-        for (const f of opts.files) {
-            // The path may contain `/` for S3-style folder nesting
-            // (memory names like `comercial/oferta.md`). `mkdir -p`
-            // on every parent before writing keeps the helper simple
-            // and idempotent — Alpine's mkdir handles the no-op case.
-            const safeName = f.path.replace(/^\/+/, '')
-            const parent = safeName.includes('/')
-                ? safeName.slice(0, safeName.lastIndexOf('/'))
-                : ''
-            if (parent) {
-                lines.push(`mkdir -p "/v/${targetDir}/${parent}"`)
-            }
-            const b64 = Buffer.from(f.content, 'utf8').toString('base64')
-            // Remove first: previous seeds may have left the file as
-            // 0444 (readonly), which would make the next write fail
-            // with EACCES. `rm -f` no-ops when the file doesn't exist.
-            lines.push(`rm -f "/v/${targetDir}/${safeName}"`)
-            lines.push(`echo "${b64}" | base64 -d > "/v/${targetDir}/${safeName}"`)
-            if (f.readonly) {
-                lines.push(`chmod 0444 "/v/${targetDir}/${safeName}"`)
-            }
-        }
-        // The helper runs as root, so everything it creates (the target
-        // dir tree + the files) ends up root:root. But the agent runs as
-        // UID 1000 (`bun`) and must be able to WRITE inside these dirs —
-        // e.g. the wrapper's syncBuiltinSkills() copies image skills into
-        // .claude/skills/ at boot. Without this chown that fails with
-        // EACCES and the base skills/context never land. Chown the whole
-        // target tree to 1000:1000 (readonly files keep their 0444 mode —
-        // ownership and permission bits are independent).
-        lines.push(`chown -R 1000:1000 "/v/${targetDir}"`)
-        const script = lines.join('\n')
+        // Validates and shell-quotes every path before building the script;
+        // a hostile path throws here and never reaches `sh`.
+        const { script, targetDir } = buildSeedScript(opts)
 
         const container = await this.docker.createContainer({
             Image: helperImage,
