@@ -319,6 +319,18 @@ Cada `bun run build` recompila el supervisor contra la versión más
 reciente del protocolo. Si el control bumpea `PROTOCOL_VERSION` el
 siguiente build del supervisor lo refleja automáticamente.
 
+### Integridad del cuerpo descargado (#24)
+
+`pull-protocol` no escribe lo que le llega sin mirarlo: exige HTTP 200,
+`content-type` plausible, cuerpo no vacío ni HTML, que parsee como TypeScript
+(`Bun.Transpiler`, sin ejecutarlo) y que siga exportando lo que el supervisor usa
+(`scripts/protocol-validator.ts`). Un portal cautivo o una página de error ya no
+acaban en la imagen. **Pin de hash opcional**: `bun run scripts/pull-protocol.ts
+--update-pin` escribe `protocol.sha256`; con `KJ_PROTOCOL_PIN=1` el script falla si
+el cuerpo no coincide. No es obligatorio porque el backend redespliega
+`protocol.ts` en cada cambio de protocolo y un pin estricto pondría el CI rojo
+hasta actualizar el hash; se activa donde interese y se actualiza en un PR revisable.
+
 ### Drift en CI
 
 ```bash
