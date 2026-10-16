@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import os from 'node:os'
 
 import { KJLogger } from '../../logger'
-import { KJDocker, buildBackupScript, execCmd } from './client'
+import { EXEC_USER, KJDocker, buildBackupScript, execCmd } from './client'
 
 const silentLogger = KJLogger.create('error')
 
@@ -656,5 +656,31 @@ describe('execCmd — a docker exec never inherits the model credential', () => 
         expect(cmd).not.toContain('ANTHROPIC_API_KEY')
         expect(cmd).toContain('CLAUDE_CODE_OAUTH_TOKEN')
         expect(cmd.slice(-3)).toEqual(['/bin/sh', '-c', 'run.sh'])
+    })
+})
+
+describe('exec — corre como el usuario del agente, no como el de la imagen', () => {
+    test('el exec se crea con User 1000:1000 (la imagen -isolation acaba en root)', async () => {
+        let spec: any = null
+        const { EventEmitter } = await import('node:events')
+        const fake = {
+            getContainer: () => ({
+                exec: async (s: any) => {
+                    spec = s
+                    return {
+                        start: async () => {
+                            const stream = new EventEmitter()
+                            setTimeout(() => stream.emit('end'), 0)
+                            return stream
+                        },
+                        inspect: async () => ({ ExitCode: 0 }),
+                    }
+                },
+            }),
+        }
+        const docker = new KJDocker(silentLogger, fake as never)
+        await docker.exec({ container_id: 'c1', command: 'id', timeout_ms: 1000 })
+        expect(spec.User).toBe(EXEC_USER)
+        expect(EXEC_USER).toBe('1000:1000')
     })
 })

@@ -327,6 +327,9 @@ export function execCmd(command: string, env?: Record<string, string>): string[]
     return ['env', ...unset, '/bin/sh', '-c', command]
 }
 
+/** uid:gid of the agent user (`bun`) inside the agent images. */
+export const EXEC_USER = '1000:1000'
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -714,6 +717,12 @@ export class KJDocker {
             AttachStdout: true,
             AttachStderr: true,
             Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+            // Always the agent user, never the image's Config.User: the
+            // `-isolation` image ends in `USER root` (its launcher must drop to
+            // each conversation's uid), and a root exec with the isolation caps
+            // reads every isolated conversation's HOME and transcript. In the
+            // normal image the user is already bun, so this changes nothing.
+            User: EXEC_USER,
             // Tty:true merges stdout+stderr into a single RAW stream (no 8-byte
             // multiplex frames), so we read bytes directly — no demux, and no
             // "(HTTP code 101) unexpected" from mishandling the hijacked socket.
