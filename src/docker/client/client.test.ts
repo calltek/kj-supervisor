@@ -14,6 +14,11 @@ const silentLogger = KJLogger.create('error')
 class FakeDocker {
     public containers: Record<string, unknown> = {}
     public createdSpec: any = null
+    /** Every spec passed to createContainer, failed attempts included. */
+    public createAttempts: any[] = []
+    /** Errors the next createContainer calls throw, in order. */
+    public createErrors: Error[] = []
+    public removed: string[] = []
 
     getContainer(nameOrId: string) {
         return {
@@ -25,11 +30,16 @@ class FakeDocker {
             start: async () => undefined,
             stop: async () => undefined,
             kill: async () => undefined,
-            remove: async () => undefined,
+            remove: async () => {
+                this.removed.push(nameOrId)
+            },
         }
     }
 
     async createContainer(spec: any) {
+        this.createAttempts.push(spec)
+        const err = this.createErrors.shift()
+        if (err) throw err
         this.createdSpec = spec
         return { id: 'new-container-id', start: async () => undefined }
     }
@@ -408,6 +418,106 @@ describe('un contenedor de agente NUNCA ve el socket de Docker (#12)', () => {
 
         const paths = mountedPaths(fake.createdSpec.HostConfig)
         expect(paths.some((p) => p.includes(DOCKER_SOCKET))).toBe(false)
+    })
+})
+
+describe('ExtraHosts y el alias del host (#34)', () => {
+    const ALIAS = 'host.docker.internal:host-gateway'
+    const HOST_GATEWAY_ERROR = new Error(
+        '(HTTP code 400) unexpected - invalid IP address in add-host: "host-gateway"'
+    )
+
+    function agentSource(extraHosts?: string[]) {
+        return {
+            Config: { Env: [], Cmd: null, Entrypoint: null, Labels: {} },
+            HostConfig: {
+                Binds: [],
+                Mounts: [],
+                RestartPolicy: { Name: 'unless-stopped' },
+                NetworkMode: 'bridge',
+                GroupAdd: [],
+                Memory: 0,
+                NanoCpus: 0,
+                ExtraHosts: extraHosts,
+            },
+        }
+    }
+
+    const recreate = (fake: FakeDocker) =>
+        makeDocker(fake).recreateContainerWithImage({
+            source_container: 'kj-agent-9',
+            new_image_tag: 'img:new',
+            keep_name: 'kj-agent-9',
+        })
+
+    test('una entrada ajena del origen no sobrevive a la recreación', async () => {
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-9'] = agentSource(['api.github.com:10.6.6.6', ALIAS])
+        await recreate(fake)
+        expect(fake.createdSpec.HostConfig.ExtraHosts).toEqual([ALIAS])
+    })
+
+    test('el clon blue/green del supervisor no lleva el alias', async () => {
+        // No es un contenedor de agente: va con --network host y el socket.
+        const fake = new FakeDocker()
+        fake.containers['kj-supervisor'] = agentSource(['api.github.com:10.6.6.6'])
+        await makeDocker(fake).cloneContainerWithNewImage({
+            source_container: 'kj-supervisor',
+            new_image_tag: 'ghcr.io/calltek/kj-supervisor:latest',
+            new_name: 'kj-supervisor-new-1',
+        })
+        expect(fake.createdSpec.HostConfig.ExtraHosts).toBeUndefined()
+    })
+
+    test('si el demonio rechaza host-gateway, la recreación NO deja al agente sin contenedor', async () => {
+        // El origen ya se ha borrado cuando se crea el reemplazo: un fallo aquí
+        // dejaba el agente en ERROR en cada actualización de imagen.
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-9'] = agentSource([ALIAS])
+        fake.createErrors = [HOST_GATEWAY_ERROR]
+
+        const id = await recreate(fake)
+
+        expect(fake.removed).toEqual(['kj-agent-9'])
+        expect(id).toBe('new-container-id')
+        expect(fake.createAttempts).toHaveLength(2)
+        expect(fake.createAttempts[0].HostConfig.ExtraHosts).toEqual([ALIAS])
+        expect(fake.createdSpec.HostConfig.ExtraHosts).toBeUndefined()
+        // Lo demás del contenedor no se toca al reintentar.
+        expect(fake.createdSpec.HostConfig.CapDrop).toEqual(['ALL'])
+        expect(fake.createdSpec.OpenStdin).toBe(true)
+    })
+
+    test('y el arranque desde cero tampoco falla por el alias', async () => {
+        const fake = new FakeDocker()
+        fake.createErrors = [new Error('unable to derive the IP value for host-gateway')]
+        const id = await makeDocker(fake).runContainer({
+            image_tag: 'img',
+            name: 'kj-agent-1',
+            env: {},
+            labels: {},
+            resources: { memory_mb: 512, cpu: 1 },
+        })
+        expect(id).toBe('new-container-id')
+        expect(fake.createAttempts).toHaveLength(2)
+        expect(fake.createdSpec.HostConfig.ExtraHosts).toBeUndefined()
+        expect(fake.createdSpec.HostConfig.SecurityOpt).toEqual(['no-new-privileges'])
+    })
+
+    test('cualquier otro error de create sigue subiendo, sin reintento', async () => {
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-9'] = agentSource([ALIAS])
+        fake.createErrors = [new Error('No such image: img:new')]
+        await expect(recreate(fake)).rejects.toThrow('No such image: img:new')
+        expect(fake.createAttempts).toHaveLength(1)
+    })
+
+    test('si el reintento sin alias también falla, ese error sube', async () => {
+        const fake = new FakeDocker()
+        fake.containers['kj-agent-9'] = agentSource([ALIAS])
+        fake.createErrors = [HOST_GATEWAY_ERROR, new Error('Conflict. The name is in use')]
+        await expect(recreate(fake)).rejects.toThrow('Conflict. The name is in use')
+        expect(fake.createAttempts).toHaveLength(2)
     })
 })
 

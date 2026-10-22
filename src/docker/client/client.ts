@@ -22,7 +22,7 @@ import {
     withoutDockerSocket,
     withoutIsolationCaps,
 } from './hardening'
-import { agentHostAliases, withHostAlias } from './host-access'
+import { agentHostAliases, isHostGatewayUnsupported, recreatedHostAliases } from './host-access'
 import { buildSeedScript } from './seed-script'
 
 /**
@@ -498,7 +498,7 @@ export class KJDocker {
               ]
             : undefined
 
-        const container = await this.docker.createContainer({
+        const container = await this.createAgentContainer({
             Image: opts.image_tag,
             name: opts.name,
             Env: envArray,
@@ -837,11 +837,9 @@ export class KJDocker {
                 RestartPolicy: source.HostConfig.RestartPolicy,
                 NetworkMode: source.HostConfig.NetworkMode,
                 GroupAdd: source.HostConfig.GroupAdd,
-                // El clon tiene que alcanzar el host igual que el original: si
-                // no, actualizar la imagen de un agente que corre contra un
-                // modelo local lo deja sin modelo, y el fallo aparece un turno
-                // después.
-                ExtraHosts: withHostAlias(source.HostConfig.ExtraHosts),
+                // No ExtraHosts: this is the supervisor, not an agent — it runs
+                // with `--network host` and the Docker socket, and the host
+                // alias is an agent concern (host-access.ts, #34).
                 // Preserve the source's resource limits (KUJI-42) — don't
                 // silently drop them on the blue/green clone.
                 Memory: source.HostConfig.Memory,
@@ -901,6 +899,16 @@ export class KJDocker {
         // The new image may start (or stop) isolating conversations by uid;
         // read it from the image we are moving TO, not the one we are leaving.
         const isolation = await this.imageIsolatesByUser(opts.new_image_tag)
+
+        // Only the host alias crosses over; anything else in the source's
+        // ExtraHosts was put there by hand and is dropped, with a trace (#34).
+        const extraHosts = recreatedHostAliases(host.ExtraHosts)
+        for (const entry of extraHosts.dropped)
+            this.logger.warn(
+                { container: opts.source_container, entry },
+                'dropping an ExtraHosts entry the source container carried — not set by Kujira'
+            )
+
         // Stop + remove old first; the name has to be free before we
         // can reuse it. Force is on by default — the operator already
         // accepted the downtime by clicking the button.
@@ -909,7 +917,7 @@ export class KJDocker {
 
         const sanitized = withoutDockerSocket(host)
 
-        const created = await this.docker.createContainer({
+        const created = await this.createAgentContainer({
             Image: opts.new_image_tag,
             name: opts.keep_name,
             Env: env,
@@ -942,9 +950,9 @@ export class KJDocker {
                 RestartPolicy: host.RestartPolicy,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,
-                // Igual que el clon: recrear por imagen no puede dejar sin host
-                // a un agente que corre contra un modelo local.
-                ExtraHosts: withHostAlias(host.ExtraHosts),
+                // Recrear por imagen no puede dejar sin host a un agente que
+                // corre contra un modelo local; y sólo pasa el alias (#34).
+                ExtraHosts: extraHosts.hosts,
                 // Re-apply the resource limits (KUJI-42). The control's value
                 // wins; otherwise preserve what the source had (never silently
                 // leave it unbounded again).
@@ -972,6 +980,30 @@ export class KJDocker {
         await created.start()
         this.logger.info({ new_container_id: created.id }, 'recreate started')
         return created.id
+    }
+
+    /**
+     * `createContainer` for an agent, retried once WITHOUT `ExtraHosts` if the
+     * daemon rejects `host-gateway` (Engine < 20.10, or no gateway IP it can
+     * derive). The alias is a convenience; the container is not. On recreate
+     * the source is already gone by the time we create, so failing here left
+     * the agent with no container at all on every image update (#34). Any
+     * other error — and a second failure — propagates untouched.
+     */
+    private async createAgentContainer(
+        spec: Docker.ContainerCreateOptions
+    ): Promise<Docker.Container> {
+        try {
+            return await this.docker.createContainer(spec)
+        } catch (err) {
+            if (!spec.HostConfig?.ExtraHosts?.length || !isHostGatewayUnsupported(err)) throw err
+            this.logger.warn(
+                { name: spec.name, err: (err as Error).message },
+                'docker rejected the host-gateway alias — creating the container without it'
+            )
+            const { ExtraHosts: _dropped, ...hostConfig } = spec.HostConfig
+            return this.docker.createContainer({ ...spec, HostConfig: hostConfig })
+        }
     }
 
     /**

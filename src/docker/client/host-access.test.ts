@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { HOST_ALIAS, agentHostAliases, withHostAlias } from './host-access'
+import {
+    HOST_ALIAS,
+    agentHostAliases,
+    isHostGatewayUnsupported,
+    recreatedHostAliases,
+} from './host-access'
 
 describe('el alias del host', () => {
     test('un contenedor nuevo puede nombrar a su máquina', () => {
@@ -12,29 +17,62 @@ describe('el alias del host', () => {
 })
 
 describe('al recrear un contenedor', () => {
+    const ALIAS = [`${HOST_ALIAS}:host-gateway`]
+
     test('se añade el alias si no lo tenía', () => {
-        expect(withHostAlias(undefined)).toEqual([`${HOST_ALIAS}:host-gateway`])
-        expect(withHostAlias(null)).toEqual([`${HOST_ALIAS}:host-gateway`])
-        expect(withHostAlias([])).toEqual([`${HOST_ALIAS}:host-gateway`])
+        for (const origen of [undefined, null, []])
+            expect(recreatedHostAliases(origen)).toEqual({ hosts: ALIAS, dropped: [] })
     })
 
     test('no se duplica si ya estaba', () => {
         // Recrear un contenedor ya recreado no puede ir acumulando entradas:
         // un `ExtraHosts` con el mismo nombre dos veces es ambiguo.
-        const once = withHostAlias([])
-        expect(withHostAlias(once)).toEqual(once)
+        const once = recreatedHostAliases([]).hosts
+        expect(recreatedHostAliases(once)).toEqual({ hosts: ALIAS, dropped: [] })
     })
 
-    test('se respeta un alias que apunte a otro sitio', () => {
-        // Si alguien lo fijó a mano a una IP concreta, ésa es su intención:
-        // el mismo criterio con el que la recreación hereda CapAdd y Devices
-        // del contenedor de origen y no de lo que el control cree.
-        const manual = [`${HOST_ALIAS}:10.0.0.5`]
-        expect(withHostAlias(manual)).toEqual(manual)
+    test('el alias se reconoce sin mirar mayúsculas', () => {
+        const origen = ['HOST.Docker.Internal:host-gateway']
+        expect(recreatedHostAliases(origen)).toEqual({ hosts: ALIAS, dropped: [] })
     })
 
-    test('no se pierde lo que el agente ya tuviera', () => {
-        const otros = ['registro.interno:10.1.2.3', 'nas.local:10.1.2.9']
-        expect(withHostAlias(otros)).toEqual([...otros, `${HOST_ALIAS}:host-gateway`])
+    test('una entrada ajena NO sobrevive, y se devuelve para dejar traza (#34)', () => {
+        // Un `/etc/hosts` reescrito a mano que pasara de recreación en
+        // recreación es un MITM persistente contra un agente con credenciales.
+        const origen = ['api.github.com:10.6.6.6', `${HOST_ALIAS}:host-gateway`]
+        expect(recreatedHostAliases(origen)).toEqual({
+            hosts: ALIAS,
+            dropped: ['api.github.com:10.6.6.6'],
+        })
+    })
+
+    test('tampoco un alias del host desviado a otra IP', () => {
+        // Es el nombre por el que el agente llega a su modelo: desviarlo es el
+        // mismo ataque.
+        expect(recreatedHostAliases([`${HOST_ALIAS}:10.0.0.5`])).toEqual({
+            hosts: ALIAS,
+            dropped: [`${HOST_ALIAS}:10.0.0.5`],
+        })
+    })
+})
+
+describe('un demonio que no admite host-gateway', () => {
+    test('se reconoce por el mensaje de Docker', () => {
+        // Engine < 20.10, y uno moderno sin IP de pasarela que derivar.
+        expect(
+            isHostGatewayUnsupported(
+                new Error('(HTTP code 400) invalid IP address in add-host: "host-gateway"')
+            )
+        ).toBe(true)
+        expect(
+            isHostGatewayUnsupported(new Error('unable to derive the IP value for host-gateway'))
+        ).toBe(true)
+    })
+
+    test('cualquier otro fallo no se confunde con éste', () => {
+        expect(isHostGatewayUnsupported(new Error('No such image: img:new'))).toBe(false)
+        expect(isHostGatewayUnsupported(new Error('Conflict. The container name is in use'))).toBe(
+            false
+        )
     })
 })
