@@ -21,31 +21,59 @@
  * verdad a la salida del contenedor es otro trabajo, y sigue pendiente.
  *
  * Vive aquí y no repetido en cada `createContainer` por lo mismo que
- * `agentHardening`: hay TRES caminos que crean contenedores de agente (arranque,
- * clon blue/green y recreación por imagen) y ya divergieron una vez, dejando
- * agentes recreados sin las capabilities que sus vecinos sí tenían.
+ * `agentHardening`: hay DOS caminos que crean contenedores de agente (arranque y
+ * recreación por imagen) y ya divergieron una vez, dejando agentes recreados sin
+ * las capabilities que sus vecinos sí tenían. El clon blue/green NO es uno de
+ * ellos: es el propio supervisor, y no lleva el alias (#34).
  */
 export const HOST_ALIAS = 'host.docker.internal'
 
+const HOST_ALIAS_ENTRY = `${HOST_ALIAS}:host-gateway`
+
 /** El `ExtraHosts` que da a un contenedor el nombre de su propia máquina. */
 export function agentHostAliases(): string[] {
-    return [`${HOST_ALIAS}:host-gateway`]
+    return [HOST_ALIAS_ENTRY]
 }
 
 /**
- * Los `ExtraHosts` de un contenedor recreado: los que tuviera, más el alias del
- * host si le faltaba.
+ * Los `ExtraHosts` de un contenedor de agente recreado: SÓLO el alias del host,
+ * diga lo que diga el de origen. `dropped` son las entradas del origen que no
+ * pasan, para que quien llama deje traza de ellas.
  *
- * Se conserva lo que había en vez de imponer la lista porque un `ExtraHosts`
- * puesto a mano en el contenedor de origen es parte de cómo ese agente alcanza
- * lo suyo — el mismo criterio con el que la recreación hereda `CapAdd` y
- * `Devices` del origen y no de la intención del control. Y se añade el alias
- * porque un agente recreado tiene que poder llegar al host igual que uno recién
- * arrancado: ésa es exactamente la deriva que este módulo existe para evitar.
+ * No se hereda nada porque `ExtraHosts` reescribe el `/etc/hosts` del
+ * contenedor: una línea `api.github.com:10.x.x.x` puesta a mano en el origen
+ * sobreviviría a cada actualización de imagen y apuntaría a un agente con
+ * credenciales a donde quisiera quien la puso (#34). Ningún agente legítimo
+ * lleva otro `ExtraHosts` — sólo lo crea `runContainer`, y sólo con el alias —,
+ * así que lo que aparezca aquí no viene de Kujira. Es el mismo criterio que
+ * `withoutDockerSocket`: lo que se copia del origen no puede ser la puerta por
+ * la que un contenedor tocado a mano contagia a todos los que vengan después.
+ *
+ * Tampoco se respeta un `host.docker.internal` fijado a otra IP: es el nombre
+ * por el que el agente llega a su modelo, y desviarlo es el mismo ataque.
  */
-export function withHostAlias(existing: string[] | null | undefined): string[] {
-    const kept = existing ?? []
-    return kept.some((entry) => entry.startsWith(`${HOST_ALIAS}:`))
-        ? [...kept]
-        : [...kept, ...agentHostAliases()]
+export function recreatedHostAliases(existing: string[] | null | undefined): {
+    hosts: string[]
+    dropped: string[]
+} {
+    const dropped = (existing ?? []).filter((entry) => !isHostAliasEntry(entry))
+    return { hosts: agentHostAliases(), dropped }
+}
+
+/** Docker no distingue mayúsculas en los nombres de host: aquí tampoco. */
+function isHostAliasEntry(entry: string): boolean {
+    return entry.trim().toLowerCase() === HOST_ALIAS_ENTRY
+}
+
+/**
+ * Si un error de `createContainer` es el demonio rechazando `host-gateway`.
+ *
+ * Pasa en Docker Engine < 20.10 (`invalid IP address in add-host:
+ * "host-gateway"`) y en uno moderno que no sabe qué IP darle (`unable to derive
+ * the IP value for host-gateway`). Se mira el mensaje y nada más: cualquier otro
+ * fallo de create tiene que seguir subiendo tal cual.
+ */
+export function isHostGatewayUnsupported(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err)
+    return /add-host|host-gateway/i.test(message)
 }
