@@ -117,6 +117,20 @@ export class KJControlClient extends EventEmitter {
      * si ni recortado cabe (ver socket-budget.ts). Las dos cosas dejan rastro:
      * un evento recortado o perdido no se ve en ningún otro sitio.
      */
+    /** Un ack que cabe, o un error en su lugar si ni recortado cabe. */
+    private fitAck(event: string, response: unknown): unknown {
+        const fit = this.fit(event, response)
+        if (fit) return fit.payload
+        return {
+            ok: false,
+            error: {
+                code: 'INTERNAL_ERROR',
+                message: `ack for ${event} too large for the socket`,
+                retryable: false,
+            },
+        }
+    }
+
     private fit(event: string, payload: unknown): { payload: unknown } | null {
         const fit = fitToSocket(event, payload)
         if (!fit) {
@@ -161,7 +175,11 @@ export class KJControlClient extends EventEmitter {
         event: string,
         handler: (payload: TPayload) => Promise<TAck> | TAck
     ): void {
-        this.socket.on(event, async (payload: TPayload, ack?: (response: unknown) => void) => {
+        this.socket.on(event, async (payload: TPayload, rawAck?: (response: unknown) => void) => {
+            // Un ack también viaja por el socket: uno enorme lo cerraría y el
+            // control se quedaría sin respuesta igual. Todos pasan por aquí,
+            // también los que se repiten para un request_id ya visto.
+            const ack = rawAck && ((response: unknown) => rawAck(this.fitAck(event, response)))
             // Idempotency: if this request_id already ran, replay its ack
             // and DON'T re-execute the handler (a retried at-least-once
             // command must not double-spawn / double-deliver).
@@ -198,23 +216,7 @@ export class KJControlClient extends EventEmitter {
             try {
                 const result = await run
                 if (request_id) this.dedup.remember(request_id, result)
-                if (ack) {
-                    // Un ack también viaja por el socket: uno enorme lo
-                    // cerraría y el control se quedaría sin respuesta igual.
-                    const fit = this.fit(event, result)
-                    ack(
-                        fit
-                            ? fit.payload
-                            : {
-                                  ok: false,
-                                  error: {
-                                      code: 'INTERNAL_ERROR',
-                                      message: `ack for ${event} too large for the socket`,
-                                      retryable: false,
-                                  },
-                              }
-                    )
-                }
+                if (ack) ack(result)
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err)
                 this.logger.error({ event, err: message }, 'handler threw')

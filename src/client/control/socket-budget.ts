@@ -46,7 +46,7 @@ export function fitToSocket(
 function shrink(value: unknown, cap: number): unknown {
     if (typeof value === 'string') {
         if (value.length <= cap) return value
-        const head = value.slice(0, Math.min(cap, 2_000))
+        const head = value.slice(0, cap)
         return `${head}… [recortado por Kujira: ${kb(value.length)} no caben en el socket]`
     }
     if (Array.isArray(value)) return value.map((v) => shrink(v, cap))
@@ -70,10 +70,10 @@ function inlineFile(obj: Record<string, unknown>): Record<string, unknown> | nul
     if (obj.type !== 'image' && obj.type !== 'document') return null
     const source = obj.source as Record<string, unknown> | undefined
     if (!source || source.type !== 'base64' || typeof source.data !== 'string') return null
-    const what = obj.type === 'image' ? 'imagen' : 'documento'
+    const what = obj.type === 'image' ? 'imagen omitida' : 'documento omitido'
     return {
         type: 'text',
-        text: `[${what} omitido por Kujira: ${kb(source.data.length)} no caben en el socket]`,
+        text: `[${what} por Kujira: ${kb(source.data.length)} no caben en el socket]`,
     }
 }
 
