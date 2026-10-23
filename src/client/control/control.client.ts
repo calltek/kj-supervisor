@@ -20,6 +20,7 @@ import { io, type Socket } from 'socket.io-client'
 import type { WsErrorPayload } from '../../protocol'
 import type { KJLogger } from '../../logger'
 import { CommandDedup, requestIdOf } from './command-dedup'
+import { fitToSocket, payloadBytes } from './socket-budget'
 
 export interface ControlClientOptions {
     /** Base URL of the control, e.g. `http://localhost:5050`. */
@@ -107,7 +108,45 @@ export class KJControlClient extends EventEmitter {
 
     /** Fire-and-forget push. Used for events the control doesn't ack. */
     push(event: string, payload: unknown): void {
-        this.socket.emit(event, payload)
+        const fit = this.fit(event, payload)
+        if (fit) this.socket.emit(event, fit.payload)
+    }
+
+    /**
+     * Lo que se va a emitir, recortado si pasa del tope del socket, o `null`
+     * si ni recortado cabe (ver socket-budget.ts). Las dos cosas dejan rastro:
+     * un evento recortado o perdido no se ve en ningún otro sitio.
+     */
+    /** Un ack que cabe, o un error en su lugar si ni recortado cabe. */
+    private fitAck(event: string, response: unknown): unknown {
+        const fit = this.fit(event, response)
+        if (fit) return fit.payload
+        return {
+            ok: false,
+            error: {
+                code: 'INTERNAL_ERROR',
+                message: `ack for ${event} too large for the socket`,
+                retryable: false,
+            },
+        }
+    }
+
+    private fit(event: string, payload: unknown): { payload: unknown } | null {
+        const fit = fitToSocket(event, payload)
+        if (!fit) {
+            this.logger.error(
+                { event, bytes: payloadBytes(event, payload) },
+                'payload too large for the socket even after trimming — dropped'
+            )
+            return null
+        }
+        if (fit.shrunk) {
+            this.logger.warn(
+                { event, bytes: payloadBytes(event, payload) },
+                'payload trimmed to fit the socket'
+            )
+        }
+        return fit
     }
 
     /**
@@ -136,7 +175,11 @@ export class KJControlClient extends EventEmitter {
         event: string,
         handler: (payload: TPayload) => Promise<TAck> | TAck
     ): void {
-        this.socket.on(event, async (payload: TPayload, ack?: (response: unknown) => void) => {
+        this.socket.on(event, async (payload: TPayload, rawAck?: (response: unknown) => void) => {
+            // Un ack también viaja por el socket: uno enorme lo cerraría y el
+            // control se quedaría sin respuesta igual. Todos pasan por aquí,
+            // también los que se repiten para un request_id ya visto.
+            const ack = rawAck && ((response: unknown) => rawAck(this.fitAck(event, response)))
             // Idempotency: if this request_id already ran, replay its ack
             // and DON'T re-execute the handler (a retried at-least-once
             // command must not double-spawn / double-deliver).
@@ -199,11 +242,16 @@ export class KJControlClient extends EventEmitter {
      */
     emitWithAck<TAck>(event: string, payload: unknown, timeoutMs: number): Promise<TAck> {
         return new Promise((resolve, reject) => {
+            const fit = this.fit(event, payload)
+            if (!fit) {
+                reject(new Error(`${event} too large for the socket`))
+                return
+            }
             const t = setTimeout(() => {
                 reject(new Error(`ack timeout for ${event} after ${timeoutMs}ms`))
             }, timeoutMs)
 
-            this.socket.emit(event, payload, (ack: TAck) => {
+            this.socket.emit(event, fit.payload, (ack: TAck) => {
                 clearTimeout(t)
                 resolve(ack)
             })
