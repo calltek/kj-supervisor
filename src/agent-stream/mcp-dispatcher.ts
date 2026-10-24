@@ -104,6 +104,9 @@ export interface McpDispatcherDeps {
             conversation_id?: number
             contact_id?: number
             conversation_session_id?: string
+            // The turn in flight and its inputs (kj-app docs/acceso-al-equipo.md §3.6).
+            turn_id?: string
+            turn_request_ids?: string[]
         }
     ) => Promise<McpRequestAck>
     /**
@@ -124,7 +127,12 @@ export interface McpDispatcherDeps {
     resolveTarget: (
         agent_id: number,
         conversation_session_id: string | undefined
-    ) => { conversation_id?: number; contact_id?: number }
+    ) => {
+        conversation_id?: number
+        contact_id?: number
+        turn_id?: string
+        turn_request_ids?: string[]
+    }
     logger: KJLogger
 }
 

@@ -96,7 +96,7 @@ describe('AgentStreamManager.resolveTarget (KUJI-84)', () => {
     test("a call from Elena's session resolves to Elena, though Bego wrote last", async () => {
         const m = await twoActiveConversations()
         // Bego is last_active; the buggy heuristic would return Bego here.
-        expect(m.resolveTarget(7, 'sess-elena')).toEqual({
+        expect(m.resolveTarget(7, 'sess-elena')).toMatchObject({
             conversation_id: 148,
             contact_id: 152,
         })
@@ -104,7 +104,7 @@ describe('AgentStreamManager.resolveTarget (KUJI-84)', () => {
 
     test("a call from Bego's session resolves to Bego", async () => {
         const m = await twoActiveConversations()
-        expect(m.resolveTarget(7, 'sess-bego')).toEqual({
+        expect(m.resolveTarget(7, 'sess-bego')).toMatchObject({
             conversation_id: 149,
             contact_id: 153,
         })
@@ -668,5 +668,74 @@ describe('agent:metrics dice de qué conversación es el turno', () => {
         const m = await metricasDe(RESULT)
         expect(m).toBeDefined()
         expect(m && 'conversation_id' in m).toBe(false)
+    })
+})
+
+/**
+ * The turn id (kj-app docs/acceso-al-equipo.md §3.6): every MCP call of a
+ * session carries the turn in flight and the inputs it absorbed, so the control
+ * can tell a turn the person opened from one a follow-up slipped into.
+ */
+describe('AgentStreamManager turn tracking', () => {
+    async function withStdout(): Promise<{ m: AgentStreamManager; out: PassThrough }> {
+        let out = new PassThrough()
+        const docker = {
+            attachContainer: async () => new PassThrough(),
+            demuxAttachStream: (_s: unknown, stdout: PassThrough) => {
+                out = stdout
+            },
+        } as never
+        const m = new AgentStreamManager({ docker, client: new FakeClient(), logger: silentLogger })
+        await m.attach({
+            agent_id: 7,
+            container_id: 'c1',
+            session_id: 'agent-default',
+            conversations: [{ session_id: 'sess-a', conversation_id: 1 }],
+        })
+        return { m, out }
+    }
+    const input = (request_id: string) => ({
+        request_id,
+        agent_id: 7,
+        message: 'x',
+        conversation_id: 1,
+        conversation_session_id: 'sess-a',
+    })
+    const result = (out: PassThrough) =>
+        new Promise<void>((resolve) => {
+            out.write(
+                `${JSON.stringify({ conversation_session_id: 'sess-a', event: { type: 'result', subtype: 'success' } })}\n`
+            )
+            setTimeout(resolve, 10)
+        })
+
+    test('an input opens a turn and a mid-turn input joins it', async () => {
+        const { m } = await withStdout()
+        m.write(input('r1'))
+        const first = m.resolveTarget(7, 'sess-a')
+        expect(first.turn_request_ids).toEqual(['r1'])
+        m.write(input('r2'))
+        const second = m.resolveTarget(7, 'sess-a')
+        expect(second.turn_id).toBe(first.turn_id)
+        expect(second.turn_request_ids).toEqual(['r1', 'r2'])
+    })
+
+    test("the session's result closes the turn; the next input opens a new one", async () => {
+        const { m, out } = await withStdout()
+        m.write(input('r1'))
+        const first = m.resolveTarget(7, 'sess-a').turn_id
+        await result(out)
+        expect(m.resolveTarget(7, 'sess-a').turn_id).toBeUndefined()
+        m.write(input('r2'))
+        const next = m.resolveTarget(7, 'sess-a')
+        expect(next.turn_id).not.toBe(first)
+        expect(next.turn_request_ids).toEqual(['r2'])
+    })
+
+    test('a call that does not name its session gets no turn', async () => {
+        const { m } = await withStdout()
+        m.write(input('r1'))
+        expect(m.resolveTarget(7, undefined).turn_id).toBeUndefined()
+        expect(m.resolveTarget(7, 'sess-other').turn_id).toBeUndefined()
     })
 })
