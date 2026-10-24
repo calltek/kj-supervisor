@@ -712,10 +712,10 @@ describe('AgentStreamManager turn tracking', () => {
     test('an input opens a turn and a mid-turn input joins it', async () => {
         const { m } = await withStdout()
         m.write(input('r1'))
-        const first = m.resolveTarget(7, 'sess-a')
+        const first = m.resolveTarget(7, 'sess-a', true)
         expect(first.turn_request_ids).toEqual(['r1'])
         m.write(input('r2'))
-        const second = m.resolveTarget(7, 'sess-a')
+        const second = m.resolveTarget(7, 'sess-a', true)
         expect(second.turn_id).toBe(first.turn_id)
         expect(second.turn_request_ids).toEqual(['r1', 'r2'])
     })
@@ -723,11 +723,11 @@ describe('AgentStreamManager turn tracking', () => {
     test("the session's result closes the turn; the next input opens a new one", async () => {
         const { m, out } = await withStdout()
         m.write(input('r1'))
-        const first = m.resolveTarget(7, 'sess-a').turn_id
+        const first = m.resolveTarget(7, 'sess-a', true).turn_id
         await result(out)
-        expect(m.resolveTarget(7, 'sess-a').turn_id).toBeUndefined()
+        expect(m.resolveTarget(7, 'sess-a', true).turn_id).toBeUndefined()
         m.write(input('r2'))
-        const next = m.resolveTarget(7, 'sess-a')
+        const next = m.resolveTarget(7, 'sess-a', true)
         expect(next.turn_id).not.toBe(first)
         expect(next.turn_request_ids).toEqual(['r2'])
     })
@@ -736,6 +736,53 @@ describe('AgentStreamManager turn tracking', () => {
         const { m } = await withStdout()
         m.write(input('r1'))
         expect(m.resolveTarget(7, undefined).turn_id).toBeUndefined()
-        expect(m.resolveTarget(7, 'sess-other').turn_id).toBeUndefined()
+        expect(m.resolveTarget(7, 'sess-other', true).turn_id).toBeUndefined()
+    })
+})
+
+describe('AgentStreamManager turn lending', () => {
+    async function manager(): Promise<AgentStreamManager> {
+        const m = new AgentStreamManager({
+            docker: makeDocker(),
+            client: new FakeClient(),
+            logger: silentLogger,
+        })
+        await m.attach({
+            agent_id: 7,
+            container_id: 'c1',
+            session_id: 'agent-default',
+            conversations: [{ session_id: 'sess-a', conversation_id: 1 }],
+        })
+        return m
+    }
+    const input = (request_id: string) => ({
+        request_id,
+        agent_id: 7,
+        message: 'x',
+        conversation_id: 1,
+        conversation_session_id: 'sess-a',
+    })
+
+    test('a session kj-mcp did not check against the calling process gets no turn', async () => {
+        const m = await manager()
+        m.write(input('r1'))
+        expect(m.resolveTarget(7, 'sess-a').turn_id).toBeUndefined()
+        expect(m.resolveTarget(7, 'sess-a', false).turn_id).toBeUndefined()
+        expect(m.resolveTarget(7, 'sess-a', true).turn_id).toBeDefined()
+    })
+
+    test('a repeated request_id is recorded once', async () => {
+        const m = await manager()
+        m.write(input('r1'))
+        m.write(input('r1'))
+        expect(m.resolveTarget(7, 'sess-a', true).turn_request_ids).toEqual(['r1'])
+    })
+
+    test('a turn past 50 inputs is no longer lent', async () => {
+        const m = await manager()
+        for (let i = 0; i < 50; i++) m.write(input(`r${i}`))
+        expect(m.resolveTarget(7, 'sess-a', true).turn_request_ids).toHaveLength(50)
+        m.write(input('r50'))
+        expect(m.resolveTarget(7, 'sess-a', true).turn_id).toBeUndefined()
     })
 })

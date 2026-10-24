@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { McpDispatcher, isMcpEnvelope, type McpEnvelope } from './mcp-dispatcher'
+import { McpDispatcher, isMcpEnvelope, type McpEnvelope, type McpTarget } from './mcp-dispatcher'
 import type { McpRequestAck } from '../protocol'
 
 function silentLogger() {
@@ -131,6 +131,41 @@ describe('McpDispatcher.onContainerLine', () => {
         expect(sentTargets).toEqual([
             { conversation_id: 148, contact_id: 152, conversation_session_id: 'sess-elena' },
         ])
+    })
+
+    test('lends the turn only as far as kj-mcp vouched for the session, and forwards it', async () => {
+        const verified: boolean[] = []
+        const sent: McpTarget[] = []
+        const dispatcher = new McpDispatcher({
+            sendRequest: async (_agent_id, _request_id, _tool, _args, target) => {
+                sent.push(target)
+                return { ok: true, data: {} } satisfies McpRequestAck
+            },
+            writeToContainer: () => true,
+            resolveTarget: (_agent_id, _session, session_verified) => {
+                verified.push(session_verified)
+                return session_verified ? { turn_id: 't1', turn_request_ids: ['r1'] } : {}
+            },
+            logger: silentLogger(),
+        })
+        const call = (request_id: string, session_verified?: boolean) =>
+            dispatcher.onContainerLine(7, {
+                kj_channel: 'mcp',
+                kind: 'request',
+                request_id,
+                tool: 'browser_navigate',
+                args: {},
+                conversation_session_id: 'sess-a',
+                ...(session_verified !== undefined ? { session_verified } : {}),
+            })
+        call('a', true)
+        call('b')
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+
+        expect(verified).toEqual([true, false])
+        expect(sent[0]).toMatchObject({ turn_id: 't1', turn_request_ids: ['r1'] })
+        expect(sent[1]?.turn_id).toBeUndefined()
     })
 
     test('forwards a structured error ack back to the container', async () => {

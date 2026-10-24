@@ -29,7 +29,12 @@ import type {
     AgentMetricsReport,
     AgentWarmupPayload,
 } from '../protocol'
-import { isMcpEnvelope, type McpDispatcher, type McpEnvelope } from './mcp-dispatcher'
+import {
+    isMcpEnvelope,
+    type McpDispatcher,
+    type McpEnvelope,
+    type McpTarget,
+} from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
 
@@ -104,7 +109,7 @@ interface AgentStream {
 }
 
 /** A turn in flight: its id and every `agent:input` it has absorbed. */
-export interface OpenTurn {
+interface OpenTurn {
     id: string
     request_ids: string[]
 }
@@ -208,13 +213,9 @@ export class AgentStreamManager {
      */
     resolveTarget(
         agent_id: number,
-        conversation_session_id: string | undefined
-    ): {
-        conversation_id?: number
-        contact_id?: number
-        turn_id?: string
-        turn_request_ids?: string[]
-    } {
+        conversation_session_id: string | undefined,
+        session_verified = false
+    ): McpTarget {
         const entry = this.streams.get(agent_id)
         if (!entry) return {}
         // KUJI-84: prefer the session the CALL carried. Only fall back to the
@@ -240,12 +241,16 @@ export class AgentStreamManager {
             session = entry.last_active_session_id
         }
         if (!session) return {}
-        // The turn only for a call that named its own session: a guessed
-        // session (the legacy fallback above) must never borrow another
+        // The turn only for a call whose session kj-mcp checked against the
+        // calling process (session_verified): the URL alone is a uuid any
+        // process in the container can send, and the turn decides whether a
+        // tool may use the person's computer. Never for a guessed session
+        // (the legacy fallback above) either: it would borrow another
         // conversation's turn.
-        const turn = conversation_session_id
-            ? entry.turn_by_session.get(conversation_session_id)
-            : undefined
+        const turn =
+            conversation_session_id && session_verified
+                ? entry.turn_by_session.get(conversation_session_id)
+                : undefined
         return {
             conversation_id: entry.conversation_id_by_session.get(session),
             contact_id: entry.contact_id_by_session.get(session),
