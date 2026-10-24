@@ -90,6 +90,9 @@ import {
 } from './reporters/server-metrics/server-metrics.reporter'
 import { type UpdateCheckHandle, startUpdateCheckLoop } from './update-check/update-check'
 
+/** Stand-in for the turn fields of `McpRequestPayload`, until the control's `protocol.ts` ships them. */
+type McpRequestWithTurn = McpRequestPayload & { turn_id?: string; turn_request_ids?: string[] }
+
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_MISSING,
     WS_ERROR_CODES.AUTH_INVALID,
@@ -241,31 +244,35 @@ async function main(): Promise<void> {
     // first and let the dispatcher close over it.
     let streams: AgentStreamManager
     const mcp = new McpDispatcher({
-        sendRequest: (agent_id, request_id, tool, args, target) =>
-            client.emitWithAck<McpRequestAck>(
-                'mcp:request',
-                {
-                    request_id,
-                    agent_id,
-                    tool: tool as McpRequestPayload['tool'],
-                    args,
-                    ...(target.conversation_id !== undefined
-                        ? { conversation_id: target.conversation_id }
-                        : {}),
-                    ...(target.contact_id !== undefined ? { contact_id: target.contact_id } : {}),
-                    // The container's raw session stamp — the control resolves
-                    // the conversation from it against the DB (KJ-27: strict,
-                    // origin-agnostic filtering, no in-memory-map guessing).
-                    ...(target.conversation_session_id !== undefined
-                        ? { conversation_session_id: target.conversation_session_id }
-                        : {}),
-                },
-                15000
-            ),
+        sendRequest: (agent_id, request_id, tool, args, target) => {
+            const request: McpRequestWithTurn = {
+                request_id,
+                agent_id,
+                tool: tool as McpRequestPayload['tool'],
+                args,
+                ...(target.conversation_id !== undefined
+                    ? { conversation_id: target.conversation_id }
+                    : {}),
+                ...(target.contact_id !== undefined ? { contact_id: target.contact_id } : {}),
+                // The container's raw session stamp — the control resolves
+                // the conversation from it against the DB (KJ-27: strict,
+                // origin-agnostic filtering, no in-memory-map guessing).
+                ...(target.conversation_session_id !== undefined
+                    ? { conversation_session_id: target.conversation_session_id }
+                    : {}),
+                // The turn in flight: the control only lets a tool use the
+                // person's computer if every input of it was sealed by
+                // their app (kj-app docs/acceso-al-equipo.md §3.6).
+                ...(target.turn_id !== undefined
+                    ? { turn_id: target.turn_id, turn_request_ids: target.turn_request_ids }
+                    : {}),
+            }
+            return client.emitWithAck<McpRequestAck>('mcp:request', request, 15000)
+        },
         writeToContainer: (agent_id: number, envelope: McpEnvelope) =>
             streams.writeMcp(agent_id, envelope),
-        resolveTarget: (agent_id: number, conversation_session_id: string | undefined) =>
-            streams.resolveTarget(agent_id, conversation_session_id),
+        resolveTarget: (agent_id, conversation_session_id, session_verified) =>
+            streams.resolveTarget(agent_id, conversation_session_id, session_verified),
         logger,
     })
     streams = new AgentStreamManager({ docker, client, logger, mcp })

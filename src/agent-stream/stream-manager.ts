@@ -18,6 +18,7 @@
  * stream-json content.
  */
 
+import { randomUUID } from 'node:crypto'
 import { PassThrough } from 'node:stream'
 
 import type { KJDocker } from '../docker/client/client'
@@ -28,7 +29,12 @@ import type {
     AgentMetricsReport,
     AgentWarmupPayload,
 } from '../protocol'
-import { isMcpEnvelope, type McpDispatcher, type McpEnvelope } from './mcp-dispatcher'
+import {
+    isMcpEnvelope,
+    type McpDispatcher,
+    type McpEnvelope,
+    type McpTarget,
+} from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
 
@@ -90,7 +96,26 @@ interface AgentStream {
      * Current images always carry the calling session — route by that.
      */
     last_active_session_id: string | null
+    /**
+     * The turn running in each conversation session (kj-app
+     * `docs/acceso-al-equipo.md` §3.6). Opened by an input that finds the
+     * session idle, joined by any input that lands mid-turn, closed by that
+     * session's `result`. Every MCP call of the session carries it, so the
+     * control knows which inputs opened the turn. In memory on purpose: after a
+     * restart the turn in flight is lost, and a call without a turn is simply
+     * not sealed.
+     */
+    turn_by_session: Map<string, OpenTurn>
 }
+
+/** A turn in flight: its id and every `agent:input` it has absorbed. */
+interface OpenTurn {
+    id: string
+    request_ids: string[]
+}
+
+/** Past this many inputs a turn stops recording them, and so stops counting as sealed. */
+const MAX_TURN_INPUTS = 50
 
 export interface AgentStreamManagerDeps {
     docker: KJDocker
@@ -188,8 +213,9 @@ export class AgentStreamManager {
      */
     resolveTarget(
         agent_id: number,
-        conversation_session_id: string | undefined
-    ): { conversation_id?: number; contact_id?: number } {
+        conversation_session_id: string | undefined,
+        session_verified = false
+    ): McpTarget {
         const entry = this.streams.get(agent_id)
         if (!entry) return {}
         // KUJI-84: prefer the session the CALL carried. Only fall back to the
@@ -215,10 +241,39 @@ export class AgentStreamManager {
             session = entry.last_active_session_id
         }
         if (!session) return {}
+        // The turn only for a call whose session kj-mcp checked against the
+        // calling process (session_verified): the URL alone is a uuid any
+        // process in the container can send, and the turn decides whether a
+        // tool may use the person's computer. Never for a guessed session
+        // (the legacy fallback above) either: it would borrow another
+        // conversation's turn.
+        const turn =
+            conversation_session_id && session_verified
+                ? entry.turn_by_session.get(conversation_session_id)
+                : undefined
         return {
             conversation_id: entry.conversation_id_by_session.get(session),
             contact_id: entry.contact_id_by_session.get(session),
+            ...(turn && turn.request_ids.length <= MAX_TURN_INPUTS
+                ? { turn_id: turn.id, turn_request_ids: [...turn.request_ids] }
+                : {}),
         }
+    }
+
+    /**
+     * An input reaches a session: it opens a turn if the session is idle, or
+     * joins the one in flight (Claude Code takes it into the running turn).
+     */
+    private noteTurnInput(entry: AgentStream, session_id: string, request_id: string): void {
+        const turn = entry.turn_by_session.get(session_id)
+        if (!turn) {
+            entry.turn_by_session.set(session_id, { id: randomUUID(), request_ids: [request_id] })
+            return
+        }
+        if (turn.request_ids.includes(request_id)) return
+        // Past the cap the id is still recorded (one more), so `resolveTarget`
+        // sees the turn as too long and drops it: it can't be judged whole.
+        if (turn.request_ids.length <= MAX_TURN_INPUTS) turn.request_ids.push(request_id)
     }
 
     /**
@@ -339,6 +394,7 @@ export class AgentStreamManager {
             ),
             contact_id_by_session: new Map(),
             last_active_session_id: null,
+            turn_by_session: new Map(),
         }
         this.streams.set(opts.agent_id, entry)
 
@@ -507,6 +563,8 @@ export class AgentStreamManager {
 
         try {
             entry.stream.write(line)
+            // Before the first tool call of this input can come back.
+            this.noteTurnInput(entry, sessionForInput, payload.request_id)
             return { ok: true }
         } catch (err) {
             this.logger.warn(
@@ -591,6 +649,13 @@ export class AgentStreamManager {
         const conversation_id = conversation_session_id
             ? entry.conversation_id_by_session.get(conversation_session_id)
             : undefined
+
+        // The session's `result` closes its turn (the wrapper also sends one for
+        // a turn whose process died). After it, nothing of that session carries
+        // the turn any more.
+        if (event.type === 'result') {
+            entry.turn_by_session.delete(conversation_session_id ?? entry.session_id)
+        }
 
         // Patch the classifier context so the session_id stamped on the
         // output report matches the conversation's session (not just

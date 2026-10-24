@@ -47,6 +47,24 @@ export interface McpRequestEnvelope {
      * absent (older agent image) we fall back to the legacy heuristic.
      */
     conversation_session_id?: string
+    /**
+     * `true` only when kj-mcp checked `conversation_session_id` against the
+     * PROCESS behind the call (kj-agent-base `peer-session.ts`: the calling
+     * process's ancestry up to a conversation's `claude`), not just read it
+     * off the URL, which any process in the container can forge. Only a
+     * verified session gets its turn lent (`resolveTarget`): the turn decides
+     * whether a tool may use the person's computer.
+     */
+    session_verified?: boolean
+}
+
+/** Where an in-container MCP call goes, and the turn it belongs to. */
+export interface McpTarget {
+    conversation_id?: number
+    contact_id?: number
+    /** The turn in flight and its inputs (kj-app docs/acceso-al-equipo.md §3.6). */
+    turn_id?: string
+    turn_request_ids?: string[]
 }
 
 export interface McpResponseEnvelope {
@@ -100,11 +118,7 @@ export interface McpDispatcherDeps {
         // per-session kj-mcp URL) — the control resolves the conversation from
         // it against the DB (authoritative), rather than trusting our
         // in-memory-map guess. conversation_id/contact_id stay as a legacy hint.
-        target: {
-            conversation_id?: number
-            contact_id?: number
-            conversation_session_id?: string
-        }
+        target: McpTarget & { conversation_session_id?: string }
     ) => Promise<McpRequestAck>
     /**
      * Write a line to the agent's container stdin. Used to forward the
@@ -123,8 +137,10 @@ export interface McpDispatcherDeps {
      */
     resolveTarget: (
         agent_id: number,
-        conversation_session_id: string | undefined
-    ) => { conversation_id?: number; contact_id?: number }
+        conversation_session_id: string | undefined,
+        // Whether kj-mcp checked that session against the calling process.
+        session_verified: boolean
+    ) => McpTarget
     logger: KJLogger
 }
 
@@ -193,7 +209,11 @@ export class McpDispatcher {
         })
         log.debug('forwarding mcp request to control')
 
-        const target = this.deps.resolveTarget(agent_id, request.conversation_session_id)
+        const target = this.deps.resolveTarget(
+            agent_id,
+            request.conversation_session_id,
+            request.session_verified === true
+        )
         let response: McpResponseEnvelope
         try {
             const ack = await this.deps.sendRequest(
