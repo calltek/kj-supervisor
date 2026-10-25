@@ -63,7 +63,20 @@ describe('buildSeedScript — legitimate input', () => {
         expect(script).toContain("base64 -d > '/v/.claude/memories/comercial/oferta.md'")
         expect(script).toContain("find '/v/.claude/memories' -mindepth 1 -delete")
         expect(script).toContain("chown -R 1000:1000 '/v/.claude/memories'")
+        // `.claude` was created by mkdir -p as root: it gets its owner too.
+        expect(script).toContain("chown -h 1000:1000 '/v/.claude'")
         expect(script).not.toContain('"/v/')
+    })
+
+    test('at the volume root only what was written changes owner, never the whole home', () => {
+        const { script } = buildSeedScript({
+            target_dir: '.',
+            files: [file('CLAUDE.md'), file('a/b.md')],
+        })
+        expect(script).not.toContain('chown -R')
+        expect(script).toContain("chown -h 1000:1000 '/v/CLAUDE.md'")
+        expect(script).toContain("chown -h 1000:1000 '/v/a'")
+        expect(script).toContain("chown -h 1000:1000 '/v/a/b.md'")
     })
 
     test('skill SKILL.md, readonly .kj files and target_dir "."', () => {
