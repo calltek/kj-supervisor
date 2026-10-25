@@ -58,19 +58,25 @@ export function buildSeedScript(opts: {
         if (f.readonly) lines.push(`chmod 0444 ${full}`)
     }
     // The agent runs as UID 1000 and must be able to write inside these dirs.
-    // At the volume root (`CLAUDE.md`) only what was written: a recursive
-    // chown there walks the agent's whole home — 1.9 M files on a busy one,
-    // over 80 s of every spawn — to fix files that are already its own.
+    // One by one (`-h`: a link is not followed), never the whole home: a
+    // recursive chown at the volume root walks every file the agent keeps —
+    // 1.9 M on a busy one, over 80 s of every spawn. The folders on the way to
+    // `target_dir` too: `mkdir -p` created them as root (`.claude` for
+    // `.claude/memories` on a new volume), and nothing else fixes them.
+    const owned = new Set<string>()
+    const own = (rel: string) => owned.add(rel ? `/v/${rel}` : '/v')
+    const dirParts = targetDir === '.' ? [] : targetDir.split('/')
+    for (let i = 1; i < dirParts.length; i++) own(dirParts.slice(0, i).join('/'))
     if (targetDir === '.') {
-        lines.push(`chown 1000:1000 ${root}`)
+        own('')
         for (const f of opts.files) {
-            // The file and each folder on the way to it, one by one.
             const parts = f.path.split('/')
-            for (let i = 1; i <= parts.length; i++)
-                lines.push(`chown 1000:1000 ${shellQuote(`/v/${parts.slice(0, i).join('/')}`)}`)
+            for (let i = 1; i <= parts.length; i++) own(parts.slice(0, i).join('/'))
         }
-    } else {
-        lines.push(`chown -R 1000:1000 ${root}`)
     }
+    for (const path of owned) lines.push(`chown -h 1000:1000 ${shellQuote(path)}`)
+    // Its own subtree, small and all the supervisor's: recursively (`-R`
+    // doesn't follow links either).
+    if (targetDir !== '.') lines.push(`chown -R 1000:1000 ${root}`)
     return { script: lines.join('\n'), targetDir }
 }
