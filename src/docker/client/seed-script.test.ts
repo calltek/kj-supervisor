@@ -66,6 +66,14 @@ describe('buildSeedScript — legitimate input', () => {
         expect(script).not.toContain('"/v/')
     })
 
+    test('at the volume root only what was written changes owner, never the whole home', () => {
+        const { script } = buildSeedScript({ target_dir: '.', files: [file('CLAUDE.md'), file('a/b.md')] })
+        expect(script).not.toContain('chown -R')
+        expect(script).toContain("chown 1000:1000 '/v/CLAUDE.md'")
+        expect(script).toContain("chown 1000:1000 '/v/a'")
+        expect(script).toContain("chown 1000:1000 '/v/a/b.md'")
+    })
+
     test('skill SKILL.md, readonly .kj files and target_dir "."', () => {
         const skills = buildSeedScript({
             target_dir: '.claude/skills/',

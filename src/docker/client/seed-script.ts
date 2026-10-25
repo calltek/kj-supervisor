@@ -58,6 +58,19 @@ export function buildSeedScript(opts: {
         if (f.readonly) lines.push(`chmod 0444 ${full}`)
     }
     // The agent runs as UID 1000 and must be able to write inside these dirs.
-    lines.push(`chown -R 1000:1000 ${root}`)
+    // At the volume root (`CLAUDE.md`) only what was written: a recursive
+    // chown there walks the agent's whole home — 1.9 M files on a busy one,
+    // over 80 s of every spawn — to fix files that are already its own.
+    if (targetDir === '.') {
+        lines.push(`chown 1000:1000 ${root}`)
+        for (const f of opts.files) {
+            // The file and each folder on the way to it, one by one.
+            const parts = f.path.split('/')
+            for (let i = 1; i <= parts.length; i++)
+                lines.push(`chown 1000:1000 ${shellQuote(`/v/${parts.slice(0, i).join('/')}`)}`)
+        }
+    } else {
+        lines.push(`chown -R 1000:1000 ${root}`)
+    }
     return { script: lines.join('\n'), targetDir }
 }
