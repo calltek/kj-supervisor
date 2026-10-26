@@ -505,8 +505,8 @@ export class KJDocker {
     }
 
     /**
-     * The uid registry on an isolation volume (`registry/uids.json`, root
-     * `0700`), read-only, or null. The root launcher kept the same file, so
+     * The uid registry on an isolation volume (`registry/uids.json`: the dir
+     * root `0700`, the file `0600`), read-only, or null. The root launcher kept the same file, so
      * the conversations already isolated keep their uids, and their HOMEs.
      */
     async readUidRegistry(volume_name: string): Promise<string | null> {

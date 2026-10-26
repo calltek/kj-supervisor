@@ -609,12 +609,6 @@ export class AgentStreamManager {
         ctx: ClassifierContext,
         entry: AgentStream
     ): void {
-        // kj-mcp envelope: the wrapper tagged this line as belonging to
-        // the MCP subprocess, not Claude Code. Bypass the classifier
-        // entirely and hand it off to the dispatcher. When the
-        // dispatcher isn't wired (unit tests, older deployments) the
-        // line is dropped silently — the wrapper just stops getting
-        // responses for that request.
         // The launcher asking to start an isolated conversation with its own
         // uid. Only the launcher writes this stdout (it is PID 1's).
         if (isExecRequest(payload)) {
@@ -622,6 +616,12 @@ export class AgentStreamManager {
             return
         }
 
+        // kj-mcp envelope: the wrapper tagged this line as belonging to
+        // the MCP subprocess, not Claude Code. Bypass the classifier
+        // entirely and hand it off to the dispatcher. When the
+        // dispatcher isn't wired (unit tests, older deployments) the
+        // line is dropped silently — the wrapper just stops getting
+        // responses for that request.
         if (isMcpEnvelope(payload)) {
             // Cast is safe — isMcpEnvelope just confirmed the marker.
             // See note on the predicate's signature for the why.

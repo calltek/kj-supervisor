@@ -30,8 +30,15 @@ export const SHIM_CMD = [
     '/app/src/isolation/shim.ts',
 ]
 
-/** At most this many execs in flight per agent: a runaway launcher can't fork-bomb the host. */
+/**
+ * At most this many `docker exec` CALLS at once per agent. It bounds the load
+ * on the Docker daemon, not the shims running: those count against the
+ * container's own limits, like any process the agent starts.
+ */
 const MAX_IN_FLIGHT = 16
+
+/** New conversations (new uids) an agent may start per minute. */
+export const NEW_UIDS_PER_MINUTE = 30
 
 /**
  * The uid that owns the Codex binaries on the isolation volume (`bin`, made
@@ -91,18 +98,32 @@ export function parseRegistry(json: string | null): Registry {
  * conversation → uid for ONE agent. Registered, never a hash: two
  * conversations sharing a uid would see each other's files.
  *
- * It lives on the agent's isolation volume (`registry/uids.json`, root `0700`)
- * — the same file the root launcher kept, so nothing to migrate, and it travels
- * with the agent's backups. Nothing in the container can write it: it has no
- * root. Only this supervisor's helper does, and only when a NEW conversation
- * gets its uid; reads come from memory.
+ * It lives on the agent's isolation volume (`registry/uids.json`: the dir
+ * root `0700`, the file `0600`) — the same file the root launcher kept, so
+ * nothing to migrate, and it travels with the agent's backups. Nothing in the
+ * container can write it: it has no root. Only this supervisor's helper does,
+ * and only when a NEW conversation gets its uid; reads come from memory.
+ *
+ * A uid is handed out only once it is SAVED: one handed out and then lost
+ * would go to another conversation after a restart. New uids are made one at
+ * a time, and each starts from the registry AS IT IS ON THE VOLUME (another
+ * launcher, or a restored backup, may have added uids since it was read); a
+ * second request for the same conversation waits for the same save.
  */
 export class UidRegistry {
+    /** Saves, one after another; a failed one doesn't stop the next. */
     private writes: Promise<void> = Promise.resolve()
+    private readonly pending = new Map<string, Promise<number>>()
+    /** When the last new uids were handed out, for NEW_UIDS_PER_MINUTE. */
+    private readonly recent: number[] = []
 
     constructor(
         private reg: Registry,
-        private readonly persist: (json: string) => Promise<void>
+        private readonly store: {
+            read: () => Promise<string | null>
+            write: (json: string) => Promise<void>
+        },
+        private readonly now: () => number = Date.now
     ) {}
 
     uidOf(session_id: string): number | undefined {
@@ -110,19 +131,42 @@ export class UidRegistry {
     }
 
     /** The conversation's uid, assigning (and saving) the next one if it has none. */
-    async uidFor(session_id: string): Promise<number> {
+    uidFor(session_id: string): Promise<number> {
         const have = this.reg.bySession[session_id]
-        if (have !== undefined) return have
-        if (this.reg.next > UID_MAX) throw new Error('uid range exhausted')
-        const uid = this.reg.next
-        this.reg.bySession[session_id] = uid
-        this.reg.next = uid + 1
-        const json = JSON.stringify(this.reg)
-        // Saved before anyone runs as it: a uid handed out and then lost would
-        // be handed again to another conversation.
-        this.writes = this.writes.then(() => this.persist(json))
-        await this.writes
-        return uid
+        if (have !== undefined) return Promise.resolve(have)
+        const inFlight = this.pending.get(session_id)
+        if (inFlight) return inFlight
+        const saved = this.writes.then(async () => {
+            const onVolume = parseRegistry(await this.store.read())
+            const known = onVolume.bySession[session_id]
+            if (known !== undefined) {
+                this.reg.bySession[session_id] = known
+                return known
+            }
+            // A runaway launcher could otherwise burn the range and fill the
+            // daemon with helpers.
+            const t = this.now()
+            while (this.recent.length && t - (this.recent[0] ?? 0) > 60_000) this.recent.shift()
+            if (this.recent.length >= NEW_UIDS_PER_MINUTE)
+                throw new Error('too many new conversations')
+            const uid = Math.max(onVolume.next, this.reg.next)
+            if (uid > UID_MAX) throw new Error('uid range exhausted')
+            const next: Registry = {
+                bySession: { ...this.reg.bySession, ...onVolume.bySession, [session_id]: uid },
+                next: uid + 1,
+            }
+            await this.store.write(JSON.stringify(next))
+            this.recent.push(t)
+            this.reg = next
+            return uid
+        })
+        this.writes = saved.then(
+            () => {},
+            () => {}
+        )
+        const result = saved.finally(() => this.pending.delete(session_id))
+        this.pending.set(session_id, result)
+        return result
     }
 }
 
@@ -141,7 +185,10 @@ export interface ExecDocker {
 
 export class ExecDispatcher {
     private readonly modes = new Map<string, Promise<'none' | 'root' | 'exec'>>()
-    private readonly registries = new Map<number, Promise<UidRegistry>>()
+    private readonly registries = new Map<
+        number,
+        { container_id: string; registry: Promise<UidRegistry> }
+    >()
     private readonly inFlight = new Map<number, number>()
 
     constructor(
@@ -209,34 +256,41 @@ export class ExecDispatcher {
         }
     }
 
-    /** A recreated container has another id; forget what we knew of the old one. */
-    forgetContainer(container_id: string): void {
-        this.modes.delete(container_id)
-    }
-
+    /** A container's image never changes: its answer is kept. A failed inspect is not. */
     private modeOf(container_id: string): Promise<'none' | 'root' | 'exec'> {
         let m = this.modes.get(container_id)
         if (!m) {
-            m = this.deps.docker.containerIsolationMode(container_id).catch(() => 'none' as const)
+            m = this.deps.docker.containerIsolationMode(container_id)
             this.modes.set(container_id, m)
+            m.catch(() => this.modes.delete(container_id))
         }
-        return m
+        return m.catch(() => 'none' as const)
     }
 
+    /**
+     * The registry is read again from the volume for every new CONTAINER of
+     * the agent: in between, an image with a root launcher may have handed out
+     * uids of its own, and an old copy here would hand them out again.
+     */
     private registryOf(agent_id: number, container_id: string): Promise<UidRegistry> {
-        let r = this.registries.get(agent_id)
-        if (!r) {
-            r = this.openRegistry(container_id)
-            this.registries.set(agent_id, r)
-            r.catch(() => this.registries.delete(agent_id))
-        }
-        return r
+        const have = this.registries.get(agent_id)
+        if (have && have.container_id === container_id) return have.registry
+        const registry = this.openRegistry(container_id)
+        this.registries.set(agent_id, { container_id, registry })
+        registry.catch(() => {
+            if (this.registries.get(agent_id)?.registry === registry)
+                this.registries.delete(agent_id)
+        })
+        return registry
     }
 
     private async openRegistry(container_id: string): Promise<UidRegistry> {
         const volume = await this.deps.docker.isolationVolumeOf(container_id)
         if (!volume) throw new Error('no isolation volume')
         const reg = parseRegistry(await this.deps.docker.readUidRegistry(volume))
-        return new UidRegistry(reg, (json) => this.deps.docker.writeUidRegistry(volume, json))
+        return new UidRegistry(reg, {
+            read: () => this.deps.docker.readUidRegistry(volume),
+            write: (json) => this.deps.docker.writeUidRegistry(volume, json),
+        })
     }
 }

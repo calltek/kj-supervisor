@@ -687,9 +687,16 @@ Diseño completo en kj-agent-base `docs/aislamiento-sin-root.md`.
   conversación; el trabajo lo recibe después el shim, ya con su uid.
 - **El uid lo elige el supervisor**, del registro `registry/uids.json` del
   volumen `-iso` — el mismo fichero que tenía el lanzador root, así que los
-  agentes en modo restringido conservan sus uids. Es de root `0600` y el
-  contenedor no tiene root: sólo lo escribe el ayudante, y sólo al dar un uid
-  nuevo. No va en `<config_dir>`: ese montaje es de solo lectura.
+  agentes en modo restringido conservan sus uids. La carpeta es de root
+  `0700` y el fichero `0600`; el contenedor no tiene root: sólo lo escribe el
+  ayudante, y sólo al dar un uid nuevo. No va en `<config_dir>`: ese montaje
+  es de solo lectura.
+- **Un uid se da sólo cuando está guardado**, y cada uid nuevo parte del
+  registro tal como está EN EL VOLUMEN: si se diera antes, un guardado fallido
+  o el uid que otro lanzador añadió entretanto acabarían en dos conversaciones
+  con el mismo uid, que leen los ficheros la una de la otra (Nova y SOKI,
+  #79). Por la misma razón el registro se vuelve a leer con cada contenedor
+  nuevo del agente. Máximo 30 conversaciones nuevas por minuto y agente.
 - **Op `binaries` corre siempre como el uid 998**, dueño de `bin/` (los
   binarios de Codex): ningún uid de conversación escribe lo que ejecutan las
   demás.
