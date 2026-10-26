@@ -36,9 +36,16 @@ export const SHIM_CMD = [
 /** At most this many execs in flight per agent: a runaway launcher can't fork-bomb the host. */
 const MAX_IN_FLIGHT = 16
 
+/**
+ * The uid that owns the Codex binaries on the isolation volume (`bin`, made
+ * so by prepareExecIsolationVolume). Op `binaries` always runs as it: no
+ * conversation uid ever writes what the others execute.
+ */
+export const BINARIES_UID = 998
+
 export interface ExecRequest {
     kj_channel: 'exec'
-    op: 'spawn' | 'purge'
+    op: 'spawn' | 'purge' | 'binaries'
     token: string
     session_id: string
 }
@@ -51,7 +58,7 @@ export function isExecRequest(line: Record<string, unknown>): line is ExecReques
 export function validExecRequest(r: Record<string, unknown>): r is ExecRequest & Record<string, unknown> {
     return (
         r.kj_channel === 'exec' &&
-        (r.op === 'spawn' || r.op === 'purge') &&
+        (r.op === 'spawn' || r.op === 'purge' || r.op === 'binaries') &&
         typeof r.token === 'string' &&
         /^[0-9a-f]{64}$/.test(r.token) &&
         isValidSessionId(r.session_id)
@@ -185,7 +192,12 @@ export class ExecDispatcher {
                 return
             }
             const registry = await this.registryOf(agent_id, container_id)
-            const uid = op === 'purge' ? registry.uidOf(session_id) : registry.uidFor(session_id)
+            const uid =
+                op === 'binaries'
+                    ? BINARIES_UID
+                    : op === 'purge'
+                      ? registry.uidOf(session_id)
+                      : registry.uidFor(session_id)
             if (uid === undefined) {
                 answer(false, { error: 'unknown conversation' })
                 return
