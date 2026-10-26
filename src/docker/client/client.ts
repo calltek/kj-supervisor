@@ -491,11 +491,14 @@ export class KJDocker {
             script: [
                 'set -e',
                 'mkdir -p /v/conv /v/bin',
-                'chown 0:0 /v /v/conv',
+                // chown first to root, chmod while root owns them, and only
+                // then hand `bin` over: the helper has no FOWNER, so it can't
+                // chmod what it no longer owns.
+                'chown 0:0 /v /v/conv /v/bin',
                 'chmod 0711 /v',
                 'chmod 1733 /v/conv',
-                'chown 998:998 /v/bin',
                 'chmod 0755 /v/bin',
+                'chown 998:998 /v/bin',
             ].join('\n'),
         })
         if (code !== 0) throw new Error(`isolation volume helper exited ${code}`)
