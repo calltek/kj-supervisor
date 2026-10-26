@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import os from 'node:os'
 
 import { KJLogger } from '../../logger'
-import { EXEC_USER, KJDocker, buildBackupScript, execCmd } from './client'
+import { EXEC_USER, KJDocker, buildBackupScript, buildRestoreScript, execCmd } from './client'
 
 const silentLogger = KJLogger.create('error')
 
@@ -677,6 +677,36 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // The stderr line dies with the helper on success (nobody reads green
         // logs); the line-anchored marker is what backupVolume() picks up.
         expect(script).toContain('echo "KJ_TAR_WARN=1"')
+    })
+
+    test('las copias de las bases se llevan el dueño y el modo del original', () => {
+        // Nacen de root y 0700 y al extraer pisan a las originales: la carpeta
+        // de una conversación aislada volvía de root y su uid no podía entrar.
+        expect(script).toContain('chmod "$(stat -c %a "/v/$P")" "$P"')
+        expect(script).toContain('chown "$(stat -c %u:%g "/v/$P")" "$P"')
+        expect(script.indexOf('stat -c %u:%g')).toBeLessThan(script.indexOf('tar -czf'))
+    })
+})
+
+describe('el volumen de aislamiento viaja en la copia', () => {
+    test('con él, las entradas son home/ e iso/, sin ./', () => {
+        // Sin el prefijo `./` una copia vieja no puede hacerse pasar por una
+        // nueva: lo que el agente escriba en su home no llega al volumen de root.
+        const tar = buildBackupScript(true)
+            .split('\n')
+            .find((l) => l.startsWith('tar -czf'))
+        expect(tar).toContain('--numeric-owner -C /v home iso -C /tmp/kjdb home iso')
+        expect(tar).not.toContain(' . ')
+    })
+
+    test('la restauración elige el formato por la primera entrada', () => {
+        const script = buildRestoreScript()
+        expect(script).toContain('if [ "$FIRST" != "home/" ]; then')
+        // El camino viejo no toca /iso.
+        const old = script.slice(script.indexOf('if [ "$FIRST"'), script.indexOf('fi\n'))
+        expect(old).not.toContain('/iso')
+        expect(script).toContain('--strip-components=1 -xzf /tmp/b.tgz iso')
+        expect(script).toContain('chmod 0711 /iso')
     })
 })
 

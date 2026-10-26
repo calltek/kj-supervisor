@@ -105,8 +105,17 @@ export interface DockerEvent {
  * It lives here and not inline because what it does is load-bearing and easy
  * to break by accident: which paths are skipped, and that SQLite databases are
  * copied with the mechanism that survives a concurrent writer.
+ *
+ * Two archive layouts. Without `withIso` the home volume is mounted at /v and
+ * every entry is `./…` — the format every backup had until now. With it, the
+ * home volume sits at /v/home and the isolation-state volume (each isolated
+ * conversation's HOME, the uid registry) at /v/iso, and the entries are
+ * `home/…` and `iso/…` with NO `./` prefix. That prefix is how the restore
+ * tells them apart: an old archive can never start with `home/`, whatever the
+ * agent named its files, so nothing it writes in its home can reach the
+ * root-owned volume on restore.
  */
-export function buildBackupScript(): string {
+export function buildBackupScript(withIso = false): string {
     return [
         'set -e',
         // GNU tar además de BusyBox: hace falta para meter en UN solo archivo
@@ -247,6 +256,19 @@ export function buildBackupScript(): string {
         '  exit 7',
         'fi',
         '',
+        '# Las copias y sus carpetas nacen de root y 0700, y al extraer pisan',
+        '# a las originales: una carpeta con una base dentro volvía de root, y',
+        '# su dueño ya no podía entrar en ella. Se les da el dueño y el modo del',
+        '# original. chmod antes que chown: luego ya no son de root.',
+        'cd /tmp/kjdb',
+        "find . -exec sh -c '",
+        '  for P do',
+        '    chmod "$(stat -c %a "/v/$P")" "$P"',
+        '    chown "$(stat -c %u:%g "/v/$P")" "$P"',
+        '  done',
+        '\' _ {} + || { echo "no se pudo copiar el dueño de las bases" >&2; exit 10; }',
+        'cd /',
+        '',
         '# Las copias van DESPUÉS del volumen a propósito: al extraer, la última',
         '# entrada de una ruta repetida gana, así que una restauración se queda',
         '# con la versión consistente sin que nadie tenga que elegir.',
@@ -258,7 +280,17 @@ export function buildBackupScript(): string {
         // that warning was a lost backup every time the dice rolled badly.
         // Exit 2+ (truncated archive, I/O error) is a real failure and stays
         // fatal.
-        'tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb . || {',
+        ...(withIso
+            ? [
+                  // Both tops exist even with no database copied, so the
+                  // member list never names a missing path (tar exit 2). Their
+                  // own entries are stripped on restore, metadata and all.
+                  'mkdir -p /tmp/kjdb/home /tmp/kjdb/iso',
+                  // Numeric: the isolated conversations' files belong to uids
+                  // that exist only inside the agent's image.
+                  'tar -czf /tmp/b.tgz --numeric-owner -C /v home iso -C /tmp/kjdb home iso || {',
+              ]
+            : ['tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb . || {']),
         '  RC=$?',
         '  if [ "$RC" -ge 2 ]; then exit "$RC"; fi',
         '  echo "aviso: ficheros cambiando durante el tar (agente en marcha)" >&2',
@@ -1367,6 +1399,10 @@ export class KJDocker {
         script: string
         env?: string[]
         readonly?: boolean
+        /** Volumes and where they go, in place of `volume_name` at /v. */
+        mounts?: Array<{ source: string; target: string }>
+        /** On top of DAC_OVERRIDE + CHOWN. */
+        extra_caps?: string[]
         /**
          * Fire `onMarker` as soon as this string shows up in the helper's
          * output, without waiting for it to finish.
@@ -1390,16 +1426,14 @@ export class KJDocker {
             Env: opts.env,
             HostConfig: {
                 AutoRemove: false,
-                Mounts: [
-                    {
-                        Type: 'volume',
-                        Source: opts.volume_name,
-                        Target: '/v',
-                        ReadOnly: !!opts.readonly,
-                    },
-                ],
+                Mounts: (opts.mounts ?? [{ source: opts.volume_name, target: '/v' }]).map((m) => ({
+                    Type: 'volume' as const,
+                    Source: m.source,
+                    Target: m.target,
+                    ReadOnly: !!opts.readonly,
+                })),
                 CapDrop: ['ALL'],
-                CapAdd: ['DAC_OVERRIDE', 'CHOWN'],
+                CapAdd: ['DAC_OVERRIDE', 'CHOWN', ...(opts.extra_caps ?? [])],
                 SecurityOpt: ['no-new-privileges'],
             },
         })
@@ -1451,9 +1485,23 @@ export class KJDocker {
         }
     }
 
+    /** Whether a named volume exists. False on any lookup error. */
+    async volumeExists(name: string): Promise<boolean> {
+        try {
+            await this.docker.getVolume(name).inspect()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /**
      * Tar the agent's /home/agent volume (gzip) and PUT it straight to a
-     * pre-signed R2 URL — the bytes never touch the control. The volume is
+     * pre-signed R2 URL — the bytes never touch the control. If the agent has
+     * an isolation-state volume (an image that isolates conversations by uid),
+     * it travels in the same archive: it holds each isolated conversation's
+     * HOME, and a migration deletes the source volumes once restored, so
+     * leaving it out lost those conversations for good. The volumes are
      * mounted read-only; the tarball is staged in the helper's /tmp (host
      * overlay) so curl can send a Content-Length. Returns the uploaded size,
      * plus the per-part ETags when the tarball had to go up in pieces.
@@ -1510,10 +1558,18 @@ export class KJDocker {
         // games; passed via env because the arg list would blow past ARG_MAX
         // with 60 signed URLs.
         const partUrls = multipart?.part_urls.join('\n') ?? ''
-        const script = buildBackupScript()
+        const iso_volume_name = isolationVolumeName(volume_name)
+        const withIso = await this.volumeExists(iso_volume_name)
+        const script = buildBackupScript(withIso)
 
         const { code, logs, stdout } = await this.runVolumeHelper({
             volume_name,
+            mounts: withIso
+                ? [
+                      { source: volume_name, target: '/v/home' },
+                      { source: iso_volume_name, target: '/v/iso' },
+                  ]
+                : undefined,
             script,
             // El tamaño se imprime justo después del tar: es la señal de que ya
             // no se está leyendo el volumen y el agente puede seguir.
@@ -1562,23 +1618,67 @@ export class KJDocker {
      * the agent's volume, REPLACING its contents (wipe + extract). The caller
      * must stop the container first (a running agent holds the volume). Hands
      * the root back to UID 1000 so the agent can write at boot.
+     *
+     * An archive that carries the isolation-state volume (see
+     * `buildBackupScript`) also replaces that one. The volume is mounted in
+     * any case, which creates it on a server that never had it (a migration
+     * target); if the archive turned out not to carry it, it's removed again.
      */
     async restoreVolume(volume_name: string, download_url: string): Promise<void> {
-        const script = [
-            'set -e',
-            'apk add --no-cache curl >/dev/null 2>&1',
-            'curl -fsS "$KJ_DOWNLOAD_URL" -o /tmp/b.tgz',
-            'find /v -mindepth 1 -delete',
-            'tar -C /v -xzf /tmp/b.tgz',
-            'chown 1000:1000 /v',
-        ].join('\n')
-        const { code, logs } = await this.runVolumeHelper({
+        const iso_volume_name = isolationVolumeName(volume_name)
+        const isoExisted = await this.volumeExists(iso_volume_name)
+        const { code, logs, stdout } = await this.runVolumeHelper({
             volume_name,
-            script,
+            mounts: [
+                { source: volume_name, target: '/v' },
+                { source: iso_volume_name, target: '/iso' },
+            ],
+            // GNU tar sets mode and times AFTER handing a file to its owner,
+            // and the isolated conversations' files aren't root's.
+            extra_caps: ['FOWNER'],
+            script: buildRestoreScript(),
             env: [`KJ_DOWNLOAD_URL=${download_url}`],
         })
+        const isoRestored = /^KJ_ISO_RESTORED=1$/m.test(stdout)
+        if (!isoExisted && !isoRestored) await this.removeVolume(iso_volume_name)
         if (code !== 0) throw new Error(`restore helper exited ${code}: ${logs.slice(-400)}`)
     }
+}
+
+/**
+ * The shell the restore helper runs: the home volume at /v, the
+ * isolation-state volume at /iso.
+ *
+ * The layout is read from the FIRST entry only: `home/` is the two-volume
+ * format, and an old archive can't produce it (all of its entries are `./…`).
+ * Old archives go down the old path untouched, and leave /iso alone.
+ */
+export function buildRestoreScript(): string {
+    return [
+        'set -e',
+        'apk add --no-cache curl >/dev/null 2>&1',
+        'curl -fsS "$KJ_DOWNLOAD_URL" -o /tmp/b.tgz',
+        'FIRST=$(tar -tzf /tmp/b.tgz | head -n 1)',
+        'if [ "$FIRST" != "home/" ]; then',
+        '  find /v -mindepth 1 -delete',
+        '  tar -C /v -xzf /tmp/b.tgz',
+        '  chown 1000:1000 /v',
+        '  exit 0',
+        'fi',
+        // GNU tar: BusyBox has neither member selection with
+        // --strip-components nor --numeric-owner.
+        'apk add --no-cache tar >/dev/null',
+        'find /v -mindepth 1 -delete',
+        'tar -C /v --numeric-owner --strip-components=1 -xzf /tmp/b.tgz home',
+        'chown 1000:1000 /v',
+        'find /iso -mindepth 1 -delete',
+        'tar -C /iso --numeric-owner --strip-components=1 -xzf /tmp/b.tgz iso',
+        // What kj-agent-base expects of its ISO_ROOT; the archive's own entry
+        // for it was stripped above.
+        'chown 0:0 /iso',
+        'chmod 0711 /iso',
+        'echo "KJ_ISO_RESTORED=1"',
+    ].join('\n')
 }
 
 /**
