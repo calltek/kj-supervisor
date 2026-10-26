@@ -505,12 +505,11 @@ export class KJDocker {
     }
 
     /**
-     * The uid registry a root launcher kept on the isolation volume
-     * (`registry/uids.json`), read-only, or null. Taken over once so the
-     * conversations that were already isolated keep their uids, and so the
-     * HOMEs they own.
+     * The uid registry on an isolation volume (`registry/uids.json`, root
+     * `0700`), read-only, or null. The root launcher kept the same file, so
+     * the conversations already isolated keep their uids, and their HOMEs.
      */
-    async readLegacyUidRegistry(volume_name: string): Promise<string | null> {
+    async readUidRegistry(volume_name: string): Promise<string | null> {
         const { code, stdout } = await this.runVolumeHelper({
             volume_name,
             readonly: true,
@@ -518,6 +517,28 @@ export class KJDocker {
         })
         if (code !== 0) return null
         return stdout.trim() || null
+    }
+
+    /**
+     * Save the uid registry on an isolation volume, root-only. The JSON goes
+     * in through the environment (never into the script), and is swapped in
+     * with a rename so a reader never sees half of it.
+     */
+    async writeUidRegistry(volume_name: string, json: string): Promise<void> {
+        const { code } = await this.runVolumeHelper({
+            volume_name,
+            env: [`KJ_UIDS=${json}`],
+            script: [
+                'set -e',
+                'umask 077',
+                'mkdir -p /v/registry',
+                'chown 0:0 /v/registry',
+                'chmod 0700 /v/registry',
+                'printf "%s" "$KJ_UIDS" > /v/registry/uids.json.tmp',
+                'mv /v/registry/uids.json.tmp /v/registry/uids.json',
+            ].join('\n'),
+        })
+        if (code !== 0) throw new Error(`uid registry helper exited ${code}`)
     }
 
     /** The isolation-state volume mounted in a container, if any. */

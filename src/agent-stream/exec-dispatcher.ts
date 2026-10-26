@@ -7,17 +7,14 @@
  *   { "kj_channel": "exec", "op": "spawn" | "purge", "token": "<64 hex>", "session_id": "<sid>" }
  *
  * and this supervisor `docker exec`s the shim with that conversation's uid —
- * the uid chosen HERE, from a registry kept on the supervisor's disk, where
- * nothing in the container can edit it — and answers on stdin:
+ * the uid chosen HERE, from a registry on the agent's isolation volume that
+ * only root can write and the container has no root — and answers on stdin:
  *
  *   { "type": "exec", "token": "…", "ok": true, "uid": 200001 }
  *
  * What runs is fixed here, never taken from the request: the agent only names
  * which conversation, and the shim gets its work from the launcher afterwards.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-
 import type { KJLogger } from '../logger'
 import { isValidSessionId } from '../handlers/agent-sessions-purge/session-paths'
 
@@ -70,82 +67,66 @@ interface Registry {
     next: number
 }
 
+/** Parse a stored registry, dropping anything out of range or malformed. */
+export function parseRegistry(json: string | null): Registry {
+    const reg: Registry = { bySession: {}, next: UID_BASE }
+    if (!json) return reg
+    const parsed = JSON.parse(json) as Partial<Registry>
+    for (const [sid, uid] of Object.entries(parsed.bySession ?? {})) {
+        if (!isValidSessionId(sid)) continue
+        if (!Number.isInteger(uid) || uid < UID_BASE || uid > UID_MAX) continue
+        reg.bySession[sid] = uid
+        reg.next = Math.max(reg.next, uid + 1)
+    }
+    if (typeof parsed.next === 'number' && parsed.next > reg.next && parsed.next <= UID_MAX + 1)
+        reg.next = parsed.next
+    return reg
+}
+
 /**
- * conversation → uid for ONE agent, on the supervisor's disk. Registered, never
- * a hash: two conversations sharing a uid would see each other's files.
+ * conversation → uid for ONE agent. Registered, never a hash: two
+ * conversations sharing a uid would see each other's files.
+ *
+ * It lives on the agent's isolation volume (`registry/uids.json`, root `0700`)
+ * — the same file the root launcher kept, so nothing to migrate, and it travels
+ * with the agent's backups. Nothing in the container can write it: it has no
+ * root. Only this supervisor's helper does, and only when a NEW conversation
+ * gets its uid; reads come from memory.
  */
 export class UidRegistry {
-    private reg: Registry | null = null
+    private writes: Promise<void> = Promise.resolve()
 
-    constructor(private readonly path: string) {}
-
-    exists(): boolean {
-        return existsSync(this.path)
-    }
+    constructor(
+        private reg: Registry,
+        private readonly persist: (json: string) => Promise<void>
+    ) {}
 
     uidOf(session_id: string): number | undefined {
-        return this.load().bySession[session_id]
+        return this.reg.bySession[session_id]
     }
 
-    uidFor(session_id: string): number {
-        const reg = this.load()
-        const have = reg.bySession[session_id]
+    /** The conversation's uid, assigning (and saving) the next one if it has none. */
+    async uidFor(session_id: string): Promise<number> {
+        const have = this.reg.bySession[session_id]
         if (have !== undefined) return have
-        if (reg.next > UID_MAX) throw new Error('uid range exhausted')
-        const uid = reg.next
-        reg.bySession[session_id] = uid
-        reg.next = uid + 1
-        this.save(reg)
+        if (this.reg.next > UID_MAX) throw new Error('uid range exhausted')
+        const uid = this.reg.next
+        this.reg.bySession[session_id] = uid
+        this.reg.next = uid + 1
+        const json = JSON.stringify(this.reg)
+        // Saved before anyone runs as it: a uid handed out and then lost would
+        // be handed again to another conversation.
+        this.writes = this.writes.then(() => this.persist(json))
+        await this.writes
         return uid
-    }
-
-    /**
-     * Take over the registry a root launcher kept (`registry/uids.json` on
-     * the isolation volume), once, when this agent has none here yet: its
-     * conversations keep their uids, and so the HOMEs they own.
-     */
-    importLegacy(json: string): number {
-        const parsed = JSON.parse(json) as Partial<Registry>
-        const bySession: Record<string, number> = {}
-        let next = UID_BASE
-        for (const [sid, uid] of Object.entries(parsed.bySession ?? {})) {
-            if (!isValidSessionId(sid)) continue
-            if (!Number.isInteger(uid) || uid < UID_BASE || uid > UID_MAX) continue
-            bySession[sid] = uid
-            next = Math.max(next, uid + 1)
-        }
-        if (typeof parsed.next === 'number' && parsed.next > next && parsed.next <= UID_MAX + 1)
-            next = parsed.next
-        this.save({ bySession, next })
-        return Object.keys(bySession).length
-    }
-
-    private load(): Registry {
-        if (this.reg) return this.reg
-        if (!existsSync(this.path)) {
-            this.reg = { bySession: {}, next: UID_BASE }
-            return this.reg
-        }
-        const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Registry
-        this.reg = { bySession: parsed.bySession ?? {}, next: parsed.next ?? UID_BASE }
-        return this.reg
-    }
-
-    private save(reg: Registry): void {
-        const dir = join(this.path, '..')
-        mkdirSync(dir, { recursive: true, mode: 0o700 })
-        const tmp = `${this.path}.tmp`
-        writeFileSync(tmp, JSON.stringify(reg), { mode: 0o600 })
-        renameSync(tmp, this.path)
-        chmodSync(this.path, 0o600)
-        this.reg = reg
     }
 }
 
 export interface ExecDocker {
     containerIsolationMode(container_id: string): Promise<'none' | 'root' | 'exec'>
     isolationVolumeOf(container_id: string): Promise<string | null>
-    readLegacyUidRegistry(volume_name: string): Promise<string | null>
+    readUidRegistry(volume_name: string): Promise<string | null>
+    writeUidRegistry(volume_name: string, json: string): Promise<void>
     execDetached(opts: { container_id: string; user: string; cmd: string[]; env: string[] }): Promise<void>
 }
 
@@ -157,8 +138,6 @@ export class ExecDispatcher {
     constructor(
         private readonly deps: {
             docker: ExecDocker
-            /** `<config_dir>/isolation`. */
-            registryDir: string
             /** Answer on the container's stdin (a control envelope). */
             reply: (agent_id: number, envelope: { type: string; [k: string]: unknown }) => boolean
             logger: KJLogger
@@ -197,7 +176,7 @@ export class ExecDispatcher {
                     ? BINARIES_UID
                     : op === 'purge'
                       ? registry.uidOf(session_id)
-                      : registry.uidFor(session_id)
+                      : await registry.uidFor(session_id)
             if (uid === undefined) {
                 answer(false, { error: 'unknown conversation' })
                 return
@@ -238,22 +217,17 @@ export class ExecDispatcher {
     private registryOf(agent_id: number, container_id: string): Promise<UidRegistry> {
         let r = this.registries.get(agent_id)
         if (!r) {
-            r = this.openRegistry(agent_id, container_id)
+            r = this.openRegistry(container_id)
             this.registries.set(agent_id, r)
             r.catch(() => this.registries.delete(agent_id))
         }
         return r
     }
 
-    private async openRegistry(agent_id: number, container_id: string): Promise<UidRegistry> {
-        const registry = new UidRegistry(join(this.deps.registryDir, `agent-${agent_id}.json`))
-        if (registry.exists()) return registry
+    private async openRegistry(container_id: string): Promise<UidRegistry> {
         const volume = await this.deps.docker.isolationVolumeOf(container_id)
-        const legacy = volume ? await this.deps.docker.readLegacyUidRegistry(volume) : null
-        if (legacy) {
-            const n = registry.importLegacy(legacy)
-            this.deps.logger.info({ agent_id, conversations: n }, 'exec: took over the root launcher uid registry')
-        }
-        return registry
+        if (!volume) throw new Error('no isolation volume')
+        const reg = parseRegistry(await this.deps.docker.readUidRegistry(volume))
+        return new UidRegistry(reg, (json) => this.deps.docker.writeUidRegistry(volume, json))
     }
 }

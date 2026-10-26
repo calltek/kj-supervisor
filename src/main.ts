@@ -9,7 +9,6 @@
  * identical to the cold-boot path.
  */
 
-import { join } from 'node:path'
 import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
@@ -279,7 +278,6 @@ async function main(): Promise<void> {
     })
     const exec = new ExecDispatcher({
         docker,
-        registryDir: join(settings.config_dir, 'isolation'),
         reply: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
         logger,
     })
