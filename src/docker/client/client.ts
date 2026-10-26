@@ -1090,7 +1090,8 @@ export class KJDocker {
         const isolation = mode === 'root'
         if (mode === 'exec') {
             const home = (host.Mounts ?? []).find((m) => m.Target === '/home/agent')
-            if (home?.Source) await this.prepareExecIsolationVolume(isolationVolumeName(home.Source))
+            if (home?.Source)
+                await this.prepareExecIsolationVolume(isolationVolumeName(home.Source))
         }
 
         // Only the host alias crosses over; anything else in the source's

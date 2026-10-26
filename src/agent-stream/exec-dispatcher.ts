@@ -47,12 +47,16 @@ export interface ExecRequest {
     session_id: string
 }
 
-export function isExecRequest(line: Record<string, unknown>): line is ExecRequest & Record<string, unknown> {
+export function isExecRequest(
+    line: Record<string, unknown>
+): line is ExecRequest & Record<string, unknown> {
     return line.kj_channel === 'exec'
 }
 
 /** What a request must look like to be acted on. */
-export function validExecRequest(r: Record<string, unknown>): r is ExecRequest & Record<string, unknown> {
+export function validExecRequest(
+    r: Record<string, unknown>
+): r is ExecRequest & Record<string, unknown> {
     return (
         r.kj_channel === 'exec' &&
         (r.op === 'spawn' || r.op === 'purge' || r.op === 'binaries') &&
@@ -127,7 +131,12 @@ export interface ExecDocker {
     isolationVolumeOf(container_id: string): Promise<string | null>
     readUidRegistry(volume_name: string): Promise<string | null>
     writeUidRegistry(volume_name: string, json: string): Promise<void>
-    execDetached(opts: { container_id: string; user: string; cmd: string[]; env: string[] }): Promise<void>
+    execDetached(opts: {
+        container_id: string
+        user: string
+        cmd: string[]
+        env: string[]
+    }): Promise<void>
 }
 
 export class ExecDispatcher {

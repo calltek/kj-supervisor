@@ -672,6 +672,37 @@ llamada tendría que reciclarla otra vez.
   dos campos se leen con tipos locales (`stream-manager.ts`) hasta que lleguen
   con el `protocol.ts`, y entonces se quitan.
 
+### Modo aislado sin root: el uid lo pone este supervisor (2026-10-26)
+
+El modo aislado (kj-agent-base#107) daba root al agente: su lanzador corría
+como root con seis capacidades para poder pasar cada conversación a su uid, y
+root dentro del contenedor es el root del servidor con restricciones. Ahora la
+imagen aislada lleva la etiqueta `so.kujira.isolation=exec-uid`, corre como
+`bun` y **sin una sola capacidad**, y quien cambia de uid es Docker: el
+lanzador pide por su stdout `{"kj_channel":"exec", op, token, session_id}` y
+`agent-stream/exec-dispatcher.ts` hace `docker exec -d -u <uid>` del shim.
+Diseño completo en kj-agent-base `docs/aislamiento-sin-root.md`.
+
+- **Lo que se ejecuta es fijo** (`SHIM_CMD`): el agente sólo dice qué
+  conversación; el trabajo lo recibe después el shim, ya con su uid.
+- **El uid lo elige el supervisor**, del registro `registry/uids.json` del
+  volumen `-iso` — el mismo fichero que tenía el lanzador root, así que los
+  agentes en modo restringido conservan sus uids. Es de root `0600` y el
+  contenedor no tiene root: sólo lo escribe el ayudante, y sólo al dar un uid
+  nuevo. No va en `<config_dir>`: ese montaje es de solo lectura.
+- **Op `binaries` corre siempre como el uid 998**, dueño de `bin/` (los
+  binarios de Codex): ningún uid de conversación escribe lo que ejecutan las
+  demás.
+- **El volumen se prepara en cada arranque** (`prepareExecIsolationVolume`):
+  `conv` root `1733`, `bin` del 998. `chmod` antes de ceder `bin`: el ayudante
+  no tiene `FOWNER` y no puede tocar lo que ya no es suyo (dejó GAZ parado en
+  la prueba).
+- **La etiqueta antigua (`per-conversation-uid`) sigue igual**, con sus
+  capacidades: este supervisor sirve a las dos mientras queden imágenes root.
+  Al revés no: un supervisor anterior no conoce `exec-uid` y no monta el
+  volumen ni atiende el `exec`, así que **este PR se despliega en toda la
+  flota antes que la imagen nueva de kj-agent-base**.
+
 ---
 
 ## 9. Hoja de ruta
