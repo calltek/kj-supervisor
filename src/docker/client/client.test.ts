@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import os from 'node:os'
 
 import { KJLogger } from '../../logger'
-import { EXEC_USER, KJDocker, buildBackupScript, execCmd } from './client'
+import { EXEC_USER, KJDocker, buildBackupScript, buildRestoreScript, execCmd } from './client'
 
 const silentLogger = KJLogger.create('error')
 
@@ -532,7 +532,8 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // sólo visible el día de restaurar.
         expect(script).not.toMatch(/\.backup\s+\/v\//)
         expect(script).not.toMatch(/VACUUM INTO\s+'?\/v\//)
-        expect(script).toContain('.backup /tmp/kjdb/copia-$SEQ')
+        expect(script).toContain('.backup $KJ_W/copia-$SEQ')
+        expect(script).toContain('export KJ_W=/tmp/kjdb')
     })
 
     test('una copia que falla TUMBA el backup, no lo silencia', () => {
@@ -541,7 +542,7 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         expect(script).toContain('exit 7')
         expect(script).toContain('/tmp/kjdb.failed')
         // Y en concreto: la línea de la copia no lleva silenciador.
-        const copia = script.split('\n').find((l) => l.includes('.backup /tmp/kjdb/'))
+        const copia = script.split('\n').find((l) => l.includes('.backup $KJ_W/'))
         expect(copia).toBeDefined()
         expect(copia).not.toContain('2>/dev/null')
         expect(copia).not.toContain('|| echo')
@@ -678,6 +679,148 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // logs); the line-anchored marker is what backupVolume() picks up.
         expect(script).toContain('echo "KJ_TAR_WARN=1"')
     })
+
+    test('las copias de las bases se llevan el dueño y el modo del original', () => {
+        // Nacen de root y 0700 y al extraer pisan a las originales: el `.aws/`
+        // de un agente volvía de root y el agente ya no podía entrar.
+        expect(script).toContain('chmod "$(stat -c %a "$Q")" "$P" || exit 1')
+        expect(script).toContain('chown "$(stat -c %u:%g "$Q")" "$P" || exit 1')
+        expect(script.indexOf('stat -c %u:%g')).toBeLessThan(script.indexOf('tar -czf'))
+        // Y nunca a través de un enlace puesto mientras tanto.
+        expect(script).toContain('[ "$(realpath "$Q")" = "$Q" ] ||')
+    })
+})
+
+describe('el volumen de aislamiento viaja en la copia', () => {
+    test('con él, las entradas son home/ e iso/, sin ./', () => {
+        // Sin el prefijo `./` una copia vieja no puede hacerse pasar por una
+        // nueva: lo que el agente escriba en su home no llega al volumen de root.
+        const tar = buildBackupScript(true)
+            .split('\n')
+            .find((l) => l.startsWith('tar -czf'))
+        expect(tar).toContain('--numeric-owner -C /v home iso -C /tmp/kjdb home iso')
+        expect(tar).not.toContain(' . ')
+    })
+
+    test('la restauración elige el formato por la primera entrada', () => {
+        const script = buildRestoreScript()
+        expect(script).toContain('if [ "$FIRST" != "home/" ]; then')
+        // El camino viejo no toca /iso.
+        const old = script.slice(script.indexOf('if [ "$FIRST"'), script.indexOf('fi\n'))
+        expect(old).not.toContain('/iso')
+        expect(script).toContain('--strip-components=1 -xzf /tmp/b.tgz iso')
+        expect(script).toContain('chmod 0711 /iso')
+    })
+
+    test('dentro de iso/ no se copia ninguna base en caliente', () => {
+        // La copia corre como root con DAC_OVERRIDE: una conversación que cambie
+        // una carpeta por un enlace entre el find y sqlite3 se llevaría la base
+        // de otra. En iso/ las bases viajan sólo en el tar.
+        expect(buildBackupScript(true)).toContain('find /v -path /v/iso -prune -o -type f')
+        // Sin el volumen, iso/ es una carpeta más del agente y se copia.
+        expect(buildBackupScript(false)).not.toContain('-prune')
+    })
+
+    test('con iso montado, sqlite3 no corre como root', () => {
+        // Desde el home, una carpeta cambiada por un enlace a ../iso entre el
+        // find y sqlite3 le daba a root la base de una conversación aislada.
+        // Como el uid del agente y sin capacidades, el kernel lo para.
+        const iso = buildBackupScript(true)
+        expect(iso).toContain('export KJ_AS="setpriv --reuid=1000 --regid=1000 --clear-groups"')
+        for (const line of iso.split('\n').filter((l) => /\bsqlite3 "/.test(l))) {
+            expect(line).toContain('$KJ_AS sqlite3')
+        }
+        expect(buildBackupScript(false)).toContain('export KJ_AS=""')
+    })
+
+    /** A dockerode stub for the helper: which volumes exist, what it ran. */
+    function volumeDocker(opts: {
+        volumes: string[]
+        inspectError?: Error
+        exitCode?: number
+        stdout?: string
+    }) {
+        const removed: string[] = []
+        const specs: any[] = []
+        const stdout = Buffer.from(opts.stdout ?? '')
+        const header = Buffer.alloc(8)
+        header[0] = 1
+        header.writeUInt32BE(stdout.length, 4)
+        const fake = {
+            getImage: () => ({ inspect: async () => ({}) }),
+            getVolume: (name: string) => ({
+                inspect: async () => {
+                    if (opts.inspectError) throw opts.inspectError
+                    if (!opts.volumes.includes(name))
+                        throw Object.assign(new Error('no such volume'), { statusCode: 404 })
+                    return {}
+                },
+                remove: async () => {
+                    removed.push(name)
+                },
+            }),
+            createContainer: async (spec: any) => {
+                specs.push(spec)
+                return {
+                    start: async () => undefined,
+                    wait: async () => ({ StatusCode: opts.exitCode ?? 0 }),
+                    logs: async () => Buffer.concat([header, stdout]),
+                    remove: async () => undefined,
+                }
+            },
+        }
+        return { docker: new KJDocker(silentLogger, fake as never), removed, specs }
+    }
+
+    test('la copia monta los dos volúmenes cuando existe el de aislamiento', async () => {
+        const { docker, specs } = volumeDocker({
+            volumes: ['kj-agent-4-home', 'kj-agent-4-iso'],
+            stdout: 'KJ_BACKUP_SIZE=10\n',
+        })
+        await docker.backupVolume('kj-agent-4-home', 'https://r2/put')
+        expect(specs[0].HostConfig.Mounts.map((m: any) => [m.Source, m.Target])).toEqual([
+            ['kj-agent-4-home', '/v/home'],
+            ['kj-agent-4-iso', '/v/iso'],
+        ])
+    })
+
+    test('un fallo del daemon al mirar el volumen tumba la copia, no la deja sin iso', async () => {
+        // Leer «no existe» de un error cualquiera subía la copia en verde sin
+        // las conversaciones aisladas, y la migración borraba luego el volumen.
+        const { docker, specs } = volumeDocker({
+            volumes: ['kj-agent-4-home', 'kj-agent-4-iso'],
+            inspectError: Object.assign(new Error('socket hang up'), { statusCode: 500 }),
+        })
+        await expect(docker.backupVolume('kj-agent-4-home', 'https://r2/put')).rejects.toThrow(
+            /socket hang up/
+        )
+        expect(specs).toHaveLength(0)
+    })
+
+    test('restaurar una copia vieja no deja un volumen iso vacío detrás', async () => {
+        const { docker, removed } = volumeDocker({ volumes: ['kj-agent-4-home'] })
+        await docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        expect(removed).toEqual(['kj-agent-4-iso'])
+    })
+
+    test('el volumen iso no se borra si se restauró, existía o el ayudante falló', async () => {
+        const restored = volumeDocker({
+            volumes: ['kj-agent-4-home'],
+            stdout: 'KJ_ISO_RESTORED=1\n',
+        })
+        await restored.docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        expect(restored.removed).toEqual([])
+
+        const existed = volumeDocker({ volumes: ['kj-agent-4-home', 'kj-agent-4-iso'] })
+        await existed.docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        expect(existed.removed).toEqual([])
+
+        const failed = volumeDocker({ volumes: ['kj-agent-4-home'], exitCode: 1 })
+        await expect(
+            failed.docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        ).rejects.toThrow()
+        expect(failed.removed).toEqual([])
+    })
 })
 
 describe('backupVolume — markers parse from stdout only', () => {
@@ -698,6 +841,11 @@ describe('backupVolume — markers parse from stdout only', () => {
     function helperDocker(frames: Buffer[]): KJDocker {
         const fake = {
             getImage: () => ({ inspect: async () => ({}) }),
+            getVolume: () => ({
+                inspect: async () => {
+                    throw Object.assign(new Error('no such volume'), { statusCode: 404 })
+                },
+            }),
             createContainer: async () => ({
                 start: async () => undefined,
                 wait: async () => ({ StatusCode: 0 }),
