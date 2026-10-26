@@ -42,6 +42,22 @@ export type AgentHardening = {
  */
 export const ISOLATION_LABEL = 'so.kujira.isolation'
 export const ISOLATION_VALUE = 'per-conversation-uid'
+/**
+ * The isolation image WITHOUT root (kj-agent-base docs/aislamiento-sin-root.md):
+ * the launcher is bun, and each isolated conversation is started by THIS
+ * supervisor with `docker exec -u <uid>`. It gets the isolation-state volume and
+ * its exec requests answered, and not one capability.
+ */
+export const ISOLATION_EXEC_VALUE = 'exec-uid'
+
+/** How an image isolates: not at all, with a root launcher, or through exec. */
+export type IsolationMode = 'none' | 'root' | 'exec'
+
+export function isolationModeOf(label: string | undefined | null): IsolationMode {
+    if (label === ISOLATION_VALUE) return 'root'
+    if (label === ISOLATION_EXEC_VALUE) return 'exec'
+    return 'none'
+}
 
 /**
  * Where an isolating image keeps its root-owned state — the uid registry, the

@@ -37,6 +37,7 @@ import {
 } from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
+import { type ExecDispatcher, isExecRequest } from './exec-dispatcher'
 
 /**
  * Model provider per conversation: the environment the wrapper applies to ONE
@@ -128,6 +129,8 @@ export interface AgentStreamManagerDeps {
      * subprocess.
      */
     mcp?: McpDispatcher
+    /** Starts isolated conversations with their own uid (kj-agent-base, no root). */
+    exec?: ExecDispatcher
 }
 
 export class AgentStreamManager {
@@ -136,12 +139,14 @@ export class AgentStreamManager {
     private readonly logger: KJLogger
     private readonly streams = new Map<number, AgentStream>()
     private readonly mcp?: McpDispatcher
+    private readonly exec?: ExecDispatcher
 
     constructor(deps: AgentStreamManagerDeps) {
         this.docker = deps.docker
         this.client = deps.client
         this.logger = deps.logger.child({ component: 'agent-stream' })
         this.mcp = deps.mcp
+        this.exec = deps.exec
     }
 
     /**
@@ -610,6 +615,13 @@ export class AgentStreamManager {
         // dispatcher isn't wired (unit tests, older deployments) the
         // line is dropped silently — the wrapper just stops getting
         // responses for that request.
+        // The launcher asking to start an isolated conversation with its own
+        // uid. Only the launcher writes this stdout (it is PID 1's).
+        if (isExecRequest(payload)) {
+            if (this.exec) void this.exec.onRequest(entry.agent_id, entry.container_id, payload)
+            return
+        }
+
         if (isMcpEnvelope(payload)) {
             // Cast is safe — isMcpEnvelope just confirmed the marker.
             // See note on the predicate's signature for the why.
