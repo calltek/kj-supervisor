@@ -532,7 +532,8 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         // sólo visible el día de restaurar.
         expect(script).not.toMatch(/\.backup\s+\/v\//)
         expect(script).not.toMatch(/VACUUM INTO\s+'?\/v\//)
-        expect(script).toContain('.backup /tmp/kjdb/copia-$SEQ')
+        expect(script).toContain('.backup $KJ_W/copia-$SEQ')
+        expect(script).toContain('export KJ_W=/tmp/kjdb')
     })
 
     test('una copia que falla TUMBA el backup, no lo silencia', () => {
@@ -541,7 +542,7 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
         expect(script).toContain('exit 7')
         expect(script).toContain('/tmp/kjdb.failed')
         // Y en concreto: la línea de la copia no lleva silenciador.
-        const copia = script.split('\n').find((l) => l.includes('.backup /tmp/kjdb/'))
+        const copia = script.split('\n').find((l) => l.includes('.backup $KJ_W/'))
         expect(copia).toBeDefined()
         expect(copia).not.toContain('2>/dev/null')
         expect(copia).not.toContain('|| echo')
@@ -718,6 +719,18 @@ describe('el volumen de aislamiento viaja en la copia', () => {
         expect(buildBackupScript(true)).toContain('find /v -path /v/iso -prune -o -type f')
         // Sin el volumen, iso/ es una carpeta más del agente y se copia.
         expect(buildBackupScript(false)).not.toContain('-prune')
+    })
+
+    test('con iso montado, sqlite3 no corre como root', () => {
+        // Desde el home, una carpeta cambiada por un enlace a ../iso entre el
+        // find y sqlite3 le daba a root la base de una conversación aislada.
+        // Como el uid del agente y sin capacidades, el kernel lo para.
+        const iso = buildBackupScript(true)
+        expect(iso).toContain('export KJ_AS="setpriv --reuid=1000 --regid=1000 --clear-groups"')
+        for (const line of iso.split('\n').filter((l) => /\bsqlite3 "/.test(l))) {
+            expect(line).toContain('$KJ_AS sqlite3')
+        }
+        expect(buildBackupScript(false)).toContain('export KJ_AS=""')
     })
 
     /** A dockerode stub for the helper: which volumes exist, what it ran. */

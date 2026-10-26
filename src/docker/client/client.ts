@@ -124,7 +124,9 @@ export function buildBackupScript(withIso = false): string {
         // stdout only: if apk fails (a CDN hiccup), `set -e` kills the whole
         // helper, and with stderr swallowed the backup died with "exited 1:"
         // and not a word of why. Whatever apk has to say must reach the logs.
-        'apk add --no-cache curl sqlite tar >/dev/null',
+        withIso
+            ? 'apk add --no-cache curl sqlite tar setpriv >/dev/null'
+            : 'apk add --no-cache curl sqlite tar >/dev/null',
         '',
         '# Copias consistentes de las bases SQLite, en /tmp del ayudante.',
         '#',
@@ -138,6 +140,21 @@ export function buildBackupScript(withIso = false): string {
         'umask 077',
         'mkdir -p "$STAGE"',
         ': > /tmp/kjdb.failed',
+        // With /v/iso mounted next to the home, sqlite3 must not run as root:
+        // with DAC_OVERRIDE, a directory in the home swapped for a symlink
+        // into ../iso between find and sqlite3 hands it an isolated
+        // conversation's database, and no check before the open closes that
+        // race. As the agent's uid with no capabilities it reads only what the
+        // agent can, and the kernel stops the symlink at iso's uids. It writes
+        // to a staging dir of its own; root moves the copy into place.
+        ...(withIso
+            ? [
+                  'export KJ_AS="setpriv --reuid=1000 --regid=1000 --clear-groups"',
+                  'export KJ_W=/tmp/kjdb.w',
+                  'mkdir -p "$KJ_W"',
+                  'chown 1000:1000 "$KJ_W"',
+              ]
+            : ['export KJ_AS=""', 'export KJ_W=/tmp/kjdb']),
         '',
         '# Antes de escribir un solo byte: ¿cabe? El ayudante escribe en SU',
         '# overlay, que sale del disco del supervisor — el mismo que usan TODOS',
@@ -217,16 +234,26 @@ export function buildBackupScript(withIso = false): string {
         // read-only mount (SQLITE_READONLY_ROLLBACK), and `immutable=1` would
         // swallow it whole — integrity_check comes back ok because what a
         // half-rolled transaction breaks is atomicity, not page structure.
-        '    if { sqlite3 "$DB" ".backup /tmp/kjdb/copia-$SEQ" ||',
+        '    if { $KJ_AS sqlite3 "$DB" ".backup $KJ_W/copia-$SEQ" ||',
         '         { [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ] &&',
         '           case "$DB" in (*"?"*|*"#"*|*"%"*) false ;; (*) true ;; esac &&',
         '           [ "$DB" = "$(printf %s "$DB" | tr -d "\\n")" ] &&',
-        '           sqlite3 "file:$DB?immutable=1" ".backup /tmp/kjdb/copia-$SEQ" &&',
-        '           [ "$(sqlite3 "/tmp/kjdb/copia-$SEQ" "PRAGMA integrity_check;")" = "ok" ] &&',
+        '           $KJ_AS sqlite3 "file:$DB?immutable=1" ".backup $KJ_W/copia-$SEQ" &&',
+        '           [ "$($KJ_AS sqlite3 "$KJ_W/copia-$SEQ" "PRAGMA integrity_check;")" = "ok" ] &&',
         '           [ ! -f "$DB-wal" ] && [ ! -f "$DB-shm" ] && [ ! -f "$DB-journal" ]; }; } &&',
         '       mkdir -p "/tmp/kjdb/$(dirname "$REL")" &&',
-        '       mv "/tmp/kjdb/copia-$SEQ" "/tmp/kjdb/$REL"; then',
+        // Back to root: written as the agent, root (no FOWNER) couldn't give
+        // it the original's mode further down.
+        '       mv "$KJ_W/copia-$SEQ" "/tmp/kjdb/$REL" &&',
+        '       chown 0:0 "/tmp/kjdb/$REL"; then',
         '      :',
+        // Running as the agent, a database it can't read (one the image keeps
+        // root-only) can't get a hot copy; it travels in the tar like iso/.
+        // Faking this only skips the agent's own database's hot copy.
+        '    elif [ -n "$KJ_AS" ] && ! $KJ_AS test -r "$DB"; then',
+        '      echo "sin copia en caliente, el agente no puede leerla: $DB" >&2',
+        '      rm -f "$KJ_W/copia-$SEQ"',
+        '      continue',
         '    else',
         '      echo "$DB" >> /tmp/kjdb.failed',
         '      continue',
@@ -1589,6 +1616,8 @@ export class KJDocker {
                       { source: iso_volume_name, target: '/v/iso' },
                   ]
                 : undefined,
+            // For setpriv to drop the sqlite3 copies to the agent's uid.
+            extra_caps: withIso ? ['SETUID', 'SETGID'] : undefined,
             script,
             // El tamaño se imprime justo después del tar: es la señal de que ya
             // no se está leyendo el volumen y el agente puede seguir.
