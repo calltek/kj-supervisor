@@ -15,6 +15,7 @@ import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
 import { markPath, readDecommission, writeDecommission } from './client/auth/decommission'
 import { KJControlClient } from './client/control/control.client'
 import { McpDispatcher, type McpEnvelope } from './agent-stream/mcp-dispatcher'
+import { ExecDispatcher } from './agent-stream/exec-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
 import {
     AGENT_METRICS_INTERVAL_MS,
@@ -275,7 +276,12 @@ async function main(): Promise<void> {
             streams.resolveTarget(agent_id, conversation_session_id, session_verified),
         logger,
     })
-    streams = new AgentStreamManager({ docker, client, logger, mcp })
+    const exec = new ExecDispatcher({
+        docker,
+        reply: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
+        logger,
+    })
+    streams = new AgentStreamManager({ docker, client, logger, mcp, exec })
     const eventsWatcher = new KJDockerEventsWatcher({
         docker,
         tracker,

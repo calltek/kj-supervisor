@@ -14,8 +14,9 @@ import type { KJLogger } from '../../logger'
 import {
     ISOLATION_LABEL,
     ISOLATION_STATE_MOUNT,
-    ISOLATION_VALUE,
+    type IsolationMode,
     agentHardening,
+    isolationModeOf,
     ensureIsolationMount,
     isolationVolumeName,
     privilegedNetworkingExtras,
@@ -455,16 +456,126 @@ export class KJDocker {
      * is then created as hardened as every other, never more.
      */
     async imageIsolatesByUser(image_tag: string): Promise<boolean> {
+        return (await this.imageIsolationMode(image_tag)) === 'root'
+    }
+
+    /**
+     * How an image isolates its conversations (ISOLATION_LABEL): not at all,
+     * with a root launcher (kj-agent-base#107), or without root, through this
+     * supervisor's exec (kj-agent-base docs/aislamiento-sin-root.md). A failed
+     * inspect means "none" — never more than the hardened default.
+     */
+    async imageIsolationMode(image_tag: string): Promise<IsolationMode> {
         try {
             const info = await this.inspectImage(image_tag)
-            return info.Config?.Labels?.[ISOLATION_LABEL] === ISOLATION_VALUE
+            return isolationModeOf(info.Config?.Labels?.[ISOLATION_LABEL])
         } catch (err) {
             this.logger.warn(
                 { image_tag, err: err instanceof Error ? err.message : err },
                 'could not inspect image for the isolation label — treating as not isolating'
             )
-            return false
+            return 'none'
         }
+    }
+
+    /**
+     * The isolation-state volume of an image without root: `conv` root `1733`
+     * (each conversation creates its own HOME there), `bin` of uid 998. A new
+     * volume gets this from the image anyway; one that already exists — from
+     * the root launcher, or an older image — is brought to it here, before the
+     * container mounts it.
+     */
+    async prepareExecIsolationVolume(volume_name: string): Promise<void> {
+        const { code } = await this.runVolumeHelper({
+            volume_name,
+            script: [
+                'set -e',
+                'mkdir -p /v/conv /v/bin',
+                // chown first to root, chmod while root owns them, and only
+                // then hand `bin` over: the helper has no FOWNER, so it can't
+                // chmod what it no longer owns.
+                'chown 0:0 /v /v/conv /v/bin',
+                'chmod 0711 /v',
+                'chmod 1733 /v/conv',
+                'chmod 0755 /v/bin',
+                'chown 998:998 /v/bin',
+            ].join('\n'),
+        })
+        if (code !== 0) throw new Error(`isolation volume helper exited ${code}`)
+    }
+
+    /**
+     * The uid registry on an isolation volume (`registry/uids.json`: the dir
+     * root `0700`, the file `0600`), read-only, or null. The root launcher kept the same file, so
+     * the conversations already isolated keep their uids, and their HOMEs.
+     */
+    async readUidRegistry(volume_name: string): Promise<string | null> {
+        const { code, stdout } = await this.runVolumeHelper({
+            volume_name,
+            readonly: true,
+            script: 'cat /v/registry/uids.json 2>/dev/null || true',
+        })
+        if (code !== 0) return null
+        return stdout.trim() || null
+    }
+
+    /**
+     * Save the uid registry on an isolation volume, root-only. The JSON goes
+     * in through the environment (never into the script), and is swapped in
+     * with a rename so a reader never sees half of it.
+     */
+    async writeUidRegistry(volume_name: string, json: string): Promise<void> {
+        const { code } = await this.runVolumeHelper({
+            volume_name,
+            env: [`KJ_UIDS=${json}`],
+            script: [
+                'set -e',
+                'umask 077',
+                'mkdir -p /v/registry',
+                'chown 0:0 /v/registry',
+                'chmod 0700 /v/registry',
+                'printf "%s" "$KJ_UIDS" > /v/registry/uids.json.tmp',
+                'mv /v/registry/uids.json.tmp /v/registry/uids.json',
+            ].join('\n'),
+        })
+        if (code !== 0) throw new Error(`uid registry helper exited ${code}`)
+    }
+
+    /** The isolation-state volume mounted in a container, if any. */
+    async isolationVolumeOf(container_id: string): Promise<string | null> {
+        const info = await this.inspect(container_id)
+        const m = (info.Mounts ?? []).find((x) => x.Destination === ISOLATION_STATE_MOUNT)
+        return m?.Name ?? null
+    }
+
+    /** How the image of a running container isolates (its labels carry the image's). */
+    async containerIsolationMode(container_id: string): Promise<IsolationMode> {
+        const info = await this.inspect(container_id)
+        return isolationModeOf(info.Config?.Labels?.[ISOLATION_LABEL])
+    }
+
+    /**
+     * Start a process in a container as `user`, detached: it outlives this
+     * call (and a restart of the supervisor). Only for the isolation shim —
+     * the command is fixed by the caller, never taken from the agent.
+     */
+    async execDetached(opts: {
+        container_id: string
+        user: string
+        cmd: string[]
+        env: string[]
+    }): Promise<void> {
+        const exec = await this.docker.getContainer(opts.container_id).exec({
+            Cmd: opts.cmd,
+            Env: opts.env,
+            User: opts.user,
+            WorkingDir: '/',
+            AttachStdin: false,
+            AttachStdout: false,
+            AttachStderr: false,
+            Tty: false,
+        })
+        await exec.start({ Detach: true, Tty: false })
     }
 
     async imageExistsLocally(image_tag: string): Promise<boolean> {
@@ -536,7 +647,11 @@ export class KJDocker {
      */
     async runContainer(opts: KJContainerRunOptions): Promise<string> {
         const envArray = Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
-        const isolation = await this.imageIsolatesByUser(opts.image_tag)
+        const mode = await this.imageIsolationMode(opts.image_tag)
+        // Root launcher: its capabilities. Without root: none, only the volume.
+        const isolation = mode === 'root'
+        if (mode === 'exec' && opts.home_volume_name)
+            await this.prepareExecIsolationVolume(isolationVolumeName(opts.home_volume_name))
         if (isolation)
             this.logger.info(
                 { image_tag: opts.image_tag },
@@ -559,7 +674,7 @@ export class KJDocker {
                   // volume, never on /home/agent — which the supervisor seeds and
                   // wipes per spawn (kj-agent-base#107 design B). Created on first
                   // use, removed with the agent (handleDelete).
-                  ...(isolation
+                  ...(mode !== 'none'
                       ? [
                             {
                                 Type: 'volume' as const,
@@ -971,7 +1086,13 @@ export class KJDocker {
 
         // The new image may start (or stop) isolating conversations by uid;
         // read it from the image we are moving TO, not the one we are leaving.
-        const isolation = await this.imageIsolatesByUser(opts.new_image_tag)
+        const mode = await this.imageIsolationMode(opts.new_image_tag)
+        const isolation = mode === 'root'
+        if (mode === 'exec') {
+            const home = (host.Mounts ?? []).find((m) => m.Target === '/home/agent')
+            if (home?.Source)
+                await this.prepareExecIsolationVolume(isolationVolumeName(home.Source))
+        }
 
         // Only the host alias crosses over; anything else in the source's
         // ExtraHosts was put there by hand and is dropped, with a trace (#34).
@@ -1019,7 +1140,7 @@ export class KJDocker {
                 // trae el volumen de estado, así que se añade (derivado del de
                 // /home/agent que ya monta). Si deja de aislar, se queda un
                 // montaje sin usar en vez de huérfanar sus datos (#107).
-                Mounts: ensureIsolationMount(sanitized.Mounts, isolation),
+                Mounts: ensureIsolationMount(sanitized.Mounts, mode !== 'none'),
                 RestartPolicy: host.RestartPolicy,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,
