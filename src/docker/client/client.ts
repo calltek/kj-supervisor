@@ -154,7 +154,15 @@ export function buildBackupScript(withIso = false): string {
         '',
         '# `-exec … +` en vez de recorrer la salida de find: un nombre con un',
         '# salto de línea rompe cualquier bucle que la parsee.',
-        'find /v -type f \\( -name "*.sqlite3" -o -name "*.sqlite" -o -name "*.db" \\) \\',
+        // Nothing under iso/ gets a hot copy. Every isolated conversation has
+        // its own uid there, and this copy runs as root with DAC_OVERRIDE: a
+        // conversation that swaps a directory for a symlink between find and
+        // sqlite3 would get another one's database copied into its own tree.
+        // Those databases travel in the tar alone, which follows no symlink —
+        // possibly inconsistent, never someone else's.
+        withIso
+            ? 'find /v -path /v/iso -prune -o -type f \\( -name "*.sqlite3" -o -name "*.sqlite" -o -name "*.db" \\) \\'
+            : 'find /v -type f \\( -name "*.sqlite3" -o -name "*.sqlite" -o -name "*.db" \\) \\',
         '     -not -path "*/node_modules/*" -not -path "*/.venv/*" \\',
         "     -exec sh -c '",
         '  for DB do',
@@ -260,11 +268,17 @@ export function buildBackupScript(withIso = false): string {
         '# a las originales: una carpeta con una base dentro volvía de root, y',
         '# su dueño ya no podía entrar en ella. Se les da el dueño y el modo del',
         '# original. chmod antes que chown: luego ya no son de root.',
+        '#',
+        '# Si el original ya no es la ruta que se copió (un componente cambiado',
+        '# por un enlace mientras tanto), la copia falla: el modo y el dueño',
+        '# saldrían de otro sitio.',
         'cd /tmp/kjdb',
         "find . -exec sh -c '",
         '  for P do',
-        '    chmod "$(stat -c %a "/v/$P")" "$P"',
-        '    chown "$(stat -c %u:%g "/v/$P")" "$P"',
+        '    Q="/v/${P#./}"; if [ "$P" = . ]; then Q=/v; fi',
+        '    [ "$(realpath "$Q")" = "$Q" ] || { echo "ruta cambiada durante la copia: $Q" >&2; exit 1; }',
+        '    chmod "$(stat -c %a "$Q")" "$P" || exit 1',
+        '    chown "$(stat -c %u:%g "$Q")" "$P" || exit 1',
         '  done',
         '\' _ {} + || { echo "no se pudo copiar el dueño de las bases" >&2; exit 10; }',
         'cd /',
@@ -1485,13 +1499,18 @@ export class KJDocker {
         }
     }
 
-    /** Whether a named volume exists. False on any lookup error. */
+    /**
+     * Whether a named volume exists. Only a 404 means no: any other error
+     * throws, because a backup that read "no" from a daemon hiccup would go
+     * up green without the isolation volume — and a migration then deletes it.
+     */
     async volumeExists(name: string): Promise<boolean> {
         try {
             await this.docker.getVolume(name).inspect()
             return true
-        } catch {
-            return false
+        } catch (err) {
+            if ((err as { statusCode?: number })?.statusCode === 404) return false
+            throw err
         }
     }
 
@@ -1639,8 +1658,10 @@ export class KJDocker {
             script: buildRestoreScript(),
             env: [`KJ_DOWNLOAD_URL=${download_url}`],
         })
+        // Only after a clean run: a helper that died past the iso extraction
+        // never printed the marker, and removing then would undo that work.
         const isoRestored = /^KJ_ISO_RESTORED=1$/m.test(stdout)
-        if (!isoExisted && !isoRestored) await this.removeVolume(iso_volume_name)
+        if (code === 0 && !isoExisted && !isoRestored) await this.removeVolume(iso_volume_name)
         if (code !== 0) throw new Error(`restore helper exited ${code}: ${logs.slice(-400)}`)
     }
 }
@@ -1651,23 +1672,25 @@ export class KJDocker {
  *
  * The layout is read from the FIRST entry only: `home/` is the two-volume
  * format, and an old archive can't produce it (all of its entries are `./…`).
- * Old archives go down the old path untouched, and leave /iso alone.
+ * Old archives go down the old path, and leave /iso alone.
+ *
+ * Both paths extract with GNU tar: it refuses to write through a symlink the
+ * archive itself planted, which BusyBox's does worse — and with /iso mounted,
+ * an old archive (agent-made content, taken hot) is one symlink away from it.
+ * Numeric owners, so neither path resolves names against the helper's users.
  */
 export function buildRestoreScript(): string {
     return [
         'set -e',
-        'apk add --no-cache curl >/dev/null 2>&1',
+        'apk add --no-cache curl tar >/dev/null',
         'curl -fsS "$KJ_DOWNLOAD_URL" -o /tmp/b.tgz',
         'FIRST=$(tar -tzf /tmp/b.tgz | head -n 1)',
         'if [ "$FIRST" != "home/" ]; then',
         '  find /v -mindepth 1 -delete',
-        '  tar -C /v -xzf /tmp/b.tgz',
+        '  tar -C /v --numeric-owner -xzf /tmp/b.tgz',
         '  chown 1000:1000 /v',
         '  exit 0',
         'fi',
-        // GNU tar: BusyBox has neither member selection with
-        // --strip-components nor --numeric-owner.
-        'apk add --no-cache tar >/dev/null',
         'find /v -mindepth 1 -delete',
         'tar -C /v --numeric-owner --strip-components=1 -xzf /tmp/b.tgz home',
         'chown 1000:1000 /v',

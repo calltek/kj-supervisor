@@ -680,11 +680,13 @@ describe('buildBackupScript — copia consistente de las bases (#391)', () => {
     })
 
     test('las copias de las bases se llevan el dueño y el modo del original', () => {
-        // Nacen de root y 0700 y al extraer pisan a las originales: la carpeta
-        // de una conversación aislada volvía de root y su uid no podía entrar.
-        expect(script).toContain('chmod "$(stat -c %a "/v/$P")" "$P"')
-        expect(script).toContain('chown "$(stat -c %u:%g "/v/$P")" "$P"')
+        // Nacen de root y 0700 y al extraer pisan a las originales: el `.aws/`
+        // de un agente volvía de root y el agente ya no podía entrar.
+        expect(script).toContain('chmod "$(stat -c %a "$Q")" "$P" || exit 1')
+        expect(script).toContain('chown "$(stat -c %u:%g "$Q")" "$P" || exit 1')
         expect(script.indexOf('stat -c %u:%g')).toBeLessThan(script.indexOf('tar -czf'))
+        // Y nunca a través de un enlace puesto mientras tanto.
+        expect(script).toContain('[ "$(realpath "$Q")" = "$Q" ] ||')
     })
 })
 
@@ -708,6 +710,104 @@ describe('el volumen de aislamiento viaja en la copia', () => {
         expect(script).toContain('--strip-components=1 -xzf /tmp/b.tgz iso')
         expect(script).toContain('chmod 0711 /iso')
     })
+
+    test('dentro de iso/ no se copia ninguna base en caliente', () => {
+        // La copia corre como root con DAC_OVERRIDE: una conversación que cambie
+        // una carpeta por un enlace entre el find y sqlite3 se llevaría la base
+        // de otra. En iso/ las bases viajan sólo en el tar.
+        expect(buildBackupScript(true)).toContain('find /v -path /v/iso -prune -o -type f')
+        // Sin el volumen, iso/ es una carpeta más del agente y se copia.
+        expect(buildBackupScript(false)).not.toContain('-prune')
+    })
+
+    /** A dockerode stub for the helper: which volumes exist, what it ran. */
+    function volumeDocker(opts: {
+        volumes: string[]
+        inspectError?: Error
+        exitCode?: number
+        stdout?: string
+    }) {
+        const removed: string[] = []
+        const specs: any[] = []
+        const stdout = Buffer.from(opts.stdout ?? '')
+        const header = Buffer.alloc(8)
+        header[0] = 1
+        header.writeUInt32BE(stdout.length, 4)
+        const fake = {
+            getImage: () => ({ inspect: async () => ({}) }),
+            getVolume: (name: string) => ({
+                inspect: async () => {
+                    if (opts.inspectError) throw opts.inspectError
+                    if (!opts.volumes.includes(name))
+                        throw Object.assign(new Error('no such volume'), { statusCode: 404 })
+                    return {}
+                },
+                remove: async () => {
+                    removed.push(name)
+                },
+            }),
+            createContainer: async (spec: any) => {
+                specs.push(spec)
+                return {
+                    start: async () => undefined,
+                    wait: async () => ({ StatusCode: opts.exitCode ?? 0 }),
+                    logs: async () => Buffer.concat([header, stdout]),
+                    remove: async () => undefined,
+                }
+            },
+        }
+        return { docker: new KJDocker(silentLogger, fake as never), removed, specs }
+    }
+
+    test('la copia monta los dos volúmenes cuando existe el de aislamiento', async () => {
+        const { docker, specs } = volumeDocker({
+            volumes: ['kj-agent-4-home', 'kj-agent-4-iso'],
+            stdout: 'KJ_BACKUP_SIZE=10\n',
+        })
+        await docker.backupVolume('kj-agent-4-home', 'https://r2/put')
+        expect(specs[0].HostConfig.Mounts.map((m: any) => [m.Source, m.Target])).toEqual([
+            ['kj-agent-4-home', '/v/home'],
+            ['kj-agent-4-iso', '/v/iso'],
+        ])
+    })
+
+    test('un fallo del daemon al mirar el volumen tumba la copia, no la deja sin iso', async () => {
+        // Leer «no existe» de un error cualquiera subía la copia en verde sin
+        // las conversaciones aisladas, y la migración borraba luego el volumen.
+        const { docker, specs } = volumeDocker({
+            volumes: ['kj-agent-4-home', 'kj-agent-4-iso'],
+            inspectError: Object.assign(new Error('socket hang up'), { statusCode: 500 }),
+        })
+        await expect(docker.backupVolume('kj-agent-4-home', 'https://r2/put')).rejects.toThrow(
+            /socket hang up/
+        )
+        expect(specs).toHaveLength(0)
+    })
+
+    test('restaurar una copia vieja no deja un volumen iso vacío detrás', async () => {
+        const { docker, removed } = volumeDocker({ volumes: ['kj-agent-4-home'] })
+        await docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        expect(removed).toEqual(['kj-agent-4-iso'])
+    })
+
+    test('el volumen iso no se borra si se restauró, existía o el ayudante falló', async () => {
+        const restored = volumeDocker({
+            volumes: ['kj-agent-4-home'],
+            stdout: 'KJ_ISO_RESTORED=1\n',
+        })
+        await restored.docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        expect(restored.removed).toEqual([])
+
+        const existed = volumeDocker({ volumes: ['kj-agent-4-home', 'kj-agent-4-iso'] })
+        await existed.docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        expect(existed.removed).toEqual([])
+
+        const failed = volumeDocker({ volumes: ['kj-agent-4-home'], exitCode: 1 })
+        await expect(
+            failed.docker.restoreVolume('kj-agent-4-home', 'https://r2/get')
+        ).rejects.toThrow()
+        expect(failed.removed).toEqual([])
+    })
 })
 
 describe('backupVolume — markers parse from stdout only', () => {
@@ -728,6 +828,11 @@ describe('backupVolume — markers parse from stdout only', () => {
     function helperDocker(frames: Buffer[]): KJDocker {
         const fake = {
             getImage: () => ({ inspect: async () => ({}) }),
+            getVolume: () => ({
+                inspect: async () => {
+                    throw Object.assign(new Error('no such volume'), { statusCode: 404 })
+                },
+            }),
             createContainer: async () => ({
                 start: async () => undefined,
                 wait: async () => ({ StatusCode: 0 }),
