@@ -4,7 +4,8 @@
  *
  * The launcher asks on its stdout:
  *
- *   { "kj_channel": "exec", "op": "spawn" | "purge", "token": "<64 hex>", "session_id": "<sid>" }
+ *   { "kj_channel": "exec", "op": "spawn" | "purge" | "binaries" | "browser",
+ *     "token": "<64 hex>", "session_id": "<sid>" }
  *
  * and this supervisor `docker exec`s the shim with that conversation's uid —
  * the uid chosen HERE, from a registry on the agent's isolation volume that
@@ -47,9 +48,18 @@ export const NEW_UIDS_PER_MINUTE = 30
  */
 export const BINARIES_UID = 998
 
+/**
+ * A person's web browser in an agent (kj-app docs/navegador-integrado.md §9)
+ * runs with its own uid, registered under `kj-browser-<user_id>`. That key is
+ * good ONLY with op `browser`, and op `browser` only with it: otherwise a
+ * conversation whose id were `kj-browser-7` would run as that browser's uid
+ * and read its profile — that person's sessions.
+ */
+export const BROWSER_SESSION_RE = /^kj-browser-[1-9][0-9]{0,11}$/
+
 export interface ExecRequest {
     kj_channel: 'exec'
-    op: 'spawn' | 'purge' | 'binaries'
+    op: 'spawn' | 'purge' | 'binaries' | 'browser'
     token: string
     session_id: string
 }
@@ -66,10 +76,11 @@ export function validExecRequest(
 ): r is ExecRequest & Record<string, unknown> {
     return (
         r.kj_channel === 'exec' &&
-        (r.op === 'spawn' || r.op === 'purge' || r.op === 'binaries') &&
+        (r.op === 'spawn' || r.op === 'purge' || r.op === 'binaries' || r.op === 'browser') &&
         typeof r.token === 'string' &&
         /^[0-9a-f]{64}$/.test(r.token) &&
-        isValidSessionId(r.session_id)
+        isValidSessionId(r.session_id) &&
+        (r.op === 'browser') === BROWSER_SESSION_RE.test(r.session_id as string)
     )
 }
 
