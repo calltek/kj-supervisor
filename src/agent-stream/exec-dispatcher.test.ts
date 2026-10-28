@@ -37,6 +37,8 @@ function setup(mode: 'none' | 'root' | 'exec' = 'exec', initial: string | null =
     const vol = { json: initial, failWrites: 0, writes: 0 }
     const execs: Array<{ container_id: string; user: string; cmd: string[]; env: string[] }> = []
     const replies: Array<Record<string, unknown>> = []
+    const fences: Array<{ container_id: string; uid: number }> = []
+    const fence = { fails: false }
     let inspectFails = 0
     const docker: ExecDocker = {
         containerIsolationMode: async () => {
@@ -56,6 +58,10 @@ function setup(mode: 'none' | 'root' | 'exec' = 'exec', initial: string | null =
             vol.writes++
             vol.json = json
         },
+        fenceBrowserNetwork: async (container_id, uid) => {
+            if (fence.fails) throw new Error('iptables-restore: Permission denied')
+            fences.push({ container_id, uid })
+        },
         execDetached: async (o) => {
             execs.push(o)
         },
@@ -74,6 +80,8 @@ function setup(mode: 'none' | 'root' | 'exec' = 'exec', initial: string | null =
         vol,
         execs,
         replies,
+        fences,
+        fence,
         ask,
         failInspect: (n: number) => {
             inspectFails = n
@@ -238,6 +246,23 @@ describe('ExecDispatcher', () => {
         expect(s.execs).toHaveLength(0)
         await s.ask({ op: 'spawn', session_id: SID })
         expect(s.execs).toHaveLength(1)
+    })
+
+    test("a browser's network is cut for its uid before it starts, and only for a browser", async () => {
+        const s = setup()
+        await s.ask({ op: 'spawn', session_id: SID })
+        expect(s.fences).toHaveLength(0)
+        await s.ask({ op: 'browser', session_id: 'kj-browser-7' })
+        expect(s.fences).toEqual([{ container_id: 'c1', uid: UID_BASE + 1 }])
+        expect(s.execs[1]?.user).toBe(`${UID_BASE + 1}:${UID_BASE + 1}`)
+    })
+
+    test('without the fence, no browser', async () => {
+        const s = setup()
+        s.fence.fails = true
+        await s.ask({ op: 'browser', session_id: 'kj-browser-7' })
+        expect(s.execs).toHaveLength(0)
+        expect(s.replies[0]?.ok).toBe(false)
     })
 
     test('a purge never assigns a uid', async () => {
