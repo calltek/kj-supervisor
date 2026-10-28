@@ -38,6 +38,8 @@ export interface BrowserActionPayload {
     profile: { mode: 'shared' | 'chat' | 'temp'; chat?: string }
     request: Record<string, unknown>
     approved_key?: string
+    /** The approval card's language, the person's. */
+    locale?: 'es' | 'en'
     budget_ms: number
 }
 
@@ -103,6 +105,7 @@ export class BrowserRelay {
                 profile: p.profile,
                 request: p.request,
                 ...(p.approved_key ? { approved_key: p.approved_key } : {}),
+                ...(p.locale === 'en' || p.locale === 'es' ? { locale: p.locale } : {}),
                 budget_ms: budget,
             })
             if (!written) this.settle(id, fail('AGENT_NOT_RUNNING', 'The agent is not running'))
