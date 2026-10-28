@@ -186,6 +186,8 @@ export interface ExecDocker {
     isolationVolumeOf(container_id: string): Promise<string | null>
     readUidRegistry(volume_name: string): Promise<string | null>
     writeUidRegistry(volume_name: string, json: string): Promise<void>
+    /** Cut the server's network for a browser uid (browser-fence.ts); throws if it didn't. */
+    fenceBrowserNetwork(container_id: string, uid: number): Promise<void>
     execDetached(opts: {
         container_id: string
         user: string
@@ -248,6 +250,9 @@ export class ExecDispatcher {
                 answer(false, { error: 'unknown conversation' })
                 return
             }
+            // A person's browser never starts on the server's network: the fence
+            // goes in first, and if it can't, there is no browser.
+            if (op === 'browser') await this.deps.docker.fenceBrowserNetwork(container_id, uid)
             await this.deps.docker.execDetached({
                 container_id,
                 user: `${uid}:${uid}`,

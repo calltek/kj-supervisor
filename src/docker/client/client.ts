@@ -23,6 +23,7 @@ import {
     withoutDockerSocket,
     withoutIsolationCaps,
 } from './hardening'
+import { buildBrowserFenceScript, FENCE_IMAGE } from './browser-fence'
 import { agentHostAliases, isHostGatewayUnsupported, recreatedHostAliases } from './host-access'
 import { buildSeedScript } from './seed-script'
 
@@ -580,6 +581,75 @@ export class KJDocker {
             Tty: false,
         })
         await exec.start({ Detach: true, Tty: false })
+    }
+
+    /**
+     * Cut the server's network for one browser uid, inside the agent's own
+     * network namespace (browser-fence.ts). A helper that shares only the
+     * network — not the agent's files, nor its processes — with NET_ADMIN and
+     * nothing else. Throws if the rules didn't go in: the browser must not
+     * start without them.
+     */
+    async fenceBrowserNetwork(container_id: string, uid: number): Promise<void> {
+        await this.ensureFenceImage()
+        const helper = await this.docker.createContainer({
+            Image: FENCE_IMAGE,
+            Cmd: ['sh', '-c', buildBrowserFenceScript(uid)],
+            HostConfig: {
+                AutoRemove: false,
+                NetworkMode: `container:${container_id}`,
+                CapDrop: ['ALL'],
+                CapAdd: ['NET_ADMIN'],
+                SecurityOpt: ['no-new-privileges'],
+            },
+        })
+        try {
+            await helper.start()
+            const { StatusCode } = await helper.wait()
+            const logs = stripDockerFrames(
+                await helper
+                    .logs({ stdout: true, stderr: true, follow: false })
+                    .catch(() => Buffer.from(''))
+            )
+            if (StatusCode !== 0 || !logs.includes('fenced'))
+                throw new Error(`browser fence exited ${StatusCode}: ${logs.trim().slice(0, 300)}`)
+        } finally {
+            await helper.remove({ force: true }).catch(() => undefined)
+        }
+    }
+
+    /**
+     * alpine with iptables, made here the first time it's needed and kept: a
+     * browser starting must not depend on reaching Alpine's mirrors every time.
+     */
+    private fenceImage: Promise<void> | null = null
+    private ensureFenceImage(): Promise<void> {
+        if (!this.fenceImage) {
+            this.fenceImage = this.buildFenceImage()
+            this.fenceImage.catch(() => {
+                this.fenceImage = null
+            })
+        }
+        return this.fenceImage
+    }
+
+    private async buildFenceImage(): Promise<void> {
+        if (await this.imageExistsLocally(FENCE_IMAGE)) return
+        const base = 'alpine:3.20'
+        if (!(await this.imageExistsLocally(base))) await this.pullImage(base, () => {})
+        const builder = await this.docker.createContainer({
+            Image: base,
+            Cmd: ['apk', 'add', '--no-cache', 'iptables', 'ip6tables'],
+        })
+        try {
+            await builder.start()
+            const { StatusCode } = await builder.wait()
+            if (StatusCode !== 0) throw new Error(`could not install iptables (${StatusCode})`)
+            const [repo, tag] = FENCE_IMAGE.split(':')
+            await builder.commit({ repo, tag })
+        } finally {
+            await builder.remove({ force: true }).catch(() => undefined)
+        }
     }
 
     async imageExistsLocally(image_tag: string): Promise<boolean> {
