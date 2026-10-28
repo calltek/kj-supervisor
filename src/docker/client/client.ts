@@ -330,7 +330,10 @@ export function buildBackupScript(withIso = false): string {
                   'mkdir -p /tmp/kjdb/home /tmp/kjdb/iso',
                   // Numeric: the isolated conversations' files belong to uids
                   // that exist only inside the agent's image.
-                  'tar -czf /tmp/b.tgz --numeric-owner -C /v home iso -C /tmp/kjdb home iso || {',
+                  // The browser profiles stay out (kj-app
+                  // docs/navegador-integrado.md §9.5): their cookies are
+                  // people's sessions, and a backup must not carry them.
+                  "tar -czf /tmp/b.tgz --numeric-owner --exclude='iso/browser/*' -C /v home iso -C /tmp/kjdb home iso || {",
               ]
             : ['tar -czf /tmp/b.tgz -C /v . -C /tmp/kjdb . || {']),
         '  RC=$?',
@@ -480,7 +483,8 @@ export class KJDocker {
 
     /**
      * The isolation-state volume of an image without root: `conv` root `1733`
-     * (each conversation creates its own HOME there), `bin` of uid 998. A new
+     * (each conversation creates its own HOME there), `browser` the same (each
+     * person's Chromium profile), `bin` of uid 998. A new
      * volume gets this from the image anyway; one that already exists — from
      * the root launcher, or an older image — is brought to it here, before the
      * container mounts it.
@@ -490,13 +494,13 @@ export class KJDocker {
             volume_name,
             script: [
                 'set -e',
-                'mkdir -p /v/conv /v/bin',
+                'mkdir -p /v/conv /v/bin /v/browser',
                 // chown first to root, chmod while root owns them, and only
                 // then hand `bin` over: the helper has no FOWNER, so it can't
                 // chmod what it no longer owns.
-                'chown 0:0 /v /v/conv /v/bin',
+                'chown 0:0 /v /v/conv /v/bin /v/browser',
                 'chmod 0711 /v',
-                'chmod 1733 /v/conv',
+                'chmod 1733 /v/conv /v/browser',
                 'chmod 0755 /v/bin',
                 'chown 998:998 /v/bin',
             ].join('\n'),

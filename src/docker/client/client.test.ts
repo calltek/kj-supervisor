@@ -698,8 +698,15 @@ describe('el volumen de aislamiento viaja en la copia', () => {
         const tar = buildBackupScript(true)
             .split('\n')
             .find((l) => l.startsWith('tar -czf'))
-        expect(tar).toContain('--numeric-owner -C /v home iso -C /tmp/kjdb home iso')
+        expect(tar).toContain('-C /v home iso -C /tmp/kjdb home iso')
         expect(tar).not.toContain(' . ')
+    })
+
+    test('los perfiles del navegador no viajan: son las sesiones de cada persona', () => {
+        const tar = buildBackupScript(true)
+            .split('\n')
+            .find((l) => l.startsWith('tar -czf'))
+        expect(tar).toContain("--exclude='iso/browser/*'")
     })
 
     test('la restauración elige el formato por la primera entrada', () => {

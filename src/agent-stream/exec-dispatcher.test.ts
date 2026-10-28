@@ -84,12 +84,27 @@ function setup(mode: 'none' | 'root' | 'exec' = 'exec', initial: string | null =
 const uidsOnVolume = (json: string | null) => parseRegistry(json).bySession
 
 describe('validExecRequest', () => {
-    test('only the three ops, a 64-hex token and a session id', () => {
+    test('only the known ops, a 64-hex token and a session id', () => {
         const ok = { kj_channel: 'exec', op: 'spawn', token: TOKEN, session_id: SID }
         expect(validExecRequest(ok)).toBe(true)
         expect(validExecRequest({ ...ok, op: 'run' })).toBe(false)
         expect(validExecRequest({ ...ok, token: 'xyz' })).toBe(false)
         expect(validExecRequest({ ...ok, session_id: '../etc' })).toBe(false)
+    })
+
+    test("a browser's key goes only with op browser, and op browser only with it", () => {
+        const browser = {
+            kj_channel: 'exec',
+            op: 'browser',
+            token: TOKEN,
+            session_id: 'kj-browser-7',
+        }
+        expect(validExecRequest(browser)).toBe(true)
+        // A conversation named like a browser would get its uid, and its profile.
+        expect(validExecRequest({ ...browser, op: 'spawn' })).toBe(false)
+        expect(validExecRequest({ ...browser, op: 'purge' })).toBe(false)
+        expect(validExecRequest({ ...browser, session_id: SID })).toBe(false)
+        expect(validExecRequest({ ...browser, session_id: 'kj-browser-0' })).toBe(false)
     })
 })
 
