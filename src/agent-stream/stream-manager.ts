@@ -37,6 +37,7 @@ import {
 } from './mcp-dispatcher'
 import { classifyStreamEvent, type ClassifierContext } from './stream-classifier'
 import { NDJSONStreamParser } from './stream-parser'
+import { type BrowserRelay, isBrowserLine } from './browser-relay'
 import { type ExecDispatcher, isExecRequest } from './exec-dispatcher'
 
 /**
@@ -131,6 +132,8 @@ export interface AgentStreamManagerDeps {
     mcp?: McpDispatcher
     /** Starts isolated conversations with their own uid (kj-agent-base, no root). */
     exec?: ExecDispatcher
+    /** A person's web browser in the agent: actions, frames and state (browser-relay.ts). */
+    browser?: BrowserRelay
 }
 
 export class AgentStreamManager {
@@ -140,6 +143,7 @@ export class AgentStreamManager {
     private readonly streams = new Map<number, AgentStream>()
     private readonly mcp?: McpDispatcher
     private readonly exec?: ExecDispatcher
+    private readonly browser?: BrowserRelay
 
     constructor(deps: AgentStreamManagerDeps) {
         this.docker = deps.docker
@@ -147,6 +151,7 @@ export class AgentStreamManager {
         this.logger = deps.logger.child({ component: 'agent-stream' })
         this.mcp = deps.mcp
         this.exec = deps.exec
+        this.browser = deps.browser
     }
 
     /**
@@ -596,6 +601,7 @@ export class AgentStreamManager {
             // ignore — stream may already be torn down
         }
         this.streams.delete(agent_id)
+        this.browser?.onDetach(agent_id)
         this.logger.debug({ agent_id }, 'detached from agent stdio')
     }
 
@@ -613,6 +619,12 @@ export class AgentStreamManager {
         // uid. Only the launcher writes this stdout (it is PID 1's).
         if (isExecRequest(payload)) {
             if (this.exec) void this.exec.onRequest(entry.agent_id, entry.container_id, payload)
+            return
+        }
+
+        // The launcher's web browser: answers to actions, and what the person sees.
+        if (isBrowserLine(payload)) {
+            this.browser?.onContainerLine(entry.agent_id, payload)
             return
         }
 
