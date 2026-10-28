@@ -23,7 +23,17 @@ import {
     withoutDockerSocket,
     withoutIsolationCaps,
 } from './hardening'
-import { buildBrowserFenceScript, FENCE_IMAGE } from './browser-fence'
+import {
+    buildBrowserFenceScript,
+    FENCE_BUILD_TIMEOUT_MS,
+    FENCE_IMAGE,
+    FENCE_TIMEOUT_MS,
+    firstTarEntry,
+    hostAddresses,
+    parseNameservers,
+    RESOLV_CONF,
+    withTimeout,
+} from './browser-fence'
 import { agentHostAliases, isHostGatewayUnsupported, recreatedHostAliases } from './host-access'
 import { buildSeedScript } from './seed-script'
 
@@ -589,23 +599,57 @@ export class KJDocker {
      * network — not the agent's files, nor its processes — with NET_ADMIN and
      * nothing else. Throws if the rules didn't go in: the browser must not
      * start without them.
+     *
+     * One at a time per agent: two helpers don't share iptables' lock (each
+     * has its own `/run`), and under the legacy backend a table written by one
+     * can lose the jump the other just added.
      */
     async fenceBrowserNetwork(container_id: string, uid: number): Promise<void> {
+        const prev = this.fences.get(container_id) ?? Promise.resolve()
+        const run = prev.catch(() => undefined).then(() => this.fence(container_id, uid))
+        const tail = run.catch(() => undefined)
+        this.fences.set(container_id, tail)
+        void tail.then(() => {
+            if (this.fences.get(container_id) === tail) this.fences.delete(container_id)
+        })
+        return run
+    }
+
+    private readonly fences = new Map<string, Promise<unknown>>()
+
+    private async fence(container_id: string, uid: number): Promise<void> {
+        const script = buildBrowserFenceScript(uid, {
+            nameservers: parseNameservers(await this.readContainerFile(container_id, RESOLV_CONF)),
+            host_ips: hostAddresses(),
+        })
         await this.ensureFenceImage()
-        const helper = await this.docker.createContainer({
-            Image: FENCE_IMAGE,
-            Cmd: ['sh', '-c', buildBrowserFenceScript(uid)],
-            HostConfig: {
-                AutoRemove: false,
-                NetworkMode: `container:${container_id}`,
-                CapDrop: ['ALL'],
-                CapAdd: ['NET_ADMIN'],
-                SecurityOpt: ['no-new-privileges'],
-            },
+        const create = () =>
+            this.docker.createContainer({
+                Image: FENCE_IMAGE,
+                Cmd: ['sh', '-c', script],
+                HostConfig: {
+                    AutoRemove: false,
+                    NetworkMode: `container:${container_id}`,
+                    CapDrop: ['ALL'],
+                    CapAdd: ['NET_ADMIN'],
+                    SecurityOpt: ['no-new-privileges'],
+                },
+            })
+        // The image may have been pruned since it was built (nothing runs it
+        // between browsers): build it again, once.
+        const helper = await create().catch(async (err) => {
+            if ((err as { statusCode?: number })?.statusCode !== 404) throw err
+            this.fenceImage = null
+            await this.ensureFenceImage()
+            return create()
         })
         try {
             await helper.start()
-            const { StatusCode } = await helper.wait()
+            const { StatusCode } = await withTimeout(
+                helper.wait(),
+                FENCE_TIMEOUT_MS,
+                'browser fence'
+            )
             const logs = stripDockerFrames(
                 await helper
                     .logs({ stdout: true, stderr: true, follow: false })
@@ -619,13 +663,29 @@ export class KJDocker {
     }
 
     /**
+     * One file of a container, through the daemon (`GET …/archive`): no
+     * process runs in the container to read it, so nothing there can answer
+     * in its place.
+     */
+    private async readContainerFile(container_id: string, path: string): Promise<string> {
+        const stream = await this.docker.getContainer(container_id).getArchive({ path })
+        const chunks: Buffer[] = []
+        for await (const c of stream as AsyncIterable<Buffer>) chunks.push(Buffer.from(c))
+        return firstTarEntry(Buffer.concat(chunks)).toString('utf8')
+    }
+
+    /**
      * alpine with iptables, made here the first time it's needed and kept: a
      * browser starting must not depend on reaching Alpine's mirrors every time.
      */
     private fenceImage: Promise<void> | null = null
     private ensureFenceImage(): Promise<void> {
         if (!this.fenceImage) {
-            this.fenceImage = this.buildFenceImage()
+            this.fenceImage = withTimeout(
+                this.buildFenceImage(),
+                FENCE_BUILD_TIMEOUT_MS,
+                'fence image'
+            )
             this.fenceImage.catch(() => {
                 this.fenceImage = null
             })
