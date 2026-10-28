@@ -25,7 +25,7 @@ import type { KJLogger } from '../logger'
 
 /** The answer when the agent doesn't answer in time, or isn't there. */
 export interface BrowserOutcomeLike {
-    status: 'ok' | 'failed' | 'denied'
+    status: 'done' | 'failed' | 'denied'
     code?: string
     message?: string
     data?: unknown
@@ -156,7 +156,7 @@ function fail(code: string, message: string): BrowserOutcomeLike {
 /** The agent's outcome, kept to its shape: anything else is a failure. */
 function outcomeOf(v: unknown): BrowserOutcomeLike {
     const o = v as BrowserOutcomeLike | undefined
-    if (!o || (o.status !== 'ok' && o.status !== 'failed' && o.status !== 'denied'))
+    if (!o || (o.status !== 'done' && o.status !== 'failed' && o.status !== 'denied'))
         return fail('HOST_BROWSER_FAILED', 'The browser gave no answer')
     return {
         status: o.status,

@@ -37,7 +37,7 @@ describe('BrowserRelay', () => {
             kj_channel: 'browser',
             kind: 'result',
             id,
-            outcome: { status: 'ok' },
+            outcome: { status: 'done' },
         })
         s.relay.onContainerLine(1, {
             kj_channel: 'browser',
