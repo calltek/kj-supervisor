@@ -15,6 +15,12 @@ import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
 import { markPath, readDecommission, writeDecommission } from './client/auth/decommission'
 import { KJControlClient } from './client/control/control.client'
 import { McpDispatcher, type McpEnvelope } from './agent-stream/mcp-dispatcher'
+import {
+    type BrowserActionPayload,
+    type BrowserControlPayload,
+    type BrowserOutcomeLike,
+    BrowserRelay,
+} from './agent-stream/browser-relay'
 import { ExecDispatcher } from './agent-stream/exec-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
 import {
@@ -281,7 +287,12 @@ async function main(): Promise<void> {
         reply: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
         logger,
     })
-    streams = new AgentStreamManager({ docker, client, logger, mcp, exec })
+    const browser = new BrowserRelay({
+        write: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
+        push: (event, payload) => client.push(event, payload),
+        logger,
+    })
+    streams = new AgentStreamManager({ docker, client, logger, mcp, exec, browser })
     const eventsWatcher = new KJDockerEventsWatcher({
         docker,
         tracker,
@@ -419,6 +430,17 @@ async function main(): Promise<void> {
     // back when it's ready. The envelope is built in `streams.warmup` — it may
     // carry the conversation's `session_env` (API keys), so the log line below
     // names ids only and must stay that way.
+    // A person's web browser in the agent (kj-app docs/navegador-integrado.md
+    // §9.4.2). The control decides; this only carries. Types are local until
+    // they come with protocol.ts.
+    client.onCommand<BrowserActionPayload, { ok: true; outcome: BrowserOutcomeLike }>(
+        'agent:browser:action',
+        async (payload) => ({ ok: true, outcome: await browser.action(payload) })
+    )
+    client.onPush<BrowserControlPayload>('agent:browser:control', (payload) => {
+        if (!browser.control(payload))
+            logger.debug({ agent_id: payload?.agent_id }, 'agent:browser:control not delivered')
+    })
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
         const delivered = streams.warmup(payload)
         logger
