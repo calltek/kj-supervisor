@@ -490,6 +490,9 @@ export class AgentStreamManager {
             ...(payload.effort ? { effort: payload.effort } : {}),
             // Same rule as agent:input: only skip when absent.
             ...(session_env !== undefined ? { session_env } : {}),
+            // Calentar la conversación de un cliente no puede arrancarla como el
+            // usuario del agente: el aislamiento viaja igual que en la entrada.
+            ...(payload.isolated ? { isolated: true } : {}),
         })
     }
 
@@ -569,6 +572,10 @@ export class AgentStreamManager {
         // control only sends it until the fork's first turn is delivered.
         const fork_from = (payload as AgentInputWithFork).fork_from
         if (fork_from) envelope.fork_from = fork_from
+        // La conversación de un cliente (o de un canal privado) corre con su
+        // propio uid. El control lo pedía y se quedaba aquí: el agente nunca lo
+        // veía y la arrancaba como el usuario del agente, con el HOME de todos.
+        if (payload.isolated) envelope.isolated = true
         const line = `${JSON.stringify(envelope)}\n`
 
         try {
