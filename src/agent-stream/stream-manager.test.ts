@@ -314,6 +314,56 @@ describe('el turno de una sesión bifurcada lleva su origen al contenedor', () =
 })
 
 /**
+ * El aislamiento de una conversación (la de un cliente o un canal privado) lo
+ * decide el control y lo aplica el contenedor. Se quedaba aquí: el contenedor
+ * no lo veía y la arrancaba como el usuario del agente, con el HOME de todos.
+ */
+describe('el turno de una conversación aislada lo dice al contenedor', () => {
+    test('isolated llega en la entrada', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+            isolated: true,
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.isolated).toBe(true)
+    })
+
+    test('y en el calentamiento', async () => {
+        const { manager, written } = await attached()
+
+        manager.warmup({
+            agent_id: 1,
+            conversation_session_id: 's1',
+            isolated: true,
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect(envelope.type).toBe('warmup')
+        expect(envelope.isolated).toBe(true)
+    })
+
+    test('sin aislamiento, la clave no viaja', async () => {
+        const { manager, written } = await attached()
+
+        manager.write({
+            request_id: 'r1',
+            agent_id: 1,
+            message: 'hola',
+            conversation_session_id: 's1',
+        } as never)
+
+        const envelope = JSON.parse(written().join('').trim())
+        expect('isolated' in envelope).toBe(false)
+    })
+})
+
+/**
  * #529 — la generación de credenciales se lee DEL CONTENEDOR al engancharse.
  *
  * Es la pieza que le permite al control distinguir el contenedor que lleva las
