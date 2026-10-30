@@ -18,9 +18,9 @@ import type { KeychainLog } from './log'
 import {
     type CredentialReference,
     REFERENCE_HEADERS,
+    authHeaderValue,
     extractReferences,
     mentionsReference,
-    substituteReferences,
 } from './references'
 import { collectVariants, redactBytes, redactText } from './redact'
 import type { AgentTokenRegistry } from './registry'
@@ -275,9 +275,12 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
         // 8. Substitute and call, without following redirects.
         const values = new Map<string, string>()
         for (const [raw, entry] of resolved) values.set(raw, entry.value)
+        const basicPairs: string[] = []
         try {
             for (const [name, value] of withRefs) {
-                forward.append(name, substituteReferences(value, values))
+                const header = authHeaderValue(name, value, values)
+                if (header.plain) basicPairs.push(header.plain)
+                forward.append(name, header.value)
             }
         } catch {
             throw new KeychainError(
@@ -285,7 +288,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                 'El valor de la credencial no se puede poner en una cabecera.'
             )
         }
-        const variants = collectVariants(values.values())
+        const variants = collectVariants([...values.values(), ...basicPairs])
 
         let upstream: Response
         try {

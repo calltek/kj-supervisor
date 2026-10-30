@@ -60,6 +60,33 @@ export function substituteReferences(value: string, values: Map<string, string>)
     return value.replace(STRICT, (raw) => values.get(raw) ?? raw)
 }
 
+const BASIC = /^basic\s+(.+)$/i
+
+/**
+ * The value of an auth header once its references are in place. `Basic`
+ * carries `user:password` in base64, which the agent cannot compute without the
+ * password: it writes `Basic user:{{kj:Cred.password}}` in plain text and the
+ * pair is encoded here, after the substitution. Anything already base64 (no
+ * `:`) is left alone. `plain` is the pair before encoding, so the caller can
+ * redact it from the response too.
+ */
+export function authHeaderValue(
+    name: string,
+    value: string,
+    values: Map<string, string>
+): { value: string; plain?: string } {
+    const lower = name.toLowerCase()
+    const basic = BASIC.exec(value)
+    if (
+        (lower === 'authorization' || lower === 'proxy-authorization') &&
+        basic?.[1]?.includes(':')
+    ) {
+        const plain = substituteReferences(basic[1], values)
+        return { value: `Basic ${Buffer.from(plain, 'utf8').toString('base64')}`, plain }
+    }
+    return { value: substituteReferences(value, values) }
+}
+
 function safeDecode(text: string): string {
     try {
         return decodeURIComponent(text.replace(/\+/g, ' '))

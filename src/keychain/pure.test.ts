@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { isBlockedAddress } from './addresses'
-import { extractReferences, mentionsReference, parseReference } from './references'
+import { authHeaderValue, extractReferences, mentionsReference, parseReference } from './references'
 import { REDACTED, collectVariants, redactBytes, redactText } from './redact'
 import { hostMatchesSite } from './sites'
 
@@ -135,5 +135,30 @@ describe('redaction', () => {
         expect(Array.from(out.slice(0, 2))).toEqual([0xff, 0x00])
         expect(Array.from(out.slice(-1))).toEqual([0xfe])
         expect(Buffer.from(out.slice(2, -1)).toString()).toBe(REDACTED)
+    })
+})
+
+describe('basic auth', () => {
+    const values = new Map([['{{kj:Jira.password}}', 's3cret:pass']])
+
+    test('encodes the plain pair after substituting', () => {
+        const out = authHeaderValue('Authorization', 'Basic ana:{{kj:Jira.password}}', values)
+        expect(out.value).toBe(`Basic ${Buffer.from('ana:s3cret:pass').toString('base64')}`)
+        expect(out.plain).toBe('ana:s3cret:pass')
+    })
+
+    test('a Bearer or an already encoded Basic is only substituted', () => {
+        expect(authHeaderValue('Authorization', 'Bearer {{kj:Jira.password}}', values).value).toBe(
+            'Bearer s3cret:pass'
+        )
+        expect(authHeaderValue('Authorization', 'Basic YWJjZA==', values).value).toBe(
+            'Basic YWJjZA=='
+        )
+    })
+
+    test('only in the auth headers', () => {
+        expect(authHeaderValue('X-API-Key', 'Basic a:{{kj:Jira.password}}', values).value).toBe(
+            'Basic a:s3cret:pass'
+        )
     })
 })
