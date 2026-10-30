@@ -748,6 +748,12 @@ es `src/keychain/`.
   Tras reiniciar el supervisor, una sesión sin input todavía no cuenta. El ack
   lleva el valor: nunca se loguea (`REDACT_PATHS` además tapa `token` y
   `ack.value`).
+- **SSH firma aquí** (`ssh-handler.ts`, `ssh-keys.ts`): el lanzador hace de
+  `ssh-agent` y pide `POST /ssh/key` (la pública) y `POST /ssh/sign` (la
+  firma). La privada se resuelve como cualquier referencia, campo
+  `ssh_private_key`, y no sale de kj-keychain. Sin comprobar destino: una clave
+  sólo abre los servidores que confían en su pública, y lo firmado no dice el
+  host. Una clave con frase de paso se rechaza con `KEYCHAIN_KEY_ENCRYPTED`.
 - **Compila sin el backend**: `keychain:resolve` usa tipos locales hasta que
   llegue en `protocol.ts`. **Orden de despliegue**: backend (que exista
   `keychain:resolve`; sin él, `KEYCHAIN_UNAVAILABLE` a los 8 s) → este
