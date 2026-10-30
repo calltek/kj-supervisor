@@ -100,7 +100,12 @@ function check(publicBlob: Buffer, signature: Buffer, data: Buffer): string {
     let ok: boolean
     if (name === 'ssh-ed25519') {
         const key = createPublicKey({
-            key: { kty: 'OKP', crv: 'Ed25519', x: u(rest[0] as Buffer) },
+            key: {
+                kty: 'OKP',
+                crv: 'Ed25519',
+                // Raw 32 bytes, not an mpint: a leading zero is part of the key.
+                x: (rest[0] as Buffer).toString('base64url'),
+            },
             format: 'jwk',
         })
         ok = verify(null, data, key, sig)
