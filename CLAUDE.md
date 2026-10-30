@@ -754,6 +754,21 @@ es `src/keychain/`.
   `ssh_private_key`, y no sale de kj-keychain. Sin comprobar destino: una clave
   sólo abre los servidores que confían en su pública, y lo firmado no dice el
   host. Una clave con frase de paso se rechaza con `KEYCHAIN_KEY_ENCRYPTED`.
+- **La VPN también la pone kj-keychain** (`connect-handler.ts`, `tailnet.ts`):
+  `kj-connect "<VPN>" host puerto` (el `ProxyCommand` de ssh) abre por el
+  lanzador un WebSocket a `/connect`. Aquí se resuelve la auth key de la
+  credencial (`tskey-…`, campo `auth_key`), un `tailscaled` en userspace
+  (sin TUN ni capacidades, estado en memoria = nodo efímero, sin logs a
+  Tailscale, y **`--shields-up`**: en userspace lo que entra por su IP de
+  Tailscale se reenvía al loopback, donde está el SOCKS5 sin clave de cada
+  nodo) se une a la tailnet y los bytes van por su SOCKS5. Sólo a los
+  destinos de la credencial y sólo por la tailnet: una IP tiene que ser de
+  Tailscale (100.64/10, fd7a:115c:a1e0::/48) y un nombre lo resuelve el
+  propio nodo (`tailscale ip`) a la IP de un peer, que es a la que se abre;
+  el resolvedor del SOCKS5 caería al DNS del sistema y a la red del host.
+  Un nodo sin túneles abiertos 30 min hace logout y se para; uno abierto
+  nunca lo corta el barrido. Tope de 16 túneles por agente y 8 MiB en cola.
+  Un túnel ya abierto no se corta si se retira «Usar»: se comprueba al abrir.
 - **Compila sin el backend**: `keychain:resolve` usa tipos locales hasta que
   llegue en `protocol.ts`. **Orden de despliegue**: backend (que exista
   `keychain:resolve`; sin él, `KEYCHAIN_UNAVAILABLE` a los 8 s) → este

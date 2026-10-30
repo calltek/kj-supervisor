@@ -29,6 +29,11 @@ WORKDIR /app
 # /var/run/docker.sock and the supervisor exits at first list call.
 RUN addgroup -S kj && adduser -S -G kj -h /app kj
 
+# tailscaled for kj-keychain's VPN tunnels (src/keychain/tailnet.ts): userspace
+# networking, no TUN and no capability. Only kj-keychain starts it; the
+# supervisor itself never does.
+RUN apk add --no-cache tailscale
+
 COPY --chown=kj:kj package.json bun.lock ./
 COPY --from=deps --chown=kj:kj /work/node_modules ./node_modules
 COPY --chown=kj:kj src ./src
