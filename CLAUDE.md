@@ -761,8 +761,10 @@ es `src/keychain/`.
   (sin TUN ni capacidades, estado en memoria = nodo efímero, sin logs a
   Tailscale, y **`--shields-up`**: en userspace lo que entra por su IP de
   Tailscale se reenvía al loopback, donde está el SOCKS5 sin clave de cada
-  nodo) se une a la tailnet y los bytes van por su SOCKS5. Sólo a los
-  destinos de la credencial y sólo por la tailnet: una IP tiene que ser de
+  nodo) se une a la tailnet y los bytes van por su SOCKS5. Sin destinos en
+  la credencial llega a cualquier máquina de la tailnet (para eso es la VPN);
+  con destinos, sólo a ésos. Siempre sólo por la tailnet: una IP
+  tiene que ser de
   Tailscale (100.64/10, fd7a:115c:a1e0::/48) y un nombre lo resuelve el
   propio nodo (`tailscale ip`) a la IP de un peer, que es a la que se abre;
   el resolvedor del SOCKS5 caería al DNS del sistema y a la red del host.
