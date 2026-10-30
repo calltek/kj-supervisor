@@ -362,9 +362,19 @@ export function buildBackupScript(withIso = false): string {
         'SZ=$(stat -c %s /tmp/b.tgz)',
         'echo "KJ_BACKUP_SIZE=$SZ"',
         '',
+        // Every PUT retries. A part is up to 2 GiB and one reset mid-upload
+        // («curl: (56) Recv failure: Connection reset by peer») used to throw
+        // away the whole copy — 18 GB of Ailfred, two nights in a row
+        // (29-30 Oct 2026) — while copies of 14 GB on the same machine went
+        // through. `--retry-all-errors` because a reset is not one of the
+        // errors curl retries by default; the signed URL outlives the retries
+        // and re-sending the same part number just replaces it.
+        '# Cada PUT reintenta: un corte a mitad de una parte no tira la copia.',
+        'CURL_RETRY="--retry 5 --retry-delay 15 --retry-all-errors"',
+        '',
         '# Fits in one PUT (or the control gave us no parts): original path.',
         'if [ -z "$KJ_PART_URLS" ] || [ "$SZ" -le "$KJ_SINGLE_LIMIT" ]; then',
-        '  curl -sS --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
+        '  curl -sS $CURL_RETRY --fail-with-body -X PUT -H "Content-Type: application/octet-stream" \\',
         '       --upload-file /tmp/b.tgz "$KJ_UPLOAD_URL"',
         '  exit 0',
         'fi',
@@ -384,8 +394,11 @@ export function buildBackupScript(withIso = false): string {
         '     skip=$(( OFFSET / 1048576 )) count=$(( KJ_PART_SIZE / 1048576 )) 2>/dev/null',
         '  # -D dumps the response headers; the ETag in there is what the',
         '  # control needs to seal the object.',
-        '  curl -sS --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
-        '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tr -d "\\r\\"")',
+        '  rm -f /tmp/h.txt',
+        '  curl -sS $CURL_RETRY --fail-with-body -X PUT -D /tmp/h.txt --upload-file /tmp/part.bin "$URL"',
+        // With retries `-D` can hold the headers of a failed attempt too: the
+        // ETag that counts is the last one, from the attempt that worked.
+        '  ETAG=$(sed -n "s/^[Ee][Tt][Aa][Gg]: *//p" /tmp/h.txt | tail -n 1 | tr -d "\\r\\"")',
         '  if [ -z "$ETAG" ]; then echo "part $N uploaded without an ETag" >&2; exit 4; fi',
         '  echo "KJ_PART=$N:$ETAG"',
         '  rm -f /tmp/part.bin /tmp/h.txt',
