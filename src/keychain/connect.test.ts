@@ -11,6 +11,7 @@ import {
 import type { KeychainResolveAck } from './control-protocol'
 import { silentLog } from './log'
 import { AgentTokenRegistry } from './registry'
+import { daemonArgs, upArgs } from './tailnet'
 
 describe('where a VPN tunnel may go', () => {
     test('tailnet addresses and MagicDNS names only', () => {
@@ -34,6 +35,7 @@ describe('where a VPN tunnel may go', () => {
             'example.com',
             'localhost.localdomain',
             '::1',
+            'localhost',
             '',
             'a b',
         ]) {
@@ -69,6 +71,9 @@ describe('where a VPN tunnel may go', () => {
 const TOKEN = 'agent-token-7'
 const SESSION = '11111111-2222-4333-8444-555555555555'
 
+/** What each tunnel asked the SOCKS5 server for. */
+const connects: Buffer[] = []
+
 /** A SOCKS5 server that echoes what the tunnel sends once it is open. */
 function fakeSocks() {
     return Bun.listen<{ phase: number }>({
@@ -84,6 +89,7 @@ function fakeSocks() {
                     s.write(Buffer.from([5, 0]))
                 } else if (s.data.phase === 1) {
                     s.data.phase = 2
+                    connects.push(Buffer.from(chunk))
                     s.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]))
                 } else {
                     s.write(Buffer.concat([Buffer.from('echo:'), Buffer.from(chunk)]))
@@ -93,6 +99,9 @@ function fakeSocks() {
     })
 }
 
+const leases = { held: 0, released: 0 }
+
+/** A node whose MagicDNS knows `delta` (100.64.0.9) and nothing else. */
 function serve(ack: KeychainResolveAck, socksPort: number) {
     const registry = new AgentTokenRegistry()
     registry.set(7, TOKEN)
@@ -100,7 +109,18 @@ function serve(ack: KeychainResolveAck, socksPort: number) {
         registry,
         resolve: async () => ack,
         log: silentLog,
-        tailnet: { socksFor: async () => socksPort },
+        tailnet: {
+            acquire: async () => {
+                leases.held += 1
+                return {
+                    socks_port: socksPort,
+                    resolve: async (name) => (name === 'delta' ? '100.64.0.9' : null),
+                    release: () => {
+                        leases.released += 1
+                    },
+                }
+            },
+        },
     })
     return Bun.serve<ConnectData, never>({
         hostname: '127.0.0.1',
@@ -184,5 +204,57 @@ describe('/connect', () => {
         })
         expect(forged.status).toBe(401)
         server.stop(true)
+    })
+})
+
+describe('/connect, the hard edges', () => {
+    const socks = fakeSocks()
+    afterAll(() => socks.stop(true))
+    const KEY = 'tskey-auth-prueba'
+    const DELTA = { ok: true as const, value: KEY, sites: [{ host: 'delta', subdomains: false }] }
+
+    test('a name is opened to its tailnet IP, never handed to the SOCKS resolver', async () => {
+        connects.length = 0
+        const server = serve(DELTA, socks.port)
+        const out = await tunnel(server.port as number, 'delta', 'x')
+        expect(out.binary).toBe('echo:x')
+        expect([...(connects[0] as Buffer)]).toEqual([5, 1, 0, 1, 100, 64, 0, 9, 0, 91])
+        server.stop(true)
+    })
+
+    test('a name the tailnet does not know is refused, before any CONNECT', async () => {
+        connects.length = 0
+        const server = serve(
+            { ok: true, value: KEY, sites: [{ host: 'ghost', subdomains: false }] },
+            socks.port
+        )
+        const out = await tunnel(server.port as number, 'ghost', 'x')
+        expect(out.errors.join()).toContain('KEYCHAIN_NOT_TAILNET')
+        expect(connects).toHaveLength(0)
+        server.stop(true)
+    })
+
+    test('every lease taken is given back when the tunnel closes', async () => {
+        const before = { ...leases }
+        const server = serve(DELTA, socks.port)
+        await tunnel(server.port as number, 'delta', 'x')
+        await Bun.sleep(50)
+        expect(leases.held - before.held).toBe(1)
+        expect(leases.released - before.released).toBe(1)
+        server.stop(true)
+    })
+})
+
+describe('the tailscale command lines', () => {
+    test('the node takes nothing from the tailnet, and logs nowhere', () => {
+        expect(upArgs('/tmp/ts-x/s', '/tmp/ts-x/authkey', 'kj')).toContain('--shields-up')
+        expect(upArgs('/tmp/ts-x/s', '/tmp/ts-x/authkey', 'kj')).toContain(
+            '--auth-key=file:/tmp/ts-x/authkey'
+        )
+        const daemon = daemonArgs('/tmp/ts-x', '/tmp/ts-x/s', 1055)
+        expect(daemon).toContain('--tun=userspace-networking')
+        expect(daemon).toContain('--state=mem:')
+        expect(daemon).toContain('--no-logs-no-support')
+        expect(daemon).toContain('--socks5-server=127.0.0.1:1055')
     })
 })

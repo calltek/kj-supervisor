@@ -17,7 +17,7 @@ import { normalizeHost } from './sites'
 
 export function isTailnetHost(raw: string): boolean {
     const host = normalizeHost(raw)
-    if (!host) return false
+    if (!host || host === 'localhost') return false
     const family = isIP(host)
     if (family === 4) {
         const [a, b] = host.split('.').map(Number) as [number, number]

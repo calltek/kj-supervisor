@@ -7,6 +7,8 @@
  * state on disk: tokens and cached values live in memory only.
  */
 
+import { hostname } from 'node:os'
+
 import type { ServerWebSocket } from 'bun'
 
 import { CONTROL_PATH, ControlSessions, isAuthorizedControl } from './control'
@@ -18,7 +20,6 @@ import { ControlLink, ResolveCache } from './resolver'
 import { CONNECT_PATH, type ConnectData, createConnectHandler } from './connect-handler'
 import { createSshHandler, isSshPath } from './ssh-handler'
 import { TailnetPool } from './tailnet'
-import { hostname } from 'node:os'
 
 const secret = process.env.KJ_KEYCHAIN_CONTROL_SECRET ?? ''
 if (!secret) {

@@ -8,14 +8,20 @@
  * (tailnet.ts), and the bytes go through its SOCKS5 to host:port. The key never
  * enters the agent's container.
  *
- * Only to the tailnet (connect-target.ts) and only to the credential's
- * destinations. Binary frames are the tunnel; a text frame from here is an
+ * Only to the credential's destinations, and only through the tailnet: an IP
+ * has to be a Tailscale address, and a name is resolved by the node itself to
+ * a peer's Tailscale IP, which is what the tunnel opens to (connect-target.ts,
+ * tailnet.ts). Binary frames are the tunnel; a text frame from here is an
  * error `{ error: { code, message } }`, sent before closing.
+ *
+ * A tunnel already open is not cut if the person loses «Usar» or the
+ * credential changes: the check is at opening, as for an HTTP request.
  */
+
+import { isIP } from 'node:net'
 
 import type { Server, ServerWebSocket, Socket } from 'bun'
 
-import { KeychainError, errorResponse } from './errors'
 import {
     SOCKS_GREETING,
     SocksError,
@@ -25,17 +31,23 @@ import {
     socksConnectRequest,
     socksReplyLength,
 } from './connect-target'
+import { KeychainError, errorResponse } from './errors'
 import type { KeychainLog } from './log'
 import type { AgentTokenRegistry } from './registry'
 import type { Resolve } from './resolver'
 import { describeSites, hostMatchesAnySite } from './sites'
-import { TailnetError } from './tailnet'
+import { type TailnetLease, TailnetError } from './tailnet'
 
 export const CONNECT_PATH = '/connect'
 
 const MAX_NAME = 200
+const MAX_HOST = 253
 /** What the agent may send before the tunnel is open. */
 const MAX_EARLY_BYTES = 1024 * 1024
+/** What may wait for a slow destination; past it the tunnel closes. */
+const MAX_PENDING_BYTES = 8 * 1024 * 1024
+/** Tunnels one agent may have open at once (kj-keychain is shared by the host). */
+const MAX_TUNNELS_PER_AGENT = 16
 const HANDSHAKE_TIMEOUT_MS = 20_000
 
 export interface ConnectData {
@@ -46,20 +58,25 @@ export interface ConnectData {
     host: string
     port: number
     tcp?: Socket<unknown>
+    lease?: TailnetLease
     open: boolean
+    closed: boolean
     early: Buffer[]
     early_bytes: number
     pending: Buffer[]
+    pending_bytes: number
 }
 
 export interface ConnectDeps {
     registry: AgentTokenRegistry
     resolve: Resolve
     log: KeychainLog
-    tailnet: { socksFor: (authKey: string) => Promise<number> }
+    tailnet: { acquire: (authKey: string) => Promise<TailnetLease> }
 }
 
 export function createConnectHandler(deps: ConnectDeps) {
+    const tunnels = new Map<number, number>()
+
     /** Checks what can be checked before upgrading; a Response = refused. */
     function upgrade(request: Request, server: Server<ConnectData>): Response | undefined {
         try {
@@ -91,11 +108,18 @@ export function createConnectHandler(deps: ConnectDeps) {
             if (port === null) {
                 throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'El puerto no es válido.')
             }
-            if (!isTailnetHost(host)) {
+            if (host.length > MAX_HOST || !isTailnetHost(host)) {
                 throw new KeychainError(
                     'KEYCHAIN_NOT_TAILNET',
-                    `«${host}» no es una dirección de la VPN. Usa la IP de Tailscale (100.x.y.z) ` +
-                        'o el nombre de la máquina en la tailnet.'
+                    `«${host.slice(0, 80)}» no es una dirección de la VPN. Usa la IP de Tailscale ` +
+                        '(100.x.y.z) o el nombre de la máquina en la tailnet.'
+                )
+            }
+            if ((tunnels.get(agent_id) ?? 0) >= MAX_TUNNELS_PER_AGENT) {
+                throw new KeychainError(
+                    'KEYCHAIN_TUNNEL_FAILED',
+                    `Ya hay ${MAX_TUNNELS_PER_AGENT} conexiones abiertas por la VPN. Cierra alguna y repite.`,
+                    429
                 )
             }
             const data: ConnectData = {
@@ -106,11 +130,16 @@ export function createConnectHandler(deps: ConnectDeps) {
                 host,
                 port,
                 open: false,
+                closed: false,
                 early: [],
                 early_bytes: 0,
                 pending: [],
+                pending_bytes: 0,
             }
-            if (server.upgrade(request, { data })) return undefined
+            if (server.upgrade(request, { data })) {
+                tunnels.set(agent_id, (tunnels.get(agent_id) ?? 0) + 1)
+                return undefined
+            }
             throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'Hace falta una conexión WebSocket.')
         } catch (error) {
             const e =
@@ -125,6 +154,7 @@ export function createConnectHandler(deps: ConnectDeps) {
     function fail(ws: ServerWebSocket<ConnectData>, error: KeychainError): void {
         deps.log('warn', 'connect failed', {
             agent_id: ws.data.agent_id,
+            credential: ws.data.credential,
             host: ws.data.host,
             port: ws.data.port,
             code: error.code,
@@ -135,13 +165,31 @@ export function createConnectHandler(deps: ConnectDeps) {
         } catch {}
     }
 
-    function write(tcp: Socket<unknown>, data: ConnectData, chunk: Buffer): void {
-        if (data.pending.length) {
-            data.pending.push(chunk)
-            return
+    function write(ws: ServerWebSocket<ConnectData>, tcp: Socket<unknown>, chunk: Buffer): void {
+        const d = ws.data
+        if (d.pending.length) {
+            d.pending.push(chunk)
+            d.pending_bytes += chunk.length
+        } else {
+            const written = tcp.write(chunk)
+            if (written < chunk.length) {
+                const rest = chunk.subarray(Math.max(written, 0))
+                d.pending.push(rest)
+                d.pending_bytes += rest.length
+            }
         }
-        const written = tcp.write(chunk)
-        if (written < chunk.length) data.pending.push(chunk.subarray(Math.max(written, 0)))
+        if (d.pending_bytes > MAX_PENDING_BYTES) {
+            ws.close(1009, 'destination too slow')
+            tcp.end()
+        }
+    }
+
+    /** Whether the agent hung up while we were waiting: then nothing more is opened. */
+    function abandoned(ws: ServerWebSocket<ConnectData>): boolean {
+        if (!ws.data.closed) return false
+        ws.data.lease?.release()
+        ws.data.tcp?.end()
+        return true
     }
 
     async function open(ws: ServerWebSocket<ConnectData>): Promise<void> {
@@ -152,6 +200,7 @@ export function createConnectHandler(deps: ConnectDeps) {
             credential: d.credential,
             field: d.field,
         })
+        if (abandoned(ws)) return
         if (!ack.ok) return fail(ws, new KeychainError(ack.code, ack.message))
         if (!ack.value.startsWith('tskey-')) {
             return fail(
@@ -182,9 +231,8 @@ export function createConnectHandler(deps: ConnectDeps) {
                 )
             )
         }
-        let socksPort: number
         try {
-            socksPort = await deps.tailnet.socksFor(ack.value)
+            d.lease = await deps.tailnet.acquire(ack.value)
         } catch (error) {
             return fail(
                 ws,
@@ -193,6 +241,22 @@ export function createConnectHandler(deps: ConnectDeps) {
                     error instanceof TailnetError
                         ? error.message
                         : 'No se ha podido levantar la VPN ahora mismo. Vuelve a intentarlo.'
+                )
+            )
+        }
+        if (abandoned(ws)) return
+
+        // A name goes to the peer's tailnet IP, never to tailscaled's own
+        // resolver: that one falls back to the system DNS and the host network.
+        const target = isIP(d.host) ? d.host : await d.lease.resolve(d.host)
+        if (abandoned(ws)) return
+        if (!target) {
+            return fail(
+                ws,
+                new KeychainError(
+                    'KEYCHAIN_NOT_TAILNET',
+                    `No hay ninguna máquina «${d.host}» en la VPN «${d.credential}». Usa su IP de ` +
+                        'Tailscale (100.x.y.z) o el nombre con el que aparece en la tailnet.'
                 )
             )
         }
@@ -214,14 +278,19 @@ export function createConnectHandler(deps: ConnectDeps) {
         try {
             d.tcp = await Bun.connect({
                 hostname: '127.0.0.1',
-                port: socksPort,
+                port: d.lease.socks_port,
                 socket: {
                     open: (s) => {
                         s.write(SOCKS_GREETING)
                     },
                     data: (s, chunk) => {
+                        if (d.closed) {
+                            s.end()
+                            return
+                        }
                         if (phase === 'open') {
-                            ws.sendBinary(chunk)
+                            // 0 = dropped: the agent's side is gone or far behind.
+                            if (ws.sendBinary(chunk) === 0) s.end()
                             return
                         }
                         buf = Buffer.concat([buf, Buffer.from(chunk)])
@@ -231,7 +300,7 @@ export function createConnectHandler(deps: ConnectDeps) {
                                 if (buf[0] !== 5 || buf[1] !== 0) throw new SocksError(-1)
                                 buf = buf.subarray(2)
                                 phase = 'connect'
-                                s.write(socksConnectRequest(d.host, d.port))
+                                s.write(socksConnectRequest(target, d.port))
                             }
                             if (phase === 'connect') {
                                 const length = socksReplyLength(buf)
@@ -243,11 +312,12 @@ export function createConnectHandler(deps: ConnectDeps) {
                                 clearTimeout(timer)
                                 deps.log('info', 'connect open', {
                                     agent_id: d.agent_id,
+                                    credential: d.credential,
                                     host: d.host,
                                     port: d.port,
                                 })
                                 if (rest.length) ws.sendBinary(rest)
-                                for (const early of d.early) write(s, d, early)
+                                for (const early of d.early) write(ws, s, early)
                                 d.early = []
                             }
                         } catch (error) {
@@ -268,9 +338,12 @@ export function createConnectHandler(deps: ConnectDeps) {
                             const chunk = d.pending[0] as Buffer
                             const written = s.write(chunk)
                             if (written < chunk.length) {
-                                d.pending[0] = chunk.subarray(Math.max(written, 0))
+                                const rest = chunk.subarray(Math.max(written, 0))
+                                d.pending_bytes -= chunk.length - rest.length
+                                d.pending[0] = rest
                                 return
                             }
+                            d.pending_bytes -= chunk.length
                             d.pending.shift()
                         }
                     },
@@ -290,7 +363,9 @@ export function createConnectHandler(deps: ConnectDeps) {
         } catch {
             clearTimeout(timer)
             fail(ws, new KeychainError('KEYCHAIN_TUNNEL_FAILED', 'La VPN no responde ahora mismo.'))
+            return
         }
+        abandoned(ws)
     }
 
     const websocket = {
@@ -307,7 +382,7 @@ export function createConnectHandler(deps: ConnectDeps) {
             const d = ws.data
             const chunk = Buffer.from(message)
             if (d.open && d.tcp) {
-                write(d.tcp, d, chunk)
+                write(ws, d.tcp, chunk)
                 return
             }
             d.early_bytes += chunk.length
@@ -318,7 +393,14 @@ export function createConnectHandler(deps: ConnectDeps) {
             d.early.push(chunk)
         },
         close(ws: ServerWebSocket<ConnectData>) {
-            ws.data.tcp?.end()
+            const d = ws.data
+            if (d.closed) return
+            d.closed = true
+            d.tcp?.end()
+            d.lease?.release()
+            const n = (tunnels.get(d.agent_id) ?? 1) - 1
+            if (n > 0) tunnels.set(d.agent_id, n)
+            else tunnels.delete(d.agent_id)
         },
     }
 

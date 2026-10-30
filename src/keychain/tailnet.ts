@@ -7,19 +7,28 @@
  * - State in memory (`--state=mem:`), which tailscaled registers as an
  *   EPHEMERAL node: a restart is a new node, and the old one leaves the
  *   tailnet on its own. The auth key has to be reusable for that.
+ * - `--shields-up`: nothing from the tailnet gets in. In userspace mode
+ *   tailscaled forwards what reaches its Tailscale IP to this container's
+ *   loopback, where every node's SOCKS5 listens without authentication: any
+ *   machine of that tailnet could otherwise go out from here, or through
+ *   another customer's VPN (SOKI, #92).
  * - `--no-logs-no-support`: nothing about the connections leaves for
  *   Tailscale's log service.
  * - The key goes to `tailscale up` through a 0600 file in the tmpfs
  *   (`--auth-key=file:`), never on a command line, and is deleted after.
- * - A node unused for 30 minutes logs out and stops.
+ * - A node with no tunnel open for 30 minutes logs out and stops. A tunnel
+ *   counts as long as it is open, however quiet: an SSH session of hours is
+ *   never cut by the sweep.
  */
 
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 
+import { isTailnetHost } from './connect-target'
 import type { KeychainLog } from './log'
 
 const UP_TIMEOUT_MS = 45_000
+const RESOLVE_TIMEOUT_MS = 5_000
 const IDLE_STOP_MS = 30 * 60 * 1000
 
 interface TailnetNode {
@@ -27,7 +36,18 @@ interface TailnetNode {
     dir: string
     socket: string
     daemon: ReturnType<typeof Bun.spawn>
-    used_at: number
+    /** Tunnels open through this node right now. */
+    active: number
+    /** When the last tunnel closed (or the node came up). */
+    idle_since: number
+}
+
+/** A node in use: release it when the tunnel closes. */
+export interface TailnetLease {
+    socks_port: number
+    /** A MagicDNS name → its tailnet IP, or null when the tailnet has no such peer. */
+    resolve: (name: string) => Promise<string | null>
+    release: () => void
 }
 
 export interface TailnetPoolOptions {
@@ -39,6 +59,31 @@ export interface TailnetPoolOptions {
 
 export class TailnetError extends Error {}
 
+export function daemonArgs(dir: string, socket: string, socksPort: number): string[] {
+    return [
+        'tailscaled',
+        '--tun=userspace-networking',
+        '--state=mem:',
+        `--statedir=${dir}`,
+        `--socket=${socket}`,
+        `--socks5-server=127.0.0.1:${socksPort}`,
+        '--no-logs-no-support',
+    ]
+}
+
+export function upArgs(socket: string, keyFile: string, hostname: string): string[] {
+    return [
+        'tailscale',
+        `--socket=${socket}`,
+        'up',
+        `--auth-key=file:${keyFile}`,
+        `--hostname=${hostname}`,
+        // Outbound only: see the header.
+        '--shields-up',
+        '--timeout=40s',
+    ]
+}
+
 export class TailnetPool {
     private readonly nodes = new Map<string, Promise<TailnetNode>>()
     private readonly sweeper: ReturnType<typeof setInterval>
@@ -48,18 +93,31 @@ export class TailnetPool {
         this.sweeper.unref?.()
     }
 
-    /** The SOCKS5 port of the node for this auth key, starting it if needed. */
-    async socksFor(authKey: string): Promise<number> {
+    /** The node for this auth key, started if needed, held until released. */
+    async acquire(authKey: string): Promise<TailnetLease> {
         const id = createHash('sha256').update(authKey).digest('hex').slice(0, 16)
-        let node = this.nodes.get(id)
-        if (!node) {
-            node = this.start(id, authKey)
-            this.nodes.set(id, node)
-            node.catch(() => this.nodes.delete(id))
+        let pending = this.nodes.get(id)
+        if (!pending) {
+            const started = this.start(id, authKey)
+            pending = started
+            this.nodes.set(id, started)
+            started.catch(() => {
+                if (this.nodes.get(id) === started) this.nodes.delete(id)
+            })
         }
-        const ready = await node
-        ready.used_at = Date.now()
-        return ready.socks_port
+        const node = await pending
+        node.active += 1
+        let released = false
+        return {
+            socks_port: node.socks_port,
+            resolve: (name) => resolveName(node.socket, name),
+            release: () => {
+                if (released) return
+                released = true
+                node.active -= 1
+                if (node.active === 0) node.idle_since = Date.now()
+            },
+        }
     }
 
     private async start(id: string, authKey: string): Promise<TailnetNode> {
@@ -68,37 +126,34 @@ export class TailnetPool {
         const socket = `${dir}/tailscaled.sock`
         const socks_port = freePort()
         const env = { HOME: dir, TS_LOGS_DIR: dir, PATH: process.env.PATH ?? '' }
-        const daemon = Bun.spawn(
-            [
-                'tailscaled',
-                '--tun=userspace-networking',
-                '--state=mem:',
-                `--statedir=${dir}`,
-                `--socket=${socket}`,
-                `--socks5-server=127.0.0.1:${socks_port}`,
-                '--no-logs-no-support',
-            ],
-            { env, stdout: 'ignore', stderr: 'ignore' }
-        )
-        daemon.exited.then((code) => {
-            this.opts.log('warn', 'tailnet node stopped', { node: id, code })
-            this.nodes.delete(id)
-            rmSync(dir, { recursive: true, force: true })
+        const daemon = Bun.spawn(daemonArgs(dir, socket, socks_port), {
+            env,
+            stdout: 'ignore',
+            stderr: 'ignore',
         })
         const keyFile = `${dir}/authkey`
+        let node: TailnetNode | null = null
+        daemon.exited.then((code) => {
+            this.opts.log('warn', 'tailnet node stopped', { node: id, code })
+            // Only this start's entry: after a sweep, a newer node for the
+            // same key may already be there (Nova, #92).
+            const mine = this.nodes.get(id)
+            if (mine)
+                mine.then(
+                    (n) => {
+                        if (n === node) this.nodes.delete(id)
+                    },
+                    () => {}
+                )
+            rmSync(dir, { recursive: true, force: true })
+        })
         try {
             writeFileSync(keyFile, authKey, { mode: 0o600 })
-            const up = Bun.spawn(
-                [
-                    'tailscale',
-                    `--socket=${socket}`,
-                    'up',
-                    `--auth-key=file:${keyFile}`,
-                    `--hostname=${this.opts.hostname ?? 'kj-keychain'}`,
-                    '--timeout=40s',
-                ],
-                { env, stdout: 'ignore', stderr: 'pipe' }
-            )
+            const up = Bun.spawn(upArgs(socket, keyFile, this.opts.hostname ?? 'kj-keychain'), {
+                env,
+                stdout: 'ignore',
+                stderr: 'pipe',
+            })
             const timer = setTimeout(() => up.kill(), UP_TIMEOUT_MS)
             const code = await up.exited
             clearTimeout(timer)
@@ -106,18 +161,22 @@ export class TailnetPool {
                 // tailscale's own words can quote the key in some versions: only
                 // a short, key-free summary goes on.
                 const err = (await new Response(up.stderr).text()).toLowerCase()
-                daemon.kill()
                 throw new TailnetError(
                     err.includes('invalid key') || err.includes('expired')
-                        ? 'La auth key de Tailscale no es válida o ha caducado. Pide al operador una nueva en Credenciales.'
+                        ? 'La auth key de Tailscale no es válida, ha caducado o era de un solo uso y ya ' +
+                              'se gastó. Pide al operador una reutilizable en Credenciales.'
                         : 'No se ha podido entrar en la red de Tailscale con esa credencial.'
                 )
             }
+        } catch (error) {
+            daemon.kill()
+            throw error
         } finally {
             rmSync(keyFile, { force: true })
         }
         this.opts.log('info', 'tailnet node up', { node: id })
-        return { socks_port, dir, socket, daemon, used_at: Date.now() }
+        node = { socks_port, dir, socket, daemon, active: 0, idle_since: Date.now() }
+        return node
     }
 
     private sweep(): void {
@@ -125,8 +184,8 @@ export class TailnetPool {
         for (const [id, pending] of this.nodes) {
             pending
                 .then((node) => {
-                    if (node.used_at > idleSince) return
-                    this.nodes.delete(id)
+                    if (node.active > 0 || node.idle_since > idleSince) return
+                    if (this.nodes.get(id) === pending) this.nodes.delete(id)
                     // Logout first: a node that only stops stays in the tailnet.
                     const logout = Bun.spawn(['tailscale', `--socket=${node.socket}`, 'logout'], {
                         stdout: 'ignore',
@@ -139,12 +198,30 @@ export class TailnetPool {
                 .catch(() => {})
         }
     }
+}
 
-    stop(): void {
-        clearInterval(this.sweeper)
-        for (const pending of this.nodes.values())
-            pending.then((n) => n.daemon.kill()).catch(() => {})
-        this.nodes.clear()
+/**
+ * A MagicDNS name → the IP of that peer in the tailnet, asked of the node
+ * itself. tailscaled's SOCKS5 would resolve anything else with the system DNS
+ * and go out through the host (SOKI, #92), so the tunnel is opened to this IP,
+ * never to the name.
+ */
+async function resolveName(socket: string, name: string): Promise<string | null> {
+    try {
+        const p = Bun.spawn(['tailscale', `--socket=${socket}`, 'ip', name], {
+            stdout: 'pipe',
+            stderr: 'ignore',
+        })
+        const timer = setTimeout(() => p.kill(), RESOLVE_TIMEOUT_MS)
+        const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited])
+        clearTimeout(timer)
+        if (code !== 0) return null
+        for (const line of out.split('\n').map((l) => l.trim())) {
+            if (line && /^[0-9a-f:.]+$/i.test(line) && isTailnetHost(line)) return line
+        }
+        return null
+    } catch {
+        return null
     }
 }
 
