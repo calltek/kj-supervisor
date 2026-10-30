@@ -285,7 +285,9 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
         } catch {
             throw new KeychainError(
                 'KEYCHAIN_BAD_REFERENCE',
-                'El valor de la credencial no se puede poner en una cabecera.'
+                'El valor de la credencial lleva caracteres que no caben en una cabecera HTTP ' +
+                    '(acentos, ñ, saltos de línea…). Tal cual sólo sirve en Basic, que lo ' +
+                    'codifica. La petición no ha salido. Díselo al operador.'
             )
         }
         const variants = collectVariants([...values.values(), ...basicPairs])
