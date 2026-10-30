@@ -553,6 +553,25 @@ export class KJDocker {
     }
 
     /**
+     * Hand the home volume's `conv` back to `bun`. The root launcher made it
+     * root:root `0711` (non-isolated cwds, kj-agent-base#107 design B); without
+     * root the launcher is `bun`, can't mkdir `conv/<sid>` in it, and every
+     * non-isolated conversation dies with ENOENT (posix_spawn) — GAZ after the
+     * move to `exec-uid`. Non-recursive: each `<sid>` was already handed to bun.
+     * `-h`: a `conv` swapped for a symlink changes the link, not its target.
+     */
+    async releaseHomeConv(home_volume_name: string): Promise<void> {
+        const { code } = await this.runVolumeHelper({
+            volume_name: home_volume_name,
+            script: [
+                'set -e',
+                'if [ -d /v/conv ] && [ ! -L /v/conv ]; then chown -h 1000:1000 /v/conv; fi',
+            ].join('\n'),
+        })
+        if (code !== 0) throw new Error(`home conv helper exited ${code}`)
+    }
+
+    /**
      * The uid registry on an isolation volume (`registry/uids.json`: the dir
      * root `0700`, the file `0600`), read-only, or null. The root launcher kept the same file, so
      * the conversations already isolated keep their uids, and their HOMEs.
@@ -819,8 +838,10 @@ export class KJDocker {
         const mode = await this.imageIsolationMode(opts.image_tag)
         // Root launcher: its capabilities. Without root: none, only the volume.
         const isolation = mode === 'root'
-        if (mode === 'exec' && opts.home_volume_name)
+        if (mode === 'exec' && opts.home_volume_name) {
             await this.prepareExecIsolationVolume(isolationVolumeName(opts.home_volume_name))
+            await this.releaseHomeConv(opts.home_volume_name)
+        }
         if (isolation)
             this.logger.info(
                 { image_tag: opts.image_tag },
@@ -1259,8 +1280,10 @@ export class KJDocker {
         const isolation = mode === 'root'
         if (mode === 'exec') {
             const home = (host.Mounts ?? []).find((m) => m.Target === '/home/agent')
-            if (home?.Source)
+            if (home?.Source) {
                 await this.prepareExecIsolationVolume(isolationVolumeName(home.Source))
+                await this.releaseHomeConv(home.Source)
+            }
         }
 
         // Only the host alias crosses over; anything else in the source's
