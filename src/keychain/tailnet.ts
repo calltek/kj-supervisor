@@ -182,7 +182,9 @@ export class TailnetPool {
             // no node.
             self_ips = await tailnetIps(socket)
             if (!self_ips.length) {
-                throw new TailnetError('No se ha podido entrar en la red de Tailscale con esa credencial.')
+                throw new TailnetError(
+                    'No se ha podido entrar en la red de Tailscale con esa credencial.'
+                )
             }
         } catch (error) {
             daemon.kill()

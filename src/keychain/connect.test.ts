@@ -116,7 +116,11 @@ function serve(ack: KeychainResolveAck, socksPort: number) {
                     socks_port: socksPort,
                     self_ips: ['100.64.0.1', 'fd7a:115c:a1e0::1'],
                     resolve: async (name) =>
-                        name === 'delta' ? '100.64.0.9' : name === 'kj-keychain' ? '100.64.0.1' : null,
+                        name === 'delta'
+                            ? '100.64.0.9'
+                            : name === 'kj-keychain'
+                              ? '100.64.0.1'
+                              : null,
                     release: () => {
                         leases.released += 1
                     },
