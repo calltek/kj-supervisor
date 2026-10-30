@@ -28,6 +28,8 @@ export interface AgentSpawnHandlerDeps {
     status: AgentStatusReporter
     streams: AgentStreamManager
     logger: KJLogger
+    /** kj-keychain: a fresh token per container (keychain-host.ts). Optional for tests. */
+    keychain?: { envFor(agent_id: number): Record<string, string> }
 }
 
 export class AgentSpawnHandler {
@@ -35,8 +37,10 @@ export class AgentSpawnHandler {
     private readonly status: AgentStatusReporter
     private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
+    private readonly keychain?: AgentSpawnHandlerDeps['keychain']
 
     constructor(deps: AgentSpawnHandlerDeps) {
+        this.keychain = deps.keychain
         this.docker = deps.docker
         this.status = deps.status
         this.streams = deps.streams
@@ -398,6 +402,10 @@ export class AgentSpawnHandler {
         const env: Record<string, string> = {
             ...payload.env,
             KJ_SESSION_ID: payload.session_id,
+            // A fresh kj-keychain token per container, after `payload.env` so
+            // the control can't pick it. Only the launcher keeps it: it is
+            // unset in every `docker exec` (MODEL_CREDENTIAL_VARS).
+            ...(this.keychain?.envFor(payload.agent_id) ?? {}),
         }
         // Inject the Claude credential under the env var that matches
         // the token type. API_KEY uses ANTHROPIC_API_KEY (Console

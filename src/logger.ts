@@ -17,6 +17,16 @@ export const REDACT_PATHS = [
     '*.agent_token',
     'session_env',
     '*.session_env',
+    // kj-keychain: an agent's token (its container env, `agent:token`,
+    // `agents:reset`) and a resolved credential's value (`resolve:result`).
+    'KJ_KEYCHAIN_TOKEN',
+    '*.KJ_KEYCHAIN_TOKEN',
+    'token',
+    '*.token',
+    'agents[*].token',
+    '*.agents[*].token',
+    'ack.value',
+    '*.ack.value',
 ]
 
 type LogMethod = (objOrMsg: unknown, msg?: string) => void

@@ -33,4 +33,22 @@ describe('el logger tapa lo que no puede salir', () => {
     test('y suelto', () => {
         expect(loguea({ session_env: { API_KEY: PISTA } })).not.toContain(PISTA)
     })
+
+    test('el token de kj-keychain de un agente, en su entorno o en un mensaje de control', () => {
+        expect(loguea({ env: { KJ_KEYCHAIN_TOKEN: PISTA } })).not.toContain(PISTA)
+        expect(loguea({ msg: { type: 'agent:token', agent_id: 1, token: PISTA } })).not.toContain(
+            PISTA
+        )
+        expect(
+            loguea({ type: 'agents:reset', agents: [{ agent_id: 1, token: PISTA }] })
+        ).not.toContain(PISTA)
+    })
+
+    test('el valor de una credencial resuelta', () => {
+        const out = loguea({
+            msg: { type: 'resolve:result', id: 'r1', ack: { ok: true, value: PISTA } },
+        })
+        expect(out).not.toContain(PISTA)
+        expect(out).toContain('resolve:result')
+    })
 })

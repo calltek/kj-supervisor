@@ -901,7 +901,7 @@ describe('backupVolume — markers parse from stdout only', () => {
 })
 
 describe('execCmd — a docker exec never inherits the model credential', () => {
-    test('the three variables are unset before the shell starts', () => {
+    test('the credential variables are unset before the shell starts', () => {
         expect(execCmd('env')).toEqual([
             'env',
             '-u',
@@ -910,6 +910,10 @@ describe('execCmd — a docker exec never inherits the model credential', () => 
             'ANTHROPIC_API_KEY',
             '-u',
             'ANTHROPIC_AUTH_TOKEN',
+            '-u',
+            'KJ_KEYCHAIN_TOKEN',
+            '-u',
+            'KJ_KEYCHAIN_ENDPOINT',
             '/bin/sh',
             '-c',
             'env',
@@ -921,6 +925,41 @@ describe('execCmd — a docker exec never inherits the model credential', () => 
         expect(cmd).not.toContain('ANTHROPIC_API_KEY')
         expect(cmd).toContain('CLAUDE_CODE_OAUTH_TOKEN')
         expect(cmd.slice(-3)).toEqual(['/bin/sh', '-c', 'run.sh'])
+    })
+})
+
+describe('execDetached — el shim aislado tampoco hereda las credenciales', () => {
+    test('el comando empieza vaciando el modelo, el token y el endpoint de kj-keychain', async () => {
+        let spec: any = null
+        const fake = {
+            getContainer: () => ({
+                exec: async (s: any) => {
+                    spec = s
+                    return { start: async () => undefined }
+                },
+            }),
+        }
+        const docker = new KJDocker(silentLogger, fake as never)
+        await docker.execDetached({
+            container_id: 'c1',
+            user: '20001',
+            cmd: ['/usr/local/bin/bun', '/app/src/isolation/shim.ts'],
+            env: ['KJ_EXEC_TOKEN=t'],
+        })
+        expect(spec.Cmd[0]).toBe('env')
+        for (const name of [
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            'ANTHROPIC_API_KEY',
+            'ANTHROPIC_AUTH_TOKEN',
+            'KJ_KEYCHAIN_TOKEN',
+            'KJ_KEYCHAIN_ENDPOINT',
+        ]) {
+            const i = spec.Cmd.indexOf(name)
+            expect(i).toBeGreaterThan(0)
+            expect(spec.Cmd[i - 1]).toBe('-u')
+        }
+        expect(spec.Cmd.slice(-2)).toEqual(['/usr/local/bin/bun', '/app/src/isolation/shim.ts'])
+        expect(spec.Env).toEqual(['KJ_EXEC_TOKEN=t'])
     })
 })
 
