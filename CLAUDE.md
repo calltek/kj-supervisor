@@ -732,8 +732,11 @@ es `src/keychain/`.
 - **Puertos**: el de los agentes (9890) en la pasarela del `bridge` (lo que
   resuelve `host.docker.internal:host-gateway` en un agente), nunca en
   `0.0.0.0`; el de control (9891) sólo en `127.0.0.1`. En Docker Desktop, los
-  dos en loopback. El supervisor llega al control por `127.0.0.1` en red de host
-  (Linux) y por `host.docker.internal` si no (macOS).
+  dos en loopback. **El supervisor llega al control por la IP de kj-keychain en
+  la bridge**, no por el puerto publicado: bigbrain corre el supervisor en la
+  bridge, y desde ahí el `127.0.0.1` del host no le llega (sin canal no hay
+  tokens, y todo da `KEYCHAIN_UNAUTHORIZED`). La IP se relee en cada
+  reconexión.
 - **Un token por contenedor de agente**, en `KJ_KEYCHAIN_TOKEN`. Tras un
   reinicio no hay estado: se relee del `Config.Env` de cada agente vivo al
   arrancar y en cada `attach` (spawn, `agent:sync`, recreate por imagen, que

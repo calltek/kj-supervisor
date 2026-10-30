@@ -162,6 +162,15 @@ describe('el contenedor de kj-keychain', () => {
             `ws://host.docker.internal:${KEYCHAIN_CONTROL_PORT}/control`
         )
     })
+
+    test('con la IP de kj-keychain en la bridge, por ella, sea cual sea la red del supervisor', () => {
+        // bigbrain corre el supervisor en la bridge: el 127.0.0.1 del host no le llega.
+        for (const mode of ['host', 'bridge', undefined]) {
+            expect(keychainControlUrl(mode, '172.17.0.5')).toBe(
+                `ws://172.17.0.5:${KEYCHAIN_CONTROL_PORT}/control`
+            )
+        }
+    })
 })
 
 describe('KeychainHost.start', () => {
