@@ -710,6 +710,46 @@ Diseño completo en kj-agent-base `docs/aislamiento-sin-root.md`.
   volumen ni atiende el `exec`, así que **este PR se despliega en toda la
   flota antes que la imagen nueva de kj-agent-base**.
 
+### kj-keychain: el supervisor lo arranca y reenvía, no lo interpreta (2026-10-30)
+
+Credenciales por referencia (kj-agent-base `docs/credenciales-por-referencia.md`
+§2.1 y §7): el agente pide con `{{kj:Cred.campo}}` y quien pone el valor es
+`kj-keychain`, un contenedor aparte con la misma imagen que este supervisor
+(`bun src/keychain/main.ts`). Aquí vive `src/keychain-host/`; el servicio en sí
+es `src/keychain/`.
+
+- **Se recrea en cada arranque del supervisor** (y por tanto en cada
+  blue/green): el secreto del canal de control es nuevo cada vez y sólo está en
+  memoria. La imagen sale del contenedor PROPIO (`getOwnContainerName`), **no**
+  de `KJ_SUPERVISOR_CONTAINER`: en el clon del blue/green ese nombre aún es el
+  viejo. Fuera de Docker se avisa y no se arranca. Un fallo nunca tumba al
+  supervisor. Ojo con la marcha atrás: si el supervisor nuevo no pasa el
+  health check y vuelve el viejo, éste ya no conoce el secreto del kj-keychain
+  recreado y las referencias fallan hasta reiniciarlo.
+- **Sin la etiqueta `kj-agent`** (lleva `kj-keychain=true`): con ella la
+  reconciliación lo vería como un agente huérfano y el control lo pararía.
+  `CapDrop ALL`, `no-new-privileges`, raíz de sólo lectura, nada montado.
+- **Puertos**: el de los agentes (9890) en la pasarela del `bridge` (lo que
+  resuelve `host.docker.internal:host-gateway` en un agente), nunca en
+  `0.0.0.0`; el de control (9891) sólo en `127.0.0.1`. En Docker Desktop, los
+  dos en loopback. El supervisor llega al control por `127.0.0.1` en red de host
+  (Linux) y por `host.docker.internal` si no (macOS).
+- **Un token por contenedor de agente**, en `KJ_KEYCHAIN_TOKEN`. Tras un
+  reinicio no hay estado: se relee del `Config.Env` de cada agente vivo al
+  arrancar y en cada `attach` (spawn, `agent:sync`, recreate por imagen, que
+  conserva el entorno). Se vacía en **todo** `docker exec` — también en el del
+  shim aislado (`execDetached`), que antes heredaba la credencial del modelo en
+  su `/proc/<pid>/environ`.
+- **`resolve` sólo llega al control si la sesión es de ese agente**: la conoce
+  su stream (`keychainTarget`); si no, `KEYCHAIN_NO_ACCESS` sin preguntar.
+  Tras reiniciar el supervisor, una sesión sin input todavía no cuenta. El ack
+  lleva el valor: nunca se loguea (`REDACT_PATHS` además tapa `token` y
+  `ack.value`).
+- **Compila sin el backend**: `keychain:resolve` usa tipos locales hasta que
+  llegue en `protocol.ts`. **Orden de despliegue**: backend (que exista
+  `keychain:resolve`; sin él, `KEYCHAIN_UNAVAILABLE` a los 8 s) → este
+  supervisor en la flota → la imagen de kj-agent-base que usa el lanzador.
+
 ---
 
 ## 9. Hoja de ruta

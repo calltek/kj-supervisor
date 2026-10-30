@@ -23,6 +23,7 @@ import {
 } from './agent-stream/browser-relay'
 import { ExecDispatcher } from './agent-stream/exec-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
+import { KeychainHost } from './keychain-host/keychain-host'
 import {
     AGENT_METRICS_INTERVAL_MS,
     KJSettings,
@@ -292,7 +293,15 @@ async function main(): Promise<void> {
         push: (event, payload) => client.push(event, payload),
         logger,
     })
-    streams = new AgentStreamManager({ docker, client, logger, mcp, exec, browser })
+    // kj-keychain (credentials by reference): started below, never fatal.
+    const keychain = new KeychainHost({
+        docker,
+        logger,
+        sessions: (agent_id, session_id) => streams.keychainTarget(agent_id, session_id),
+        resolve: (payload, timeout_ms) =>
+            client.emitWithAck<unknown>('keychain:resolve', payload, timeout_ms),
+    })
+    streams = new AgentStreamManager({ docker, client, logger, mcp, exec, browser, keychain })
     const eventsWatcher = new KJDockerEventsWatcher({
         docker,
         tracker,
@@ -305,6 +314,7 @@ async function main(): Promise<void> {
         status: statusReporter,
         streams,
         logger,
+        keychain,
     })
     const lifecycleHandler = new AgentLifecycleHandler({
         docker,
@@ -339,22 +349,30 @@ async function main(): Promise<void> {
     })
 
     void eventsWatcher.start()
+    // Before connecting to the control: by the first `agent:spawn`, kj-keychain
+    // is up. A failure is logged and the supervisor carries on without it.
+    await keychain.start()
 
     client.onCommand<AgentSpawnPayload, ControlCommandAck>('agent:spawn', (payload) =>
         spawnHandler.handle(payload)
     )
-    client.onCommand<AgentStopPayload, ControlCommandAck>('agent:stop', (payload) =>
-        lifecycleHandler.handleStop(payload)
-    )
+    client.onCommand<AgentStopPayload, ControlCommandAck>('agent:stop', async (payload) => {
+        const ack = await lifecycleHandler.handleStop(payload)
+        // Stop removes the container; the next spawn brings a new token.
+        if (ack.ok) keychain.forget(payload.agent_id)
+        return ack
+    })
     client.onCommand<AgentPausePayload, ControlCommandAck>('agent:pause', (payload) =>
         lifecycleHandler.handlePause(payload)
     )
     client.onCommand<AgentResumePayload, ControlCommandAck>('agent:resume', (payload) =>
         lifecycleHandler.handleResume(payload)
     )
-    client.onCommand<AgentDeletePayload, ControlCommandAck>('agent:delete', (payload) =>
-        lifecycleHandler.handleDelete(payload)
-    )
+    client.onCommand<AgentDeletePayload, ControlCommandAck>('agent:delete', async (payload) => {
+        const ack = await lifecycleHandler.handleDelete(payload)
+        if (ack.ok) keychain.forget(payload.agent_id)
+        return ack
+    })
     client.onCommand<AgentImageUpdatePayload, ControlCommandAck>('agent:image:update', (payload) =>
         imageUpdateHandler.handle(payload)
     )
@@ -754,6 +772,7 @@ async function main(): Promise<void> {
         }
         stopLoops()
         eventsWatcher.stop()
+        keychain.stop()
         streams.detachAll()
         client.disconnect()
         // Stop the work too, not just the supervisor: see `stopAgents`.
@@ -787,6 +806,7 @@ async function main(): Promise<void> {
         logger.info({ signal }, 'received shutdown signal')
         stopLoops()
         eventsWatcher.stop()
+        keychain.stop()
         streams.detachAll()
         client.disconnect()
         process.exit(0)

@@ -134,6 +134,12 @@ export interface AgentStreamManagerDeps {
     exec?: ExecDispatcher
     /** A person's web browser in the agent: actions, frames and state (browser-relay.ts). */
     browser?: BrowserRelay
+    /**
+     * kj-keychain: learns the agent's token from the container env on every
+     * attach — spawn, re-attach after a restart of ours, and recreate on a new
+     * image (which keeps the env) all come through here.
+     */
+    keychain?: { adopt(agent_id: number, container_id: string): Promise<void> }
 }
 
 export class AgentStreamManager {
@@ -144,8 +150,10 @@ export class AgentStreamManager {
     private readonly mcp?: McpDispatcher
     private readonly exec?: ExecDispatcher
     private readonly browser?: BrowserRelay
+    private readonly keychain?: AgentStreamManagerDeps['keychain']
 
     constructor(deps: AgentStreamManagerDeps) {
+        this.keychain = deps.keychain
         this.docker = deps.docker
         this.client = deps.client
         this.logger = deps.logger.child({ component: 'agent-stream' })
@@ -271,6 +279,35 @@ export class AgentStreamManager {
     }
 
     /**
+     * kj-keychain: the turn of a session, or null when this agent's stream
+     * doesn't know the session (another agent's, a made-up one, or one with no
+     * input since we restarted) — then nothing goes to the control.
+     *
+     * Verified like an MCP call whose session kj-mcp checked: the launcher
+     * matched the calling process to the session (peer-session.ts) before
+     * kj-keychain got the request, and only the launcher holds the token.
+     * Never the legacy last-active fallback: the session must be named.
+     */
+    keychainTarget(
+        agent_id: number,
+        conversation_session_id: string
+    ): { turn_id?: string; turn_request_ids?: string[] } | null {
+        const entry = this.streams.get(agent_id)
+        if (!entry || !conversation_session_id) return null
+        const known =
+            entry.conversation_id_by_session.has(conversation_session_id) ||
+            entry.contact_id_by_session.has(conversation_session_id) ||
+            entry.turn_by_session.has(conversation_session_id)
+        if (!known) return null
+        const { turn_id, turn_request_ids } = this.resolveTarget(
+            agent_id,
+            conversation_session_id,
+            true
+        )
+        return turn_id !== undefined ? { turn_id, turn_request_ids } : {}
+    }
+
+    /**
      * An input reaches a session: it opens a turn if the session is idle, or
      * joins the one in flight (Claude Code takes it into the running turn).
      */
@@ -362,6 +399,10 @@ export class AgentStreamManager {
             agent_id: opts.agent_id,
             container_id: opts.container_id,
         })
+
+        // Even if the attach below fails: the container is alive and its
+        // launcher already holds the token.
+        await this.keychain?.adopt(opts.agent_id, opts.container_id)
 
         log.info('attaching to container stdio…')
         let stream: NodeJS.ReadWriteStream

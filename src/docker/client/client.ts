@@ -419,14 +419,34 @@ export const MODEL_CREDENTIAL_VARS = [
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',
+    // kj-keychain (credentials by reference): only the launcher, PID 1, may
+    // hold the token — a script or a conversation with it could use the
+    // agent's credentials outside any conversation. The endpoint goes too: no
+    // exec has any business calling kj-keychain directly.
+    'KJ_KEYCHAIN_TOKEN',
+    'KJ_KEYCHAIN_ENDPOINT',
 ] as const
 
-export function execCmd(command: string, env?: Record<string, string>): string[] {
+/** `env -u …` for every credential variable, except one the exec sets on purpose. */
+function unsetCredentials(env?: Record<string, string>): string[] {
     const unset = MODEL_CREDENTIAL_VARS.filter((name) => !(env && name in env)).flatMap((name) => [
         '-u',
         name,
     ])
-    return ['env', ...unset, '/bin/sh', '-c', command]
+    return ['env', ...unset]
+}
+
+export function execCmd(command: string, env?: Record<string, string>): string[] {
+    return [...unsetCredentials(env), '/bin/sh', '-c', command]
+}
+
+/**
+ * The same for a detached exec (the isolation shim, `execDetached`): it starts
+ * from Config.Env too, and its `/proc/<pid>/environ` is readable by the
+ * conversation's uid. Here nothing is kept, whatever the exec's env says.
+ */
+export function detachedExecCmd(cmd: string[]): string[] {
+    return [...unsetCredentials(), ...cmd]
 }
 
 /** uid:gid of the agent user (`bun`) inside the agent images. */
@@ -594,7 +614,9 @@ export class KJDocker {
         env: string[]
     }): Promise<void> {
         const exec = await this.docker.getContainer(opts.container_id).exec({
-            Cmd: opts.cmd,
+            // Without the model credential nor the kj-keychain token, which
+            // Config.Env would otherwise hand to the conversation's uid.
+            Cmd: detachedExecCmd(opts.cmd),
             Env: opts.env,
             User: opts.user,
             WorkingDir: '/',
@@ -1450,6 +1472,63 @@ export class KJDocker {
         } catch {
             return null
         }
+    }
+
+    /**
+     * Our OWN container's image and network mode, for kj-keychain (it runs the
+     * same image). Resolved through `getOwnContainerName`, NOT through
+     * `KJ_SUPERVISOR_CONTAINER`: in a blue/green clone that name is still the
+     * OLD supervisor, whose image is the one being replaced. Null outside
+     * Docker (dev).
+     */
+    async inspectOwnContainer(): Promise<{ image: string; network_mode?: string } | null> {
+        const name = await this.getOwnContainerName()
+        if (!name) return null
+        try {
+            const info = await this.docker.getContainer(name).inspect()
+            return { image: info.Image, network_mode: info.HostConfig?.NetworkMode }
+        } catch {
+            return null
+        }
+    }
+
+    /** Gateway IP of the default `bridge` network (what `host-gateway` maps to), or null. */
+    async bridgeGateway(): Promise<string | null> {
+        try {
+            const info = (await this.docker.getNetwork('bridge').inspect()) as {
+                IPAM?: { Config?: Array<{ Gateway?: string }> | null }
+            }
+            const gw = (info.IPAM?.Config ?? []).map((c) => c.Gateway).find((g) => !!g)
+            return gw ?? null
+        } catch {
+            return null
+        }
+    }
+
+    /** Docker Desktop (macOS/Windows): `host.docker.internal` is the host's loopback. */
+    async isDockerDesktop(): Promise<boolean> {
+        try {
+            const info = (await this.docker.info()) as { OperatingSystem?: unknown }
+            return /docker desktop/i.test(String(info.OperatingSystem ?? ''))
+        } catch {
+            return false
+        }
+    }
+
+    /**
+     * Remove whatever container holds `spec.name` and create + start a new one
+     * from `spec`. Returns the new id. For kj-keychain — never an agent.
+     */
+    async replaceContainer(spec: Docker.ContainerCreateOptions): Promise<string> {
+        if (spec.name) {
+            await this.docker
+                .getContainer(spec.name)
+                .remove({ force: true })
+                .catch(() => undefined)
+        }
+        const created = await this.docker.createContainer(spec)
+        await created.start()
+        return created.id
     }
 
     /** Rename a container (dockerode `rename`). Used to finish the blue/green swap. */
