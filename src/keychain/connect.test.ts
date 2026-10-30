@@ -114,7 +114,13 @@ function serve(ack: KeychainResolveAck, socksPort: number) {
                 leases.held += 1
                 return {
                     socks_port: socksPort,
-                    resolve: async (name) => (name === 'delta' ? '100.64.0.9' : null),
+                    self_ips: ['100.64.0.1', 'fd7a:115c:a1e0::1'],
+                    resolve: async (name) =>
+                        name === 'delta'
+                            ? '100.64.0.9'
+                            : name === 'kj-keychain'
+                              ? '100.64.0.1'
+                              : null,
                     release: () => {
                         leases.released += 1
                     },
@@ -256,5 +262,33 @@ describe('the tailscale command lines', () => {
         expect(daemon).toContain('--state=mem:')
         expect(daemon).toContain('--no-logs-no-support')
         expect(daemon).toContain('--socks5-server=127.0.0.1:1055')
+    })
+})
+
+describe('/connect without destinations', () => {
+    const socks = fakeSocks()
+    afterAll(() => socks.stop(true))
+
+    test('a VPN with no destinations reaches any machine of its tailnet', async () => {
+        const server = serve({ ok: true, value: 'tskey-auth-prueba', sites: [] }, socks.port)
+        const byIp = await tunnel(server.port as number, '100.100.1.2', 'a')
+        expect(byIp.errors).toEqual([])
+        expect(byIp.binary).toBe('echo:a')
+        const byName = await tunnel(server.port as number, 'delta', 'b')
+        expect(byName.binary).toBe('echo:b')
+        // Still only the tailnet: a name it does not know goes nowhere.
+        const ghost = await tunnel(server.port as number, 'ghost', 'c')
+        expect(ghost.errors.join()).toContain('KEYCHAIN_NOT_TAILNET')
+        server.stop(true)
+    })
+
+    test('never the node itself: by name, by IP, or by another spelling of it', async () => {
+        const server = serve({ ok: true, value: 'tskey-auth-prueba', sites: [] }, socks.port)
+        for (const host of ['kj-keychain', '100.64.0.1', 'fd7a:115c:a1e0:0:0:0:0:1']) {
+            const out = await tunnel(server.port as number, host, 'x')
+            expect(out.errors.join()).toContain('KEYCHAIN_NOT_TAILNET')
+            expect(out.binary).toBe('')
+        }
+        server.stop(true)
     })
 })

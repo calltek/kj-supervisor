@@ -8,7 +8,8 @@
  * (tailnet.ts), and the bytes go through its SOCKS5 to host:port. The key never
  * enters the agent's container.
  *
- * Only to the credential's destinations, and only through the tailnet: an IP
+ * Only through the tailnet (and, if the credential lists destinations, only to
+ * them; with none, to any machine of the tailnet: that is what a VPN is for): an IP
  * has to be a Tailscale address, and a name is resolved by the node itself to
  * a peer's Tailscale IP, which is what the tunnel opens to (connect-target.ts,
  * tailnet.ts). Binary frames are the tunnel; a text frame from here is an
@@ -28,6 +29,7 @@ import {
     describeSocksReply,
     isTailnetHost,
     parsePort,
+    sameIp,
     socksConnectRequest,
     socksReplyLength,
 } from './connect-target'
@@ -211,17 +213,10 @@ export function createConnectHandler(deps: ConnectDeps) {
                 )
             )
         }
-        if (!ack.sites.length) {
-            return fail(
-                ws,
-                new KeychainError(
-                    'KEYCHAIN_NO_DESTINATION',
-                    `La VPN «${d.credential}» no tiene destinos: no se abre ninguna conexión por ella. ` +
-                        'Pide al operador que añada en Credenciales las máquinas a las que se puede llegar.'
-                )
-            )
-        }
-        if (!hostMatchesAnySite(d.host, ack.sites)) {
+        // A VPN is for reaching its network: with no destinations, any machine
+        // of the tailnet (the tailnet-only rule below still holds); with some,
+        // only those.
+        if (ack.sites.length && !hostMatchesAnySite(d.host, ack.sites)) {
             return fail(
                 ws,
                 new KeychainError(
@@ -257,6 +252,17 @@ export function createConnectHandler(deps: ConnectDeps) {
                     'KEYCHAIN_NOT_TAILNET',
                     `No hay ninguna máquina «${d.host}» en la VPN «${d.credential}». Usa su IP de ` +
                         'Tailscale (100.x.y.z) o el nombre con el que aparece en la tailnet.'
+                )
+            )
+        }
+        // Checked after resolving, so it covers the name and the literal IP:
+        // the node itself forwards to this container's loopback (SOKI, #93).
+        if (d.lease.self_ips.some((ip) => sameIp(ip, target))) {
+            return fail(
+                ws,
+                new KeychainError(
+                    'KEYCHAIN_NOT_TAILNET',
+                    `«${d.host}» es el propio Kujira dentro de la VPN, no una máquina de la tailnet.`
                 )
             )
         }

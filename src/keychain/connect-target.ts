@@ -6,8 +6,8 @@
  * (100.64.0.0/10, fd7a:115c:a1e0::/48) or a MagicDNS name (one label, or under
  * `.ts.net`). tailscaled's SOCKS5 would otherwise dial anything else from this
  * container — the bridge, the host's network, the cloud's metadata — so
- * everything else is refused before asking. And, like an HTTP reference, the
- * host has to be one of the credential's destinations.
+ * everything else is refused before asking. With no destinations the
+ * credential reaches its whole tailnet; with some, only those.
  */
 
 import { isIP } from 'node:net'
@@ -30,6 +30,19 @@ export function isTailnetHost(raw: string): boolean {
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host))
         return false
     return !host.includes('.') || host.endsWith('.ts.net')
+}
+
+/** Two IPs that are the same address, however each is written. */
+export function sameIp(a: string, b: string): boolean {
+    const x = normalizeHost(a)
+    const y = normalizeHost(b)
+    if (!x || !y) return false
+    if (isIP(x) === 6 && isIP(y) === 6) {
+        const wx = parseIPv6(x)
+        const wy = parseIPv6(y)
+        return wx !== null && wy !== null && wx.every((w, i) => w === wy[i])
+    }
+    return x === y
 }
 
 export function parsePort(raw: string | null): number | null {
