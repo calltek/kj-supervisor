@@ -723,7 +723,9 @@ es `src/keychain/`.
   memoria. La imagen sale del contenedor PROPIO (`getOwnContainerName`), **no**
   de `KJ_SUPERVISOR_CONTAINER`: en el clon del blue/green ese nombre aún es el
   viejo. Fuera de Docker se avisa y no se arranca. Un fallo nunca tumba al
-  supervisor.
+  supervisor. Ojo con la marcha atrás: si el supervisor nuevo no pasa el
+  health check y vuelve el viejo, éste ya no conoce el secreto del kj-keychain
+  recreado y las referencias fallan hasta reiniciarlo.
 - **Sin la etiqueta `kj-agent`** (lleva `kj-keychain=true`): con ella la
   reconciliación lo vería como un agente huérfano y el control lo pararía.
   `CapDrop ALL`, `no-new-privileges`, raíz de sólo lectura, nada montado.

@@ -41,6 +41,21 @@ export function secretVariants(value: string): string[] {
     variants.add(encodeURIComponent(value))
     variants.add(encodeURIComponent(value).replace(/%20/g, '+'))
     variants.add(JSON.stringify(value).slice(1, -1))
+    // HTML escaping, and the \u escapes Go's JSON encoder uses for & < >.
+    variants.add(
+        value
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+    )
+    variants.add(
+        JSON.stringify(value)
+            .slice(1, -1)
+            .replace(/&/g, '\\u0026')
+            .replace(/</g, '\\u003c')
+            .replace(/>/g, '\\u003e')
+    )
     variants.delete('')
     return [...variants].sort((a, b) => b.length - a.length)
 }

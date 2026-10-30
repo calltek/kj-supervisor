@@ -79,7 +79,7 @@ export function authHeaderValue(
     const basic = BASIC.exec(value)
     if (
         (lower === 'authorization' || lower === 'proxy-authorization') &&
-        basic?.[1]?.includes(':')
+        basic?.[1]?.replace(STRICT, '').includes(':')
     ) {
         const plain = substituteReferences(basic[1], values)
         return { value: `Basic ${Buffer.from(plain, 'utf8').toString('base64')}`, plain }

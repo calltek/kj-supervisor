@@ -162,3 +162,20 @@ describe('basic auth', () => {
         )
     })
 })
+
+describe('basic auth with a whole reference', () => {
+    test('a reference that already holds the base64 pair is not encoded again', () => {
+        const values = new Map([['{{kj:Jira.token}}', 'dXNlcjpwYXNz']])
+        expect(authHeaderValue('Authorization', 'Basic {{kj:Jira.token}}', values).value).toBe(
+            'Basic dXNlcjpwYXNz'
+        )
+    })
+})
+
+describe('escaped redaction', () => {
+    test('HTML and Go-style JSON escapes are covered', () => {
+        const variants = collectVariants(['a&b<c>secret'])
+        expect(redactText('x a&amp;b&lt;c&gt;secret y', variants)).not.toContain('secret')
+        expect(redactText('{"v":"a\u0026b\u003cc\u003esecret"}', variants)).not.toContain('secret')
+    })
+})

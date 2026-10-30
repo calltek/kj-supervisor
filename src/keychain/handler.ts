@@ -336,7 +336,9 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             )
         }
         if (addresses.some((a) => isBlockedAddress(a.address))) throw blocked()
-        const first = addresses[0]
+        // IPv4 first: the default bridge has no IPv6 route, so an AAAA first would
+        // fail even with a good A record behind it.
+        const first = addresses.find((a) => a.family === 4) ?? addresses[0]
         if (!first) throw blocked()
         return pinnedDestination(hostname, first.address, first.family)
     }

@@ -255,8 +255,8 @@ export class KeychainHost {
                 ok: false,
                 code: 'KEYCHAIN_NO_ACCESS',
                 message:
-                    'This conversation is not active on the agent right now, so its ' +
-                    'credentials cannot be used. Send a message in the conversation and retry.',
+                    'Esta conversación no está activa en el agente, así que no se pueden usar sus ' +
+                    'credenciales. Envía un mensaje en la conversación y vuelve a intentarlo.',
             }
         }
         const payload: KeychainResolvePayload = {
@@ -292,7 +292,8 @@ function unavailable(): KeychainResolveAck {
     return {
         ok: false,
         code: 'KEYCHAIN_UNAVAILABLE',
-        message: 'Kujira could not be reached to use this credential. Try again in a moment.',
+        message:
+            'No se ha podido conectar con Kujira para usar esta credencial. Vuelve a intentarlo en un momento.',
     }
 }
 
