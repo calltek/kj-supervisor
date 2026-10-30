@@ -15,6 +15,7 @@ import { createKeychainHandler } from './handler'
 import { log } from './log'
 import { AgentTokenRegistry } from './registry'
 import { ControlLink, ResolveCache } from './resolver'
+import { createSshHandler, isSshPath } from './ssh-handler'
 
 const secret = process.env.KJ_KEYCHAIN_CONTROL_SECRET ?? ''
 if (!secret) {
@@ -28,7 +29,11 @@ const registry = new AgentTokenRegistry()
 const link = new ControlLink()
 const cache = new ResolveCache()
 const sessions = new ControlSessions({ secret, registry, link, cache, log })
-const handle = createKeychainHandler({ registry, resolve: cache.wrap(link.resolve), log })
+const resolve = cache.wrap(link.resolve)
+const handleHttp = createKeychainHandler({ registry, resolve, log })
+const handleSsh = createSshHandler({ registry, resolve, log })
+const handle = (request: Request) =>
+    isSshPath(new URL(request.url).pathname) ? handleSsh(request) : handleHttp(request)
 
 Bun.serve({
     hostname: '0.0.0.0',
