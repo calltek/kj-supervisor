@@ -36,6 +36,8 @@ interface TailnetNode {
     dir: string
     socket: string
     daemon: ReturnType<typeof Bun.spawn>
+    /** The node's own tailnet IPs. */
+    self_ips: string[]
     /** Tunnels open through this node right now. */
     active: number
     /** When the last tunnel closed (or the node came up). */
@@ -45,6 +47,12 @@ interface TailnetNode {
 /** A node in use: release it when the tunnel closes. */
 export interface TailnetLease {
     socks_port: number
+    /**
+     * The node's own tailnet IPs. Never a tunnel destination: in userspace what
+     * reaches them lands on this container's loopback, where every node's
+     * SOCKS5 listens (SOKI, #93).
+     */
+    self_ips: string[]
     /** A MagicDNS name → its tailnet IP, or null when the tailnet has no such peer. */
     resolve: (name: string) => Promise<string | null>
     release: () => void
@@ -110,6 +118,7 @@ export class TailnetPool {
         let released = false
         return {
             socks_port: node.socks_port,
+            self_ips: node.self_ips,
             resolve: (name) => resolveName(node.socket, name),
             release: () => {
                 if (released) return
@@ -133,6 +142,7 @@ export class TailnetPool {
         })
         const keyFile = `${dir}/authkey`
         let node: TailnetNode | null = null
+        let self_ips: string[] = []
         daemon.exited.then((code) => {
             this.opts.log('warn', 'tailnet node stopped', { node: id, code })
             // Only this start's entry: after a sweep, a newer node for the
@@ -168,6 +178,12 @@ export class TailnetPool {
                         : 'No se ha podido entrar en la red de Tailscale con esa credencial.'
                 )
             }
+            // Without its own IPs a tunnel back into the node can't be refused:
+            // no node.
+            self_ips = await tailnetIps(socket)
+            if (!self_ips.length) {
+                throw new TailnetError('No se ha podido entrar en la red de Tailscale con esa credencial.')
+            }
         } catch (error) {
             daemon.kill()
             throw error
@@ -175,7 +191,7 @@ export class TailnetPool {
             rmSync(keyFile, { force: true })
         }
         this.opts.log('info', 'tailnet node up', { node: id })
-        node = { socks_port, dir, socket, daemon, active: 0, idle_since: Date.now() }
+        node = { socks_port, dir, socket, daemon, self_ips, active: 0, idle_since: Date.now() }
         return node
     }
 
@@ -207,21 +223,26 @@ export class TailnetPool {
  * never to the name.
  */
 async function resolveName(socket: string, name: string): Promise<string | null> {
+    return (await tailnetIps(socket, name))[0] ?? null
+}
+
+/** `tailscale ip [name]`: the tailnet IPs of that peer, or of the node itself. */
+async function tailnetIps(socket: string, name?: string): Promise<string[]> {
     try {
-        const p = Bun.spawn(['tailscale', `--socket=${socket}`, 'ip', name], {
+        const p = Bun.spawn(['tailscale', `--socket=${socket}`, 'ip', ...(name ? [name] : [])], {
             stdout: 'pipe',
             stderr: 'ignore',
         })
         const timer = setTimeout(() => p.kill(), RESOLVE_TIMEOUT_MS)
         const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited])
         clearTimeout(timer)
-        if (code !== 0) return null
-        for (const line of out.split('\n').map((l) => l.trim())) {
-            if (line && /^[0-9a-f:.]+$/i.test(line) && isTailnetHost(line)) return line
-        }
-        return null
+        if (code !== 0) return []
+        return out
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l && /^[0-9a-f:.]+$/i.test(l) && isTailnetHost(l))
     } catch {
-        return null
+        return []
     }
 }
 

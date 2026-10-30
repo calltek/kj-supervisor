@@ -29,6 +29,7 @@ import {
     describeSocksReply,
     isTailnetHost,
     parsePort,
+    sameIp,
     socksConnectRequest,
     socksReplyLength,
 } from './connect-target'
@@ -251,6 +252,17 @@ export function createConnectHandler(deps: ConnectDeps) {
                     'KEYCHAIN_NOT_TAILNET',
                     `No hay ninguna máquina «${d.host}» en la VPN «${d.credential}». Usa su IP de ` +
                         'Tailscale (100.x.y.z) o el nombre con el que aparece en la tailnet.'
+                )
+            )
+        }
+        // Checked after resolving, so it covers the name and the literal IP:
+        // the node itself forwards to this container's loopback (SOKI, #93).
+        if (d.lease.self_ips.some((ip) => sameIp(ip, target))) {
+            return fail(
+                ws,
+                new KeychainError(
+                    'KEYCHAIN_NOT_TAILNET',
+                    `«${d.host}» es el propio Kujira dentro de la VPN, no una máquina de la tailnet.`
                 )
             )
         }
