@@ -286,8 +286,10 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             throw new KeychainError(
                 'KEYCHAIN_BAD_REFERENCE',
                 'El valor de la credencial lleva caracteres que no caben en una cabecera HTTP ' +
-                    '(acentos, ñ, saltos de línea…). Tal cual sólo sirve en Basic, que lo ' +
-                    'codifica. La petición no ha salido. Díselo al operador.'
+                    '(por ejemplo, saltos de línea o ciertos caracteres Unicode). Si el servicio ' +
+                    'admite Basic con usuario y contraseña, usa ' +
+                    '"Basic usuario:{{kj:<credencial>.<campo>}}" para que se codifique. La ' +
+                    'petición no ha salido. Si no, díselo al operador.'
             )
         }
         const variants = collectVariants([...values.values(), ...basicPairs])
