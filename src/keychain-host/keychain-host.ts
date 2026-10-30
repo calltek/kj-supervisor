@@ -63,6 +63,10 @@ export interface KeychainDocker {
     inspect(container_id: string): Promise<{
         Config?: { Env?: string[] | null } | null
         State?: { Running?: boolean } | null
+        NetworkSettings?: {
+            IPAddress?: string | null
+            Networks?: Record<string, { IPAddress?: string | null } | undefined> | null
+        } | null
     }>
 }
 
@@ -92,6 +96,7 @@ export class KeychainHost {
     private readonly socketFactory?: ControlSocketFactory
     private readonly tokens = new Map<number, string>()
     private channel: KeychainControlChannel | null = null
+    private controlUrl = ''
 
     constructor(deps: KeychainHostDeps) {
         this.docker = deps.docker
@@ -128,8 +133,15 @@ export class KeychainHost {
                 'keychain: kj-keychain started'
             )
             await this.adoptLive()
+            const refreshUrl = async () => {
+                const ip = await this.keychainIp(id)
+                this.controlUrl = keychainControlUrl(own.network_mode, ip)
+            }
+            await refreshUrl()
+            this.logger.info({ url: this.controlUrl }, 'keychain: control channel address')
             this.channel = new KeychainControlChannel({
-                url: keychainControlUrl(own.network_mode),
+                url: () => this.controlUrl,
+                onDisconnect: () => void refreshUrl(),
                 secret,
                 logger: this.logger,
                 onOpen: () => this.sendReset(),
@@ -192,6 +204,17 @@ export class KeychainHost {
         if (this.tokens.get(agent_id) === token) return
         this.tokens.set(agent_id, token)
         this.channel?.send({ type: 'agent:token', agent_id, token })
+    }
+
+    /** kj-keychain's address on the bridge, or null if Docker doesn't say. */
+    private async keychainIp(container_id: string): Promise<string | null> {
+        try {
+            const net = (await this.docker.inspect(container_id)).NetworkSettings
+            const ip = net?.Networks?.bridge?.IPAddress || net?.IPAddress
+            return ip || null
+        } catch {
+            return null
+        }
     }
 
     private async adoptLive(): Promise<void> {

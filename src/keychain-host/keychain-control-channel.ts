@@ -33,12 +33,15 @@ export const bunSocketFactory: ControlSocketFactory = (url, secret) =>
     }) as unknown as ControlSocket
 
 export interface KeychainControlChannelDeps {
-    url: string
+    /** Read on every connection attempt: the address can change between them. */
+    url: string | (() => string)
     secret: string
     logger: KJLogger
     /** On every (re)connection — the place to send `agents:reset`. */
     onOpen: () => void
     onMessage: (msg: KeychainControlUp) => void
+    /** When a connection closes or can't open, before the next attempt. */
+    onDisconnect?: () => void
     socketFactory?: ControlSocketFactory
 }
 
@@ -91,12 +94,14 @@ export class KeychainControlChannel {
         if (this.stopped) return
         let socket: ControlSocket
         try {
-            socket = (this.deps.socketFactory ?? bunSocketFactory)(this.deps.url, this.deps.secret)
+            const url = typeof this.deps.url === 'function' ? this.deps.url() : this.deps.url
+            socket = (this.deps.socketFactory ?? bunSocketFactory)(url, this.deps.secret)
         } catch (err) {
             this.deps.logger.warn(
                 { err: err instanceof Error ? err.message : String(err) },
                 'keychain: could not open the control channel'
             )
+            this.deps.onDisconnect?.()
             this.scheduleReconnect()
             return
         }
@@ -122,6 +127,7 @@ export class KeychainControlChannel {
         socket.onclose = () => {
             if (this.socket !== socket) return
             this.socket = null
+            this.deps.onDisconnect?.()
             this.scheduleReconnect()
         }
     }

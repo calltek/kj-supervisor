@@ -90,13 +90,22 @@ export function buildKeychainContainerSpec(
 }
 
 /**
- * Where the supervisor reaches the control port. On the host network (the Linux
- * fleet, `install.sh` runs it with `--network host`) loopback is the host's.
- * Otherwise (Docker Desktop on macOS) the published port is on the host's
- * loopback, which a container names `host.docker.internal`.
+ * Where the supervisor reaches the control port. Best by kj-keychain's own
+ * address on the bridge: the supervisor reaches it there whether it runs on the
+ * host network or on the bridge itself (bigbrain runs it on the bridge, and
+ * from there the port published on the host's 127.0.0.1 is out of reach).
+ * Without that address: loopback on the host network, `host.docker.internal`
+ * otherwise (Docker Desktop, where it is the host's loopback).
  */
-export function keychainControlUrl(supervisorNetworkMode: string | undefined): string {
-    const host = supervisorNetworkMode === 'host' ? LOOPBACK : 'host.docker.internal'
+export function keychainControlUrl(
+    supervisorNetworkMode: string | undefined,
+    keychainIp?: string | null
+): string {
+    const host = keychainIp
+        ? keychainIp
+        : supervisorNetworkMode === 'host'
+          ? LOOPBACK
+          : 'host.docker.internal'
     return `ws://${host}:${KEYCHAIN_CONTROL_PORT}/control`
 }
 
