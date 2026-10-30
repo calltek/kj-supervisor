@@ -15,7 +15,10 @@ import { createKeychainHandler } from './handler'
 import { log } from './log'
 import { AgentTokenRegistry } from './registry'
 import { ControlLink, ResolveCache } from './resolver'
+import { CONNECT_PATH, type ConnectData, createConnectHandler } from './connect-handler'
 import { createSshHandler, isSshPath } from './ssh-handler'
+import { TailnetPool } from './tailnet'
+import { hostname } from 'node:os'
 
 const secret = process.env.KJ_KEYCHAIN_CONTROL_SECRET ?? ''
 if (!secret) {
@@ -32,17 +35,23 @@ const sessions = new ControlSessions({ secret, registry, link, cache, log })
 const resolve = cache.wrap(link.resolve)
 const handleHttp = createKeychainHandler({ registry, resolve, log })
 const handleSsh = createSshHandler({ registry, resolve, log })
-const handle = (request: Request) =>
-    isSshPath(new URL(request.url).pathname) ? handleSsh(request) : handleHttp(request)
+const tailnet = new TailnetPool({ log, hostname: `kj-keychain-${hostname()}` })
+const connect = createConnectHandler({ registry, resolve, log, tailnet })
 
-Bun.serve({
+Bun.serve<ConnectData, never>({
     hostname: '0.0.0.0',
     port: KEYCHAIN_AGENT_PORT,
     // Our own 32 MiB cap answers with a proper error; this is only a backstop.
     maxRequestBodySize: 64 * 1024 * 1024,
     // A destination may take a while; Bun's default (10 s) would cut it.
     idleTimeout: 255,
-    fetch: handle,
+    fetch(request, server) {
+        const path = new URL(request.url).pathname
+        if (path === CONNECT_PATH) return connect.upgrade(request, server)
+        return isSshPath(path) ? handleSsh(request) : handleHttp(request)
+    },
+    // An SSH session through a VPN stays open for as long as it is used.
+    websocket: { ...connect.websocket, idleTimeout: 0 },
     error: () => {
         log('error', 'agent endpoint error')
         return new Response(null, { status: 500 })

@@ -754,6 +754,15 @@ es `src/keychain/`.
   `ssh_private_key`, y no sale de kj-keychain. Sin comprobar destino: una clave
   sólo abre los servidores que confían en su pública, y lo firmado no dice el
   host. Una clave con frase de paso se rechaza con `KEYCHAIN_KEY_ENCRYPTED`.
+- **La VPN también la pone kj-keychain** (`connect-handler.ts`, `tailnet.ts`):
+  `kj-connect "<VPN>" host puerto` (el `ProxyCommand` de ssh) abre por el
+  lanzador un WebSocket a `/connect`. Aquí se resuelve la auth key de la
+  credencial (`tskey-…`, campo `auth_key`), un `tailscaled` en userspace
+  (sin TUN ni capacidades, estado en memoria = nodo efímero, sin logs a
+  Tailscale) se une a la tailnet y los bytes van por su SOCKS5. Sólo a
+  direcciones de la tailnet (100.64/10, fd7a:115c:a1e0::/48 o MagicDNS) y a
+  los destinos de la credencial: el SOCKS5 de tailscaled saldría a cualquier
+  sitio desde este contenedor. Un nodo sin uso 30 min hace logout y se para.
 - **Compila sin el backend**: `keychain:resolve` usa tipos locales hasta que
   llegue en `protocol.ts`. **Orden de despliegue**: backend (que exista
   `keychain:resolve`; sin él, `KEYCHAIN_UNAVAILABLE` a los 8 s) → este

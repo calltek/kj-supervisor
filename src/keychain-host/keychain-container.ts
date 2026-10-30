@@ -37,8 +37,8 @@ import {
 export const KEYCHAIN_LABEL = 'kj-keychain'
 /** Env var with the control secret, read by kj-keychain at boot. */
 export const KEYCHAIN_SECRET_ENV = 'KJ_KEYCHAIN_CONTROL_SECRET'
-/** Memory cap. It holds a cache of a few strings and proxies HTTP: 256 MiB is plenty. */
-export const KEYCHAIN_MEMORY_BYTES = 256 * 1024 * 1024
+/** Memory cap: a cache of a few strings, HTTP proxying and a tailscaled per VPN in use. */
+export const KEYCHAIN_MEMORY_BYTES = 512 * 1024 * 1024
 /** Loopback, where the control port always goes. */
 export const LOOPBACK = '127.0.0.1'
 
@@ -80,7 +80,8 @@ export function buildKeychainContainerSpec(
             CapDrop: ['ALL'],
             SecurityOpt: ['no-new-privileges'],
             ReadonlyRootfs: true,
-            Tmpfs: { '/tmp': 'rw,noexec,nosuid,size=16m' },
+            // tailscaled's sockets and state for VPN tunnels (tailnet.ts).
+            Tmpfs: { '/tmp': 'rw,noexec,nosuid,size=64m' },
             RestartPolicy: { Name: 'unless-stopped' },
             Memory: KEYCHAIN_MEMORY_BYTES,
             Mounts: [],
