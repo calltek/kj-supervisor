@@ -24,35 +24,16 @@
  * The chain is replaced atomically (`iptables-restore --noflush` flushes and
  * fills a chain it declares in one commit), so a second browser starting never
  * leaves the first one unfenced, even for a moment.
+ *
+ * The rules are the browser scope of the agent's network policy
+ * (net-policy.ts, kj-app docs/red-por-agente.md §2) — by default, exactly
+ * what this fence always cut. What stays here is the helper's plumbing.
  */
 import { isIP } from 'node:net'
 import { networkInterfaces } from 'node:os'
 
-/** A chain of ours. The name carries a version: change the rules, bump it. */
-export const FENCE_CHAIN = 'KJBROWSER2'
-
 /** The helper image: alpine with iptables, built here once (`ensureFenceImage`). */
 export const FENCE_IMAGE = 'kj-netfence:1'
-
-/** IPv4 that is not the internet. */
-export const FENCED_V4 = [
-    '0.0.0.0/8',
-    '10.0.0.0/8',
-    '100.64.0.0/10',
-    '169.254.0.0/16',
-    '172.16.0.0/12',
-    '192.0.0.0/24',
-    '192.168.0.0/16',
-    '198.18.0.0/15',
-    '224.0.0.0/3',
-]
-
-export interface FenceTargets {
-    /** The container's resolvers (its `/etc/resolv.conf`): DNS goes to these only. */
-    nameservers: string[]
-    /** The host's own addresses, cut on top of the ranges above. */
-    host_ips: string[]
-}
 
 /** The `nameserver` lines of a resolv.conf, keeping only real addresses. */
 export function parseNameservers(resolvConf: string): string[] {
@@ -63,53 +44,6 @@ export function parseNameservers(resolvConf: string): string[] {
         if (ip && isIP(ip) && !out.includes(ip)) out.push(ip)
     }
     return out
-}
-
-/** Only literal addresses ever reach the script: nothing else goes into a shell. */
-const only = (ips: string[], family: 4 | 6) => ips.filter((ip) => isIP(ip) === family)
-
-function chainRules(v6: boolean, t: FenceTargets): string {
-    const family = v6 ? 6 : 4
-    const dns = only(t.nameservers, family).flatMap((ip) =>
-        ['udp', 'tcp'].map((p) => `-A ${FENCE_CHAIN} -d ${ip} -p ${p} --dport 53 -j RETURN`)
-    )
-    // IPv6: nothing but loopback and DNS. A page that has it falls back to
-    // IPv4, and listing every local IPv6 range right is a game not worth it.
-    const cut = v6
-        ? [`-A ${FENCE_CHAIN} -j REJECT`]
-        : [...FENCED_V4, ...only(t.host_ips, 4)].map((n) => `-A ${FENCE_CHAIN} -d ${n} -j REJECT`)
-    return [
-        '*filter',
-        `:${FENCE_CHAIN} - [0:0]`,
-        `-A ${FENCE_CHAIN} -o lo -j RETURN`,
-        ...dns,
-        ...cut,
-        'COMMIT',
-    ].join('\n')
-}
-
-/**
- * The helper's script: the chain, then the jump for this uid (once), then a
- * check that the jump is there. IPv6 only where the namespace has it: without
- * it there is no IPv6 traffic to cut, and no ip6tables to write to.
- */
-export function buildBrowserFenceScript(uid: number, targets: FenceTargets): string {
-    if (!Number.isInteger(uid) || uid <= 0) throw new Error(`bad browser uid: ${uid}`)
-    const jump = `OUTPUT -m owner --uid-owner ${uid} -j ${FENCE_CHAIN}`
-    return [
-        'set -eu',
-        'TABLES=iptables',
-        `iptables-restore -w -n <<'R'\n${chainRules(false, targets)}\nR`,
-        'if [ -e /proc/net/if_inet6 ]; then',
-        '    TABLES="iptables ip6tables"',
-        `    ip6tables-restore -w -n <<'R'\n${chainRules(true, targets)}\nR`,
-        'fi',
-        'for T in $TABLES; do',
-        `    $T -w -C ${jump} 2>/dev/null || $T -w -I ${jump.replace('OUTPUT', 'OUTPUT 1')}`,
-        `    $T -w -C ${jump}`,
-        'done',
-        'echo fenced',
-    ].join('\n')
 }
 
 /** Where a container's resolvers are listed. */

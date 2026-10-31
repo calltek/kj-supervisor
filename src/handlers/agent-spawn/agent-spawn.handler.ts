@@ -22,6 +22,7 @@ import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 import type { KJLogger } from '../../logger'
 import { describeDockerRunFailure } from '../../docker/spawn-error'
 import { isMutableTag } from './image-tag'
+import type { NetPolicyService } from '../../docker/client/net-policy-service'
 
 export interface AgentSpawnHandlerDeps {
     docker: KJDocker
@@ -30,6 +31,8 @@ export interface AgentSpawnHandlerDeps {
     logger: KJLogger
     /** kj-keychain: a fresh token per container (keychain-host.ts). Optional for tests. */
     keychain?: { envFor(agent_id: number): Record<string, string> }
+    /** What the agent may reach (net-policy-service.ts). Optional for tests. */
+    netPolicy?: Pick<NetPolicyService, 'enforce'>
 }
 
 export class AgentSpawnHandler {
@@ -38,9 +41,11 @@ export class AgentSpawnHandler {
     private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
     private readonly keychain?: AgentSpawnHandlerDeps['keychain']
+    private readonly netPolicy?: AgentSpawnHandlerDeps['netPolicy']
 
     constructor(deps: AgentSpawnHandlerDeps) {
         this.keychain = deps.keychain
+        this.netPolicy = deps.netPolicy
         this.docker = deps.docker
         this.status = deps.status
         this.streams = deps.streams
@@ -364,6 +369,26 @@ export class AgentSpawnHandler {
                 container_id: null,
                 last_action: describeDockerRunFailure(err, 'docker run failed'),
                 last_action_code: 'docker_run_failed',
+                last_action_at: Date.now(),
+            })
+            return
+        }
+
+        // What it may reach (kj-app docs/red-por-agente.md §2), before the
+        // first conversation can start. Typed locally until the control's
+        // /protocol ships the field; an older control sends none.
+        const enforced = await this.netPolicy?.enforce(
+            payload.agent_id,
+            container_id,
+            (payload as { network_policy?: unknown }).network_policy
+        )
+        if (enforced && !enforced.ok && enforced.stopped) {
+            this.status.push({
+                agent_id: payload.agent_id,
+                status: 'ERROR',
+                container_id: null,
+                last_action: `network policy failed: ${enforced.error}`,
+                last_action_code: 'network_policy_failed',
                 last_action_at: Date.now(),
             })
             return

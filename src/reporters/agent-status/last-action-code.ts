@@ -22,6 +22,7 @@ export const LAST_ACTION_CODES = [
     'pause_failed',
     'resume_failed',
     'restore_failed',
+    'network_policy_failed',
 ] as const
 
 export type LastActionCode = (typeof LAST_ACTION_CODES)[number]

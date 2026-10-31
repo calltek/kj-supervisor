@@ -27,6 +27,7 @@
  */
 
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
+import type { NetPolicyService } from '../../docker/client/net-policy-service'
 import {
     KJ_LABEL,
     KJ_LABEL_AGENT_ID,
@@ -66,6 +67,8 @@ export interface AgentImageUpdateHandlerDeps {
     default_drain_timeout_ms?: number
     /** Tests only: how often the drain checks whether the agent exited. */
     drain_poll_ms?: number
+    /** What the agent may reach (net-policy-service.ts). Optional for tests. */
+    netPolicy?: Pick<NetPolicyService, 'enforce'>
 }
 
 export class AgentImageUpdateHandler {
@@ -76,8 +79,10 @@ export class AgentImageUpdateHandler {
     private readonly logger: KJLogger
     private readonly default_drain_timeout_ms: number
     private readonly drain_poll_ms: number
+    private readonly netPolicy?: AgentImageUpdateHandlerDeps['netPolicy']
 
     constructor(deps: AgentImageUpdateHandlerDeps) {
+        this.netPolicy = deps.netPolicy
         this.docker = deps.docker
         this.status = deps.status
         this.streams = deps.streams
@@ -287,6 +292,21 @@ export class AgentImageUpdateHandler {
         }
         this.tracker.untrack(existing)
         swapHeartbeat.stop()
+
+        // A new container is a new network namespace: its rules start empty.
+        // The policy is the last one the control sent for this agent.
+        const enforced = await this.netPolicy?.enforce(payload.agent_id, new_container_id)
+        if (enforced && !enforced.ok && enforced.stopped) {
+            this.status.push({
+                agent_id: payload.agent_id,
+                status: 'ERROR',
+                container_id: null,
+                last_action: `network policy failed: ${enforced.error}`,
+                last_action_code: 'network_policy_failed',
+                last_action_at: Date.now(),
+            })
+            return
+        }
 
         // Re-attach stdio so the operator UI keeps receiving
         // agent:output. The new container resumes the same Claude

@@ -5,6 +5,7 @@
  * in tests and easier to swap implementation later.
  */
 
+import dns from 'node:dns'
 import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
@@ -24,7 +25,6 @@ import {
     withoutIsolationCaps,
 } from './hardening'
 import {
-    buildBrowserFenceScript,
     FENCE_BUILD_TIMEOUT_MS,
     FENCE_IMAGE,
     FENCE_TIMEOUT_MS,
@@ -34,7 +34,20 @@ import {
     RESOLV_CONF,
     withTimeout,
 } from './browser-fence'
-import { agentHostAliases, isHostGatewayUnsupported, recreatedHostAliases } from './host-access'
+import {
+    HOST_ALIAS,
+    agentHostAliases,
+    isHostGatewayUnsupported,
+    recreatedHostAliases,
+} from './host-access'
+import {
+    buildNetPolicyScript,
+    defaultNetPolicy,
+    type NetPolicy,
+    normalizeNetPolicy,
+    type ResolvedEndpoint,
+} from './net-policy'
+import { KEYCHAIN_AGENT_PORT } from '../../keychain/control-protocol'
 import { buildSeedScript } from './seed-script'
 
 /**
@@ -55,6 +68,12 @@ function readOwnContainerId(): string | null {
         }
     }
     return null
+}
+
+/** Every address a name resolves to, both families. */
+async function dnsLookupAll(host: string): Promise<string[]> {
+    const found = await dns.promises.lookup(host, { all: true, verbatim: true })
+    return [...new Set(found.map((a) => a.address))]
 }
 
 /** Labels we attach to every container we spawn so we can reconcile later. */
@@ -679,8 +698,18 @@ export class KJDocker {
      * can lose the jump the other just added.
      */
     async fenceBrowserNetwork(container_id: string, uid: number): Promise<void> {
+        return this.applyNetPolicy(container_id, uid)
+    }
+
+    /**
+     * Write the agent's network policy (net-policy.ts) into its namespace:
+     * both chains, the conversations' jumps and, with `browserUid`, that
+     * browser's. Throws if the rules didn't go in. Same helper, same
+     * one-at-a-time per container as the browser fence.
+     */
+    async applyNetPolicy(container_id: string, browserUid?: number): Promise<void> {
         const prev = this.fences.get(container_id) ?? Promise.resolve()
-        const run = prev.catch(() => undefined).then(() => this.fence(container_id, uid))
+        const run = prev.catch(() => undefined).then(() => this.fence(container_id, browserUid))
         const tail = run.catch(() => undefined)
         this.fences.set(container_id, tail)
         void tail.then(() => {
@@ -689,13 +718,81 @@ export class KJDocker {
         return run
     }
 
+    /**
+     * The policy the control sent for an agent (spawn, sync or a change),
+     * kept to what can be written as rules. Until one arrives, the default:
+     * what agents could reach before lists existed, plus the floor.
+     */
+    setNetPolicy(agent_id: number, raw: unknown): NetPolicy {
+        const policy = normalizeNetPolicy(raw)
+        this.netPolicies.set(agent_id, policy)
+        return policy
+    }
+
+    netPolicyOf(agent_id: number): NetPolicy {
+        return this.netPolicies.get(agent_id) ?? defaultNetPolicy()
+    }
+
+    private readonly netPolicies = new Map<number, NetPolicy>()
     private readonly fences = new Map<string, Promise<unknown>>()
 
-    private async fence(container_id: string, uid: number): Promise<void> {
-        const script = buildBrowserFenceScript(uid, {
-            nameservers: parseNameservers(await this.readContainerFile(container_id, RESOLV_CONF)),
-            host_ips: hostAddresses(),
-        })
+    /**
+     * The `always` endpoints as addresses. `host.docker.internal` is the
+     * bridge gateway (what `host-gateway` maps it to in the agent); other
+     * names are resolved here — the supervisor and the agent share the
+     * host's resolvers. A name that doesn't resolve is left out.
+     */
+    private async resolveAlways(
+        policy: NetPolicy,
+        gateway: string | null
+    ): Promise<ResolvedEndpoint[]> {
+        const out: ResolvedEndpoint[] = []
+        for (const e of policy.always) {
+            const port = e.port !== undefined ? { port: e.port } : {}
+            if (e.host.toLowerCase() === HOST_ALIAS) {
+                if (gateway) out.push({ ip: gateway, ...port })
+                continue
+            }
+            if (net.isIP(e.host)) {
+                out.push({ ip: e.host, ...port })
+                continue
+            }
+            const found = await withTimeout(
+                dnsLookupAll(e.host),
+                5_000,
+                `resolve ${e.host}`
+            ).catch(() => [] as string[])
+            for (const ip of found) out.push({ ip, ...port })
+        }
+        return out
+    }
+
+    private async fence(container_id: string, browserUid?: number): Promise<void> {
+        const info = await this.inspect(container_id)
+        const agent_id = Number(info.Config?.Labels?.[KJ_LABEL_AGENT_ID])
+        const policy = this.netPolicyOf(agent_id)
+        const nets = Object.values(info.NetworkSettings?.Networks ?? {})
+        const gateway = nets.map((n) => n?.Gateway).find((g) => !!g && net.isIP(g) === 4) ?? null
+        const docker_nets = nets.flatMap((n) => [
+            ...(n?.IPAddress && n.IPPrefixLen ? [`${n.IPAddress}/${n.IPPrefixLen}`] : []),
+            ...(n?.GlobalIPv6Address && n.GlobalIPv6PrefixLen
+                ? [`${n.GlobalIPv6Address}/${n.GlobalIPv6PrefixLen}`]
+                : []),
+        ])
+        const script = buildNetPolicyScript(
+            policy,
+            {
+                nameservers: parseNameservers(
+                    await this.readContainerFile(container_id, RESOLV_CONF)
+                ),
+                host_ips: hostAddresses(),
+                docker_nets,
+                gateway,
+                keychain_port: KEYCHAIN_AGENT_PORT,
+                always: await this.resolveAlways(policy, gateway),
+            },
+            browserUid
+        )
         await this.ensureFenceImage()
         const create = () =>
             this.docker.createContainer({
@@ -722,15 +819,15 @@ export class KJDocker {
             const { StatusCode } = await withTimeout(
                 helper.wait(),
                 FENCE_TIMEOUT_MS,
-                'browser fence'
+                'network policy'
             )
             const logs = stripDockerFrames(
                 await helper
                     .logs({ stdout: true, stderr: true, follow: false })
                     .catch(() => Buffer.from(''))
             )
-            if (StatusCode !== 0 || !logs.includes('fenced'))
-                throw new Error(`browser fence exited ${StatusCode}: ${logs.trim().slice(0, 300)}`)
+            if (StatusCode !== 0 || !logs.includes('netpolicy'))
+                throw new Error(`network policy exited ${StatusCode}: ${logs.trim().slice(0, 300)}`)
         } finally {
             await helper.remove({ force: true }).catch(() => undefined)
         }

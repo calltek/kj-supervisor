@@ -9,6 +9,7 @@
  * identical to the cold-boot path.
  */
 
+import { isIP } from 'node:net'
 import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
@@ -32,6 +33,7 @@ import {
     SERVER_METRICS_INTERVAL_MS,
 } from './config/settings'
 import { KJDocker } from './docker/client/client'
+import { NetPolicyService } from './docker/client/net-policy-service'
 import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
 import { startImageCleanupLoop } from './docker/image-cleanup/image-cleanup'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
@@ -102,6 +104,9 @@ import { type UpdateCheckHandle, startUpdateCheckLoop } from './update-check/upd
 
 /** Stand-in for the turn fields of `McpRequestPayload`, until the control's `protocol.ts` ships them. */
 type McpRequestWithTurn = McpRequestPayload & { turn_id?: string; turn_request_ids?: string[] }
+
+/** How often allow-list rules with names in them are rewritten (their addresses move). */
+const NET_POLICY_REFRESH_MS = 10 * 60_000
 
 const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
     WS_ERROR_CODES.AUTH_MISSING,
@@ -321,12 +326,14 @@ async function main(): Promise<void> {
         streams,
         logger,
     })
+    const netPolicy = new NetPolicyService(docker, logger)
     const spawnHandler = new AgentSpawnHandler({
         docker,
         status: statusReporter,
         streams,
         logger,
         keychain,
+        netPolicy,
     })
     const lifecycleHandler = new AgentLifecycleHandler({
         docker,
@@ -340,10 +347,16 @@ async function main(): Promise<void> {
         streams,
         tracker,
         logger,
+        netPolicy,
     })
     const inputHandler = new AgentInputHandler({ streams, logger })
     const execHandler = new AgentExecHandler({ docker, logger })
-    const syncHandler = new AgentSyncHandler({ streams, logger, running: imageReporter })
+    const syncHandler = new AgentSyncHandler({
+        streams,
+        logger,
+        running: imageReporter,
+        netPolicy,
+    })
     const backupHandler = new AgentBackupHandler({
         docker,
         status: statusReporter,
@@ -471,6 +484,55 @@ async function main(): Promise<void> {
         if (!browser.control(payload))
             logger.debug({ agent_id: payload?.agent_id }, 'agent:browser:control not delivered')
     })
+    // What a running agent may reach changed in the panel (kj-app
+    // docs/red-por-agente.md §2): rewrite its rules in place, no restart.
+    // Best-effort like any push: the next spawn or sync carries it anyway.
+    // Typed locally until it comes with protocol.ts.
+    client.onPush<{ agent_id: number; network_policy: unknown }>(
+        'agent:network:policy',
+        (payload) => {
+            void (async () => {
+                const agent_id = Number(payload?.agent_id)
+                if (!Number.isInteger(agent_id)) return
+                const running = (await docker.listKjContainers().catch(() => [])).find(
+                    (c) => c.agent_id === agent_id
+                )
+                if (!running) {
+                    docker.setNetPolicy(agent_id, payload.network_policy)
+                    return
+                }
+                const r = await netPolicy.enforce(
+                    agent_id,
+                    running.container_id,
+                    payload.network_policy
+                )
+                if (!r.ok && r.stopped)
+                    statusReporter.push({
+                        agent_id,
+                        status: 'ERROR',
+                        container_id: null,
+                        last_action: `network policy failed: ${r.error}`,
+                        last_action_code: 'network_policy_failed',
+                        last_action_at: Date.now(),
+                    })
+            })()
+        }
+    )
+    // Names in an allow list's always-allowed endpoints (the model's API,
+    // Kujira's) resolve to addresses that move: rewrite those rules now and
+    // then. Only where it matters — an allow list with a name in it.
+    setInterval(() => {
+        void (async () => {
+            for (const c of await docker.listKjContainers().catch(() => [])) {
+                if (c.agent_id === null) continue
+                const p = docker.netPolicyOf(c.agent_id)
+                const named = p.always.some((e) => !isIP(e.host))
+                if (named && (p.conversations.mode === 'allow' || p.browser.mode === 'allow'))
+                    await netPolicy.enforce(c.agent_id, c.container_id)
+            }
+        })()
+    }, NET_POLICY_REFRESH_MS).unref?.()
+
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
         const delivered = streams.warmup(payload)
         logger
