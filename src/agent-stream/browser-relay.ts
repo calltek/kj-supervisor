@@ -82,6 +82,11 @@ export class BrowserRelay {
             /** A control envelope on the agent's stdin; false if there's no stream. */
             write: (agent_id: number, envelope: { type: string; [k: string]: unknown }) => boolean
             push: (event: string, payload: unknown) => void
+            /**
+             * For frames: only the newest per key goes out while the uplink is
+             * busy (control.client.ts). Without it, frames go through `push`.
+             */
+            pushLatest?: (key: string, event: string, payload: unknown) => void
             logger: KJLogger
         }
     ) {}
@@ -133,7 +138,11 @@ export class BrowserRelay {
         const event = typeof kind === 'string' ? PUSHED[kind as keyof typeof PUSHED] : undefined
         if (!event || !validUser(line.user_id)) return
         const { kj_channel: _c, kind: _k, ...rest } = line
-        this.deps.push(event, { ...rest, agent_id })
+        // A frame behind another one still on its way is already old: on a
+        // slow uplink, queuing them all showed the page seconds late.
+        if (kind === 'frame' && this.deps.pushLatest)
+            this.deps.pushLatest(`${agent_id}:${line.user_id}`, event, { ...rest, agent_id })
+        else this.deps.push(event, { ...rest, agent_id })
     }
 
     /** The agent's stream went away: whatever it was doing won't answer. */

@@ -291,6 +291,7 @@ async function main(): Promise<void> {
     const browser = new BrowserRelay({
         write: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
         push: (event, payload) => client.push(event, payload),
+        pushLatest: (key, event, payload) => client.pushLatest(key, event, payload),
         logger,
     })
     // kj-keychain (credentials by reference): started below, never fatal.
