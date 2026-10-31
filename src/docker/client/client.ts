@@ -452,6 +452,17 @@ export function detachedExecCmd(cmd: string[]): string[] {
 /** uid:gid of the agent user (`bun`) inside the agent images. */
 export const EXEC_USER = '1000:1000'
 
+/**
+ * An agent's stdout is its stream, and Docker keeps a copy of it in the
+ * container's log. Without a limit that copy never stops growing: a watched
+ * browser alone wrote 123 MB in 15 minutes (bigbrain, 2026-10-31). Nothing
+ * reads it but someone running `docker logs`, so the last few MB are enough.
+ */
+export const AGENT_LOG_CONFIG = {
+    Type: 'json-file',
+    Config: { 'max-size': '10m', 'max-file': '3' },
+}
+
 export class KJDocker {
     private readonly docker: Docker
     private readonly logger: KJLogger
@@ -908,6 +919,7 @@ export class KJDocker {
                 // not its own crashes (the supervisor decides whether to relaunch).
                 RestartPolicy: { Name: 'unless-stopped' },
                 Mounts: mounts,
+                LogConfig: AGENT_LOG_CONFIG,
             },
         })
 
@@ -1334,6 +1346,8 @@ export class KJDocker {
                 // montaje sin usar en vez de huérfanar sus datos (#107).
                 Mounts: ensureIsolationMount(sanitized.Mounts, mode !== 'none'),
                 RestartPolicy: host.RestartPolicy,
+                // The limit, not the source's: one made before had none.
+                LogConfig: AGENT_LOG_CONFIG,
                 NetworkMode: host.NetworkMode,
                 GroupAdd: host.GroupAdd,
                 // Recrear por imagen no puede dejar sin host a un agente que
