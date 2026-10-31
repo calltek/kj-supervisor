@@ -80,6 +80,21 @@ describe('BrowserRelay', () => {
         ])
     })
 
+    test('frames go by «newest wins», one key per agent and person; the rest as always', () => {
+        const latest: Array<{ key: string; event: string }> = []
+        const pushes: string[] = []
+        const relay = new BrowserRelay({
+            write: () => true,
+            push: (event) => pushes.push(event),
+            pushLatest: (key, event) => latest.push({ key, event }),
+            logger: KJLogger.create('error'),
+        })
+        relay.onContainerLine(3, { kj_channel: 'browser', kind: 'frame', user_id: 7, data: 'j' })
+        relay.onContainerLine(3, { kj_channel: 'browser', kind: 'state', user_id: 7, url: 'x' })
+        expect(latest).toEqual([{ key: '3:7', event: 'agent:browser:frame' }])
+        expect(pushes).toEqual(['agent:browser:state'])
+    })
+
     test('a control from the person reaches the stdin as browser_control', () => {
         const s = setup()
         expect(s.relay.control({ agent_id: 1, user_id: 7, op: 'view', type: 'input' })).toBe(true)

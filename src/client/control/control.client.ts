@@ -37,6 +37,10 @@ export class KJControlClient extends EventEmitter {
     // (the control's outbox retrying a lost-ack command) replays the
     // first ack instead of re-running the handler. See command-dedup.ts.
     private readonly dedup = new CommandDedup()
+    // The newest push per key, waiting for the connection to free up
+    // (`pushLatest`). Only the last one of each key is ever sent.
+    private readonly latest = new Map<string, { event: string; payload: unknown }>()
+    private draining = false
 
     constructor(opts: ControlClientOptions) {
         super()
@@ -67,6 +71,9 @@ export class KJControlClient extends EventEmitter {
         })
 
         this.socket.on('disconnect', (reason) => {
+            // A frame of before the drop is old news: nothing waits across it.
+            this.latest.clear()
+            this.draining = false
             this.logger.warn({ reason }, 'socket disconnected')
             this.emit('disconnect', reason)
         })
@@ -110,6 +117,42 @@ export class KJControlClient extends EventEmitter {
     push(event: string, payload: unknown): void {
         const fit = this.fit(event, payload)
         if (fit) this.socket.emit(event, fit.payload)
+    }
+
+    /**
+     * A push where only the newest one of its `key` matters (a browser's
+     * frames): while the connection is still sending earlier ones, it waits
+     * and a newer one replaces it, so a slow uplink shows the page of now, not
+     * a queue of seconds ago. The one waiting goes out when the connection
+     * drains: the last frame of a page that stops changing is never lost.
+     * Offline it is dropped, not buffered for the reconnection.
+     */
+    pushLatest(key: string, event: string, payload: unknown): void {
+        if (!this.socket.connected) return
+        const engine = this.socket.io.engine as unknown as
+            | {
+                  writeBuffer?: unknown[]
+                  transport?: { writable?: boolean }
+                  once?(event: 'drain', fn: () => void): void
+              }
+            | undefined
+        const busy =
+            !!engine &&
+            (engine.transport?.writable === false || (engine.writeBuffer?.length ?? 0) > 0)
+        if (!busy || !engine?.once) {
+            this.push(event, payload)
+            return
+        }
+        this.latest.set(key, { event, payload })
+        if (this.draining) return
+        this.draining = true
+        engine.once('drain', () => {
+            if (!this.draining) return
+            this.draining = false
+            const waiting = [...this.latest.values()]
+            this.latest.clear()
+            for (const w of waiting) this.push(w.event, w.payload)
+        })
     }
 
     /**
