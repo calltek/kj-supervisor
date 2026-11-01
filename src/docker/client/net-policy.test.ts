@@ -31,7 +31,7 @@ const policy = (p: Partial<NetPolicy>): NetPolicy => ({ ...defaultNetPolicy(), .
 describe('the floor', () => {
     test('comes before any list, and an allow list does not open it', () => {
         const script = buildNetPolicyScript(
-            policy({ conversations: { mode: 'allow', entries: [{ cidr: '172.17.0.0/16' }] } }),
+            policy({ mode: 'allow', entries: [{ cidr: '172.17.0.0/16' }] }),
             T
         )
         const conv = rules(script, 'iptables', CONV_CHAIN)
@@ -71,9 +71,7 @@ describe('the verdict', () => {
     test('an allow list rejects what it does not name; ports go per protocol', () => {
         const conv = rules(
             buildNetPolicyScript(
-                policy({
-                    conversations: { mode: 'allow', entries: [{ cidr: '10.0.0.5', ports: [22] }] },
-                }),
+                policy({ mode: 'allow', entries: [{ cidr: '10.0.0.5', ports: [22] }] }),
                 T
             ),
             'iptables',
@@ -92,24 +90,40 @@ describe('the verdict', () => {
         )
         expect(web).toContain(`-A ${WEB_CHAIN} -d 10.0.0.0/8 -j REJECT`)
         expect(web).toContain(`-A ${WEB_CHAIN} -d 100.64.0.0/10 -j REJECT`)
+        // …and the conversations keep their LAN, with the same (empty) list.
+        const conv = rules(buildNetPolicyScript(defaultNetPolicy(), T), 'iptables', CONV_CHAIN)
+        expect(conv).not.toContain(`-A ${CONV_CHAIN} -d 10.0.0.0/8 -j REJECT`)
+    })
+
+    test('one list for both: an allow list opens a private range to the browser on purpose', () => {
+        const web = rules(
+            buildNetPolicyScript(
+                policy({ mode: 'allow', entries: [{ cidr: '10.20.0.0/16' }] }),
+                T,
+                7
+            ),
+            'iptables',
+            WEB_CHAIN
+        )
+        expect(web).toContain(`-A ${WEB_CHAIN} -d 10.20.0.0/16 -j ACCEPT`)
+        expect(web).not.toContain(`-A ${WEB_CHAIN} -d 10.0.0.0/8 -j REJECT`)
+        expect(web.at(-1)).toBe(`-A ${WEB_CHAIN} -j REJECT`)
     })
 })
 
 describe("the control's policy", () => {
     test('only addresses and ports reach the shell', () => {
         const p = normalizeNetPolicy({
-            conversations: {
-                mode: 'allow',
-                entries: [
-                    { cidr: '1.1.1.1; reboot' },
-                    { cidr: '$(id)/8' },
-                    { cidr: '10.0.0.0/33' },
-                    { cidr: '10.0.0.0/8', ports: [22, '80; id', 70000] },
-                ],
-            },
+            mode: 'allow',
+            entries: [
+                { cidr: '1.1.1.1; reboot' },
+                { cidr: '$(id)/8' },
+                { cidr: '10.0.0.0/33' },
+                { cidr: '10.0.0.0/8', ports: [22, '80; id', 70000] },
+            ],
             always: [{ host: 'api.kujira.so', port: 443 }, { host: '`id`' }],
         })
-        expect(p.conversations.entries).toEqual([{ cidr: '10.0.0.0/8', ports: [22] }])
+        expect(p.entries).toEqual([{ cidr: '10.0.0.0/8', ports: [22] }])
         expect(p.always).toEqual([{ host: 'api.kujira.so', port: 443 }])
         const script = buildNetPolicyScript(p, {
             ...T,
@@ -122,10 +136,8 @@ describe("the control's policy", () => {
 
     test('a missing or broken policy is the default, and the default is not custom', () => {
         expect(normalizeNetPolicy(undefined)).toEqual(defaultNetPolicy())
-        expect(normalizeNetPolicy({ conversations: { mode: 'open' } })).toEqual(defaultNetPolicy())
+        expect(normalizeNetPolicy({ mode: 'open' })).toEqual(defaultNetPolicy())
         expect(isCustomNetPolicy(defaultNetPolicy())).toBe(false)
-        expect(isCustomNetPolicy(policy({ conversations: { mode: 'allow', entries: [] } }))).toBe(
-            true
-        )
+        expect(isCustomNetPolicy(policy({ mode: 'allow', entries: [] }))).toBe(true)
     })
 })

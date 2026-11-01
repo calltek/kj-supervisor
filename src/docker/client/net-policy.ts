@@ -1,10 +1,11 @@
 /**
- * What an agent may reach, per scope (kj-app docs/red-por-agente.md §2),
- * enforced by the kernel of the agent's own network namespace — the same
+ * What an agent may reach (kj-app docs/red-por-agente.md §2): ONE list for
+ * its conversations and the person's browser, enforced by the kernel of the
+ * agent's own network namespace — the same
  * mechanism as the browser fence (browser-fence.ts), for every uid that is
  * not root.
  *
- * Two scopes, each a chain of ours:
+ * Two chains of ours, the same list in both:
  *  - CONVERSATIONS (`KJNET1-CONV`): the agent user (`bun`, 1000 — the
  *    launcher, its model proxy and the conversations that aren't isolated)
  *    and the isolated conversations (200000–299999);
@@ -22,9 +23,11 @@
  *  3. the FLOOR, no list opens it: link-local (the cloud's metadata), the
  *     container's Docker network (gateway, this supervisor, the host, every
  *     other agent) and the host's own addresses;
- *  4. the scope's list: an allow list ACCEPTs what it names, a deny list
- *     REJECTs it;
- *  5. the verdict: an allow list REJECTs the rest, a deny list ACCEPTs it.
+ *  4. the list: an allow list ACCEPTs what it names, a deny list REJECTs it;
+ *  5. the browser only, with a deny list: the private ranges, REJECTed — it
+ *     opens pages of third parties, and those must not reach the client's
+ *     LAN or a tailnet. An allow list that names one opens it on purpose;
+ *  6. the verdict: an allow list REJECTs the rest, a deny list ACCEPTs it.
  *
  * Root is never fenced: only this supervisor (exec -u 0) runs as root there.
  */
@@ -38,11 +41,6 @@ export interface NetEntry {
     ports?: number[]
 }
 
-export interface NetScope {
-    mode: NetMode
-    entries: NetEntry[]
-}
-
 /** An endpoint always reachable: a host (name or address) and maybe a port. */
 export interface NetEndpoint {
     host: string
@@ -51,8 +49,8 @@ export interface NetEndpoint {
 
 /** What the control sends for an agent. Anything missing takes the default. */
 export interface NetPolicy {
-    conversations: NetScope
-    browser: NetScope
+    mode: NetMode
+    entries: NetEntry[]
     always: NetEndpoint[]
 }
 
@@ -84,11 +82,7 @@ const FLOOR_V6 = ['fe80::/10', '::ffff:0:0/96', 'fd00:ec2::254/128']
 
 /** As things were before lists existed: conversations open, the browser off the private ranges. */
 export function defaultNetPolicy(): NetPolicy {
-    return {
-        conversations: { mode: 'deny', entries: [] },
-        browser: { mode: 'deny', entries: PRIVATE_V4.map((cidr) => ({ cidr })) },
-        always: [],
-    }
+    return { mode: 'deny', entries: [], always: [] }
 }
 
 const MAX_ENTRIES = 256
@@ -111,30 +105,27 @@ export function cidrFamily(cidr: string): 0 | 4 | 6 {
 const validPort = (p: unknown): p is number =>
     typeof p === 'number' && Number.isInteger(p) && p >= 1 && p <= 65535
 
-function scopeOf(raw: unknown, fallback: NetScope): NetScope {
-    if (!raw || typeof raw !== 'object') return fallback
-    const r = raw as { mode?: unknown; entries?: unknown }
-    if (r.mode !== 'allow' && r.mode !== 'deny') return fallback
+function entriesOf(raw: unknown): NetEntry[] {
     const entries: NetEntry[] = []
-    for (const e of Array.isArray(r.entries) ? r.entries.slice(0, MAX_ENTRIES) : []) {
+    for (const e of Array.isArray(raw) ? raw.slice(0, MAX_ENTRIES) : []) {
         const cidr = (e as { cidr?: unknown })?.cidr
         if (typeof cidr !== 'string' || !cidrFamily(cidr)) continue
         const ports = (e as { ports?: unknown }).ports
         const valid = Array.isArray(ports) ? [...new Set(ports.filter(validPort))] : []
         entries.push(valid.length ? { cidr, ports: valid.slice(0, MAX_PORTS) } : { cidr })
     }
-    return { mode: r.mode, entries }
+    return entries
 }
 
 /**
  * The control's policy, kept to what can be written as rules: addresses that
  * parse, ports in range, names that are names. Nothing else ever reaches the
- * helper's shell. A missing or malformed scope is the default one.
+ * helper's shell. A missing or malformed mode is the default policy.
  */
 export function normalizeNetPolicy(raw: unknown): NetPolicy {
     const d = defaultNetPolicy()
     if (!raw || typeof raw !== 'object') return d
-    const r = raw as { conversations?: unknown; browser?: unknown; always?: unknown }
+    const r = raw as { mode?: unknown; entries?: unknown; always?: unknown }
     const always: NetEndpoint[] = []
     for (const e of Array.isArray(r.always) ? r.always.slice(0, MAX_ENDPOINTS) : []) {
         const host = (e as { host?: unknown })?.host
@@ -142,16 +133,14 @@ export function normalizeNetPolicy(raw: unknown): NetPolicy {
         const port = (e as { port?: unknown }).port
         always.push(validPort(port) ? { host, port } : { host })
     }
-    return {
-        conversations: scopeOf(r.conversations, d.conversations),
-        browser: scopeOf(r.browser, d.browser),
-        always,
-    }
+    if (r.mode !== 'allow' && r.mode !== 'deny') return { ...d, always }
+    return { mode: r.mode, entries: entriesOf(r.entries), always }
 }
 
 /** Is this policy anything other than the default? Then failing to apply it stops the agent. */
 export function isCustomNetPolicy(p: NetPolicy): boolean {
-    return JSON.stringify(normalizeNetPolicy(p)) !== JSON.stringify(defaultNetPolicy())
+    const n = normalizeNetPolicy(p)
+    return n.mode !== 'deny' || n.entries.length > 0
 }
 
 /** The endpoints of `always` with their names resolved: what goes in the rules. */
@@ -186,7 +175,7 @@ function portRules(head: string, ports: number[] | undefined, verdict: string): 
 /** One chain's rules, for one family. The browser has no IPv6 but loopback and DNS. */
 export function chainRules(
     chain: string,
-    scope: NetScope,
+    scope: Pick<NetPolicy, 'mode' | 'entries'>,
     t: NetTargets,
     family: 4 | 6,
     browser = false
@@ -212,6 +201,8 @@ export function chainRules(
     const hit = scope.mode === 'allow' ? 'ACCEPT' : 'REJECT'
     for (const e of scope.entries)
         if (cidrFamily(e.cidr) === family) out.push(...portRules(`${a} -d ${e.cidr}`, e.ports, hit))
+    if (browser && family === 4 && scope.mode === 'deny')
+        for (const n of PRIVATE_V4) out.push(`${a} -d ${n} -j REJECT`)
     out.push(`${a} -j ${scope.mode === 'allow' ? 'REJECT' : 'ACCEPT'}`)
     return out
 }
@@ -221,8 +212,8 @@ function table(policy: NetPolicy, t: NetTargets, family: 4 | 6): string {
         '*filter',
         `:${CONV_CHAIN} - [0:0]`,
         `:${WEB_CHAIN} - [0:0]`,
-        ...chainRules(CONV_CHAIN, policy.conversations, t, family),
-        ...chainRules(WEB_CHAIN, policy.browser, t, family, true),
+        ...chainRules(CONV_CHAIN, policy, t, family),
+        ...chainRules(WEB_CHAIN, policy, t, family, true),
         'COMMIT',
     ].join('\n')
 }

@@ -527,7 +527,7 @@ async function main(): Promise<void> {
                 if (c.agent_id === null) continue
                 const p = docker.netPolicyOf(c.agent_id)
                 const named = p.always.some((e) => !isIP(e.host))
-                if (named && (p.conversations.mode === 'allow' || p.browser.mode === 'allow'))
+                if (named && p.mode === 'allow')
                     await netPolicy.enforce(c.agent_id, c.container_id)
             }
         })()
