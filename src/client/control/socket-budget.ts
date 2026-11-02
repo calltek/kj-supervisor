@@ -14,6 +14,12 @@
  * las cadenas enormes se cortan. El `tool_use_id` y el resto de campos siguen
  * donde estaban, así que el control empareja el resultado con su llamada. Si
  * ni así cabe, no se manda: perder un evento es mejor que perder la conexión.
+ *
+ * Eso vale para lo que se CUENTA (salida, acks), no para lo que se PIDE: unos
+ * argumentos recortados son otra petición. Un `attachment_send` de 1,9 MB
+ * llegaba con 64 KB de base64 más la frase de abajo, el control lo decodificaba
+ * tan contento y guardaba una imagen rota de 48 KB contestando que todo fue bien
+ * (nov. 2026). Una petición cabe entera o falla (`emitWithAck`).
  */
 
 /** Por debajo del MB del control, con margen para el envoltorio de socket.io. */
@@ -24,6 +30,11 @@ const STRING_CAPS = [64_000, 8_000, 1_000]
 
 export function payloadBytes(event: string, payload: unknown): number {
     return Buffer.byteLength(JSON.stringify([event, payload]) ?? '', 'utf8')
+}
+
+/** Si esta petición cabe entera en el socket. */
+export function fitsSocket(event: string, payload: unknown): boolean {
+    return payloadBytes(event, payload) <= SOCKET_PAYLOAD_BUDGET
 }
 
 /**
