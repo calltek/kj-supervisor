@@ -12,6 +12,7 @@
 import { cpus, hostname, platform, release, totalmem } from 'node:os'
 
 import { MissingAgentTokenError, loadAgentToken } from './client/auth/auth'
+import { fitsSocket } from './client/control/socket-budget'
 import { markPath, readDecommission, writeDecommission } from './client/auth/decommission'
 import { KJControlClient } from './client/control/control.client'
 import { McpDispatcher, type McpEnvelope } from './agent-stream/mcp-dispatcher'
@@ -274,6 +275,17 @@ async function main(): Promise<void> {
                 ...(target.turn_id !== undefined
                     ? { turn_id: target.turn_id, turn_request_ids: target.turn_request_ids }
                     : {}),
+            }
+            // Not a transport failure: retrying the same call can't fit either.
+            if (!fitsSocket('mcp:request', request)) {
+                return Promise.resolve({
+                    ok: false,
+                    error: {
+                        code: 'MCP_INVALID_ARGS',
+                        message: `The arguments of ${tool} are too large to send.`,
+                        retryable: false,
+                    },
+                } as McpRequestAck)
             }
             return client.emitWithAck<McpRequestAck>('mcp:request', request, 15000)
         },

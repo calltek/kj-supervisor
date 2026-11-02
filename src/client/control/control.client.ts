@@ -20,7 +20,7 @@ import { io, type Socket } from 'socket.io-client'
 import type { WsErrorPayload } from '../../protocol'
 import type { KJLogger } from '../../logger'
 import { CommandDedup, requestIdOf } from './command-dedup'
-import { fitToSocket, payloadBytes } from './socket-budget'
+import { fitToSocket, fitsSocket, payloadBytes } from './socket-budget'
 
 export interface ControlClientOptions {
     /** Base URL of the control, e.g. `http://localhost:5050`. */
@@ -285,8 +285,8 @@ export class KJControlClient extends EventEmitter {
      */
     emitWithAck<TAck>(event: string, payload: unknown, timeoutMs: number): Promise<TAck> {
         return new Promise((resolve, reject) => {
-            const fit = this.fit(event, payload)
-            if (!fit) {
+            // A request goes whole or not at all: trimmed, it would be another one.
+            if (!fitsSocket(event, payload)) {
                 reject(new Error(`${event} too large for the socket`))
                 return
             }
@@ -294,7 +294,7 @@ export class KJControlClient extends EventEmitter {
                 reject(new Error(`ack timeout for ${event} after ${timeoutMs}ms`))
             }, timeoutMs)
 
-            this.socket.emit(event, fit.payload, (ack: TAck) => {
+            this.socket.emit(event, payload, (ack: TAck) => {
                 clearTimeout(t)
                 resolve(ack)
             })
