@@ -500,6 +500,15 @@ arregló Cypher a mano); esto alinea el spawn. 5 unit tests.
 > esperar a un respawn, `update-image` lo fuerza. Para los agentes nuevos,
 > el spawn ya re-pullea los mutables solo.
 
+### Imágenes huérfanas: las borra el supervisor (2026-11-03)
+Cada despliegue deja sin etiqueta la imagen anterior de kj-agent-flex o
+kj-supervisor, y una máquina llegó a 76 huérfanas y 90 GB. A los 10 minutos de
+arrancar y luego cada 6 horas, el supervisor borra las imágenes sin etiqueta
+cuyo `org.opencontainers.image.source` es un repo nuestro; es lo único que las
+identifica, porque pierden `RepoTags` y `RepoDigests`. Las ajenas no se tocan:
+puede ser la máquina de un cliente. Nunca se fuerza: la que usa un contenedor
+da 409 y cae en una pasada posterior.
+
 ### Idempotencia de comandos — dedup por `request_id` (2026-06-10)
 Todo comando C→A lleva un `request_id` obligatorio. El supervisor
 **deduplica** sobre él en `src/client/control/command-dedup.ts`: un wrapper

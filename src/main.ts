@@ -33,6 +33,7 @@ import {
 } from './config/settings'
 import { KJDocker } from './docker/client/client'
 import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
+import { startImageCleanupLoop } from './docker/image-cleanup/image-cleanup'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
 import { AgentExecHandler } from './handlers/agent-exec/agent-exec.handler'
 import { AgentBackupHandler } from './handlers/agent-backup/agent-backup.handler'
@@ -563,6 +564,9 @@ async function main(): Promise<void> {
     // Runs at most once; until it succeeds we retry on each handshake.
     let blueGreenSwapDone = false
 
+    // Fuera de stopLoops: no depende del control, ni se reinicia al reconectar.
+    const imageCleanup = startImageCleanupLoop({ docker, logger })
+
     const stopLoops = (): void => {
         healthHandle?.stop()
         serverMetricsHandle?.stop()
@@ -782,6 +786,7 @@ async function main(): Promise<void> {
             logger.error('no pude dejar la marca en disco: al reiniciar lo volveré a preguntar')
         }
         stopLoops()
+        imageCleanup.stop()
         eventsWatcher.stop()
         keychain.stop()
         streams.detachAll()
@@ -816,6 +821,7 @@ async function main(): Promise<void> {
     const shutdown = (signal: string): void => {
         logger.info({ signal }, 'received shutdown signal')
         stopLoops()
+        imageCleanup.stop()
         eventsWatcher.stop()
         keychain.stop()
         streams.detachAll()

@@ -45,6 +45,61 @@ class FakeDocker {
     }
 }
 
+describe('removeOrphanImages', () => {
+    const OURS = { 'org.opencontainers.image.source': 'https://github.com/calltek/kj-agent-base' }
+
+    function setup(
+        images: { Id: string; Labels: Record<string, string> | null }[],
+        errors: Record<string, number> = {}
+    ) {
+        const removed: { id: string; options: unknown }[] = []
+        const filters: unknown[] = []
+        const fake = {
+            listImages: async (options: { filters: unknown }) => {
+                filters.push(options.filters)
+                return images
+            },
+            getImage: (id: string) => ({
+                remove: async (options: unknown) => {
+                    const statusCode = errors[id]
+                    if (statusCode) throw Object.assign(new Error('nope'), { statusCode })
+                    removed.push({ id, options })
+                },
+            }),
+        }
+        return { docker: new KJDocker(silentLogger, fake as never), removed, filters }
+    }
+
+    test('sólo las huérfanas de nuestros repos, nunca las ajenas', async () => {
+        const { docker, removed, filters } = setup([
+            { Id: 'ours', Labels: OURS },
+            {
+                Id: 'theirs',
+                Labels: { 'org.opencontainers.image.source': 'https://github.com/x/y' },
+            },
+            { Id: 'unlabelled', Labels: null },
+        ])
+
+        expect(await docker.removeOrphanImages()).toEqual({ removed: 1, failed: 0 })
+        expect(removed.map((r) => r.id)).toEqual(['ours'])
+        expect(filters).toEqual([{ dangling: ['true'] }])
+    })
+
+    test('una imagen en uso se salta y no corta las demás', async () => {
+        const { docker, removed } = setup(
+            [
+                { Id: 'in-use', Labels: OURS },
+                { Id: 'broken', Labels: OURS },
+                { Id: 'free', Labels: OURS },
+            ],
+            { 'in-use': 409, broken: 500 }
+        )
+
+        expect(await docker.removeOrphanImages()).toEqual({ removed: 1, failed: 1 })
+        expect(removed).toEqual([{ id: 'free', options: undefined }])
+    })
+})
+
 function makeDocker(fake: FakeDocker): KJDocker {
     return new KJDocker(silentLogger, fake as never)
 }

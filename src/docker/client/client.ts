@@ -61,6 +61,15 @@ function readOwnContainerId(): string | null {
 export const KJ_LABEL = 'kj-agent'
 export const KJ_LABEL_AGENT_ID = 'kj-agent-id'
 
+/** Set by our image builds; the only trace left on an image that lost its tag. */
+const IMAGE_SOURCE_LABEL = 'org.opencontainers.image.source'
+const KUJIRA_IMAGE_SOURCE_PREFIX = 'https://github.com/calltek/kj-'
+
+export interface OrphanImagesResult {
+    removed: number
+    failed: number
+}
+
 export interface KJContainerRunOptions {
     image_tag: string
     name: string
@@ -832,6 +841,31 @@ export class KJDocker {
             )
         })
         this.logger.info({ image_tag }, 'image pulled')
+    }
+
+    /**
+     * Remove the untagged images left behind by our own deploys. Only those
+     * built from a repo of ours: this may be a customer's machine, and whatever
+     * else is on it is theirs. Never forced, so an image still used by a
+     * container (even a stopped one) answers 409 and stays until the next pass.
+     */
+    async removeOrphanImages(): Promise<OrphanImagesResult> {
+        const images = await this.docker.listImages({ filters: { dangling: ['true'] } })
+        const result: OrphanImagesResult = { removed: 0, failed: 0 }
+        for (const image of images) {
+            const source = image.Labels?.[IMAGE_SOURCE_LABEL]
+            if (!source?.startsWith(KUJIRA_IMAGE_SOURCE_PREFIX)) continue
+            try {
+                await this.docker.getImage(image.Id).remove()
+                result.removed += 1
+            } catch (err) {
+                const status = (err as { statusCode?: number }).statusCode
+                if (status === 409 || status === 404) continue
+                result.failed += 1
+                this.logger.warn({ image_id: image.Id, err }, 'could not remove orphan image')
+            }
+        }
+        return result
     }
 
     /**
