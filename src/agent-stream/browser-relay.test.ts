@@ -5,17 +5,14 @@ import { BrowserRelay } from './browser-relay'
 
 function setup(opts: { stream?: boolean } = {}) {
     const writes: Array<{ agent_id: number; envelope: Record<string, unknown> }> = []
-    const pushes: Array<{ event: string; payload: Record<string, unknown> }> = []
     const relay = new BrowserRelay({
         write: (agent_id, envelope) => {
             writes.push({ agent_id, envelope })
             return opts.stream !== false
         },
-        push: (event, payload) =>
-            pushes.push({ event, payload: payload as Record<string, unknown> }),
         logger: KJLogger.create('error'),
     })
-    return { relay, writes, pushes }
+    return { relay, writes }
 }
 
 const action = {
@@ -64,44 +61,15 @@ describe('BrowserRelay', () => {
         expect(await pending).toMatchObject({ code: 'AGENT_NOT_RUNNING' })
     })
 
-    test('only frames, state and closed go up, stamped with the agent that sent them', () => {
-        const s = setup()
-        s.relay.onContainerLine(3, {
-            kj_channel: 'browser',
-            kind: 'frame',
-            user_id: 7,
-            agent_id: 9,
-            data: 'j',
-        })
-        s.relay.onContainerLine(3, { kj_channel: 'browser', kind: 'mcp:request', user_id: 7 })
-        s.relay.onContainerLine(3, { kj_channel: 'browser', kind: 'state', user_id: 0 })
-        expect(s.pushes).toEqual([
-            { event: 'agent:browser:frame', payload: { user_id: 7, agent_id: 3, data: 'j' } },
-        ])
-    })
-
-    test('frames go by «newest wins», one key per agent and person; the rest as always', () => {
-        const latest: Array<{ key: string; event: string }> = []
-        const pushes: string[] = []
-        const relay = new BrowserRelay({
-            write: () => true,
-            push: (event) => pushes.push(event),
-            pushLatest: (key, event) => latest.push({ key, event }),
-            logger: KJLogger.create('error'),
-        })
-        relay.onContainerLine(3, { kj_channel: 'browser', kind: 'frame', user_id: 7, data: 'j' })
-        relay.onContainerLine(3, { kj_channel: 'browser', kind: 'state', user_id: 7, url: 'x' })
-        expect(latest).toEqual([{ key: '3:7', event: 'agent:browser:frame' }])
-        expect(pushes).toEqual(['agent:browser:state'])
-    })
-
     test('a control from the person reaches the stdin as browser_control', () => {
         const s = setup()
-        expect(s.relay.control({ agent_id: 1, user_id: 7, op: 'view', type: 'input' })).toBe(true)
+        expect(s.relay.control({ agent_id: 1, user_id: 7, op: 'profile', type: 'input' })).toBe(
+            true
+        )
         expect(s.writes[0]).toEqual({
             agent_id: 1,
-            envelope: { user_id: 7, op: 'view', type: 'browser_control' },
+            envelope: { user_id: 7, op: 'profile', type: 'browser_control' },
         })
-        expect(s.relay.control({ agent_id: 1, user_id: -1, op: 'view' })).toBe(false)
+        expect(s.relay.control({ agent_id: 1, user_id: -1, op: 'profile' })).toBe(false)
     })
 })

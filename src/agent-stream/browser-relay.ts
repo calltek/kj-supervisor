@@ -10,14 +10,11 @@
  *   control → `agent:browser:control` (one way) → stdin
  *     `{ type: 'browser_control', user_id, op, … }`
  *
- *   stdout `{ kj_channel: 'browser', kind: 'frame' | 'state' | 'closed', user_id, … }`
- *     → `agent:browser:frame` / `:state` / `:closed` to the control
- *
  * It is the first channel from the control to the agent with an answer: the
  * others (`skills_changed`, `interrupt`) only go one way.
  *
- * What a person types (`op: 'input'`) can be a password: none of it is logged
- * here, neither the payload nor its fields.
+ * Nothing goes up on its own: agent images from before the view was removed
+ * can still emit `state` and `closed` lines, and they end here.
  */
 import { randomUUID } from 'node:crypto'
 
@@ -59,13 +56,6 @@ export function isBrowserLine(line: Record<string, unknown>): line is BrowserLin
 /** The longest an action may wait here, whatever the control asked. */
 const MAX_BUDGET_MS = 30_000
 
-/** What the agent's lines may push up: nothing else leaves. */
-const PUSHED = {
-    frame: 'agent:browser:frame',
-    state: 'agent:browser:state',
-    closed: 'agent:browser:closed',
-}
-
 const validUser = (v: unknown): v is number => Number.isInteger(v) && (v as number) > 0
 
 interface Pending {
@@ -81,12 +71,6 @@ export class BrowserRelay {
         private readonly deps: {
             /** A control envelope on the agent's stdin; false if there's no stream. */
             write: (agent_id: number, envelope: { type: string; [k: string]: unknown }) => boolean
-            push: (event: string, payload: unknown) => void
-            /**
-             * For frames: only the newest per key goes out while the uplink is
-             * busy (control.client.ts). Without it, frames go through `push`.
-             */
-            pushLatest?: (key: string, event: string, payload: unknown) => void
             logger: KJLogger
         }
     ) {}
@@ -117,7 +101,7 @@ export class BrowserRelay {
         })
     }
 
-    /** What the person does with their browser: one way, nothing logged. */
+    /** The person changed the session menu: one way. */
     control(p: BrowserControlPayload): boolean {
         if (!validUser(p.user_id) || typeof p.op !== 'string') return false
         const { agent_id, ...rest } = p
@@ -126,23 +110,12 @@ export class BrowserRelay {
 
     /** A `kj_channel: 'browser'` line from an agent's stdout. */
     onContainerLine(agent_id: number, line: BrowserLine): void {
-        const kind = line.kind
-        if (kind === 'result') {
-            const id = typeof line.id === 'string' ? line.id : ''
-            const p = this.pending.get(id)
-            // Only the agent the action went to may answer it.
-            if (!p || p.agent_id !== agent_id) return
-            this.settle(id, outcomeOf(line.outcome))
-            return
-        }
-        const event = typeof kind === 'string' ? PUSHED[kind as keyof typeof PUSHED] : undefined
-        if (!event || !validUser(line.user_id)) return
-        const { kj_channel: _c, kind: _k, ...rest } = line
-        // A frame behind another one still on its way is already old: on a
-        // slow uplink, queuing them all showed the page seconds late.
-        if (kind === 'frame' && this.deps.pushLatest)
-            this.deps.pushLatest(`${agent_id}:${line.user_id}`, event, { ...rest, agent_id })
-        else this.deps.push(event, { ...rest, agent_id })
+        if (line.kind !== 'result') return
+        const id = typeof line.id === 'string' ? line.id : ''
+        const p = this.pending.get(id)
+        // Only the agent the action went to may answer it.
+        if (!p || p.agent_id !== agent_id) return
+        this.settle(id, outcomeOf(line.outcome))
     }
 
     /** The agent's stream went away: whatever it was doing won't answer. */
