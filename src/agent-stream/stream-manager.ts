@@ -132,7 +132,7 @@ export interface AgentStreamManagerDeps {
     mcp?: McpDispatcher
     /** Starts isolated conversations with their own uid (kj-agent-base, no root). */
     exec?: ExecDispatcher
-    /** A person's web browser in the agent: actions, frames and state (browser-relay.ts). */
+    /** A person's web browser in the agent: its actions (browser-relay.ts). */
     browser?: BrowserRelay
     /**
      * kj-keychain: learns the agent's token from the container env on every
@@ -670,7 +670,7 @@ export class AgentStreamManager {
             return
         }
 
-        // The launcher's web browser: answers to actions, and what the person sees.
+        // The launcher's web browser: answers to actions.
         if (isBrowserLine(payload)) {
             this.browser?.onContainerLine(entry.agent_id, payload)
             return
