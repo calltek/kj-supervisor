@@ -1615,6 +1615,10 @@ export class KJDocker {
                 RestartPolicy: source.HostConfig.RestartPolicy,
                 NetworkMode: source.HostConfig.NetworkMode,
                 GroupAdd: source.HostConfig.GroupAdd,
+                // On a host that remaps users (a shared server) the supervisor
+                // runs outside the remap (`--userns=host`, install.sh); a clone
+                // without it couldn't take the host network and wouldn't start.
+                UsernsMode: source.HostConfig.UsernsMode || undefined,
                 // No ExtraHosts: this is the supervisor, not an agent — it runs
                 // with `--network host` and the Docker socket, and the host
                 // alias is an agent concern (host-access.ts, #34).
