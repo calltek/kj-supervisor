@@ -26,6 +26,7 @@ import type {
     AgentStatusReporter,
 } from '../../reporters/agent-status/agent-status.reporter'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
+import type { NetPolicyService } from '../client/net-policy-service'
 
 export interface KJDockerEventsWatcherDeps {
     docker: KJDocker
@@ -33,6 +34,13 @@ export interface KJDockerEventsWatcherDeps {
     status: AgentStatusReporter
     streams: AgentStreamManager
     logger: KJLogger
+    /**
+     * Rules written into a container's network namespace die with it: Docker
+     * restarting a crashed agent (`unless-stopped`) brings it back with none.
+     * So every start puts them back — on a shared machine, or with a list —
+     * and an agent they can't be written for is stopped (net-policy-service).
+     */
+    netPolicy?: Pick<NetPolicyService, 'enforce'>
 }
 
 const RECONNECT_DELAY_MS = 2_000
@@ -50,6 +58,7 @@ export class KJDockerEventsWatcher {
     private readonly status: AgentStatusReporter
     private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
+    private readonly netPolicy?: Pick<NetPolicyService, 'enforce'>
 
     private stream: NodeJS.ReadableStream | null = null
     private stopped = false
@@ -60,6 +69,7 @@ export class KJDockerEventsWatcher {
         this.tracker = deps.tracker
         this.status = deps.status
         this.streams = deps.streams
+        this.netPolicy = deps.netPolicy
         this.logger = deps.logger.child({ component: 'docker-events' })
     }
 
@@ -157,6 +167,8 @@ export class KJDockerEventsWatcher {
             this.streams.detach(agent_id)
         }
 
+        if (event.Action === 'start') this.reapplyNetPolicy(agent_id, container_id)
+
         if (this.tracker.isTracked(container_id)) {
             this.logger.debug(
                 { action: event.Action, container_id, agent_id },
@@ -173,6 +185,24 @@ export class KJDockerEventsWatcher {
             'external docker event — reporting drift'
         )
         this.status.push(report)
+    }
+
+    private reapplyNetPolicy(agent_id: number, container_id: string): void {
+        if (!this.netPolicy) return
+        void this.netPolicy
+            .enforce(agent_id, container_id)
+            .then((r) => {
+                if (r.ok || !r.stopped) return
+                this.status.push({
+                    agent_id,
+                    status: 'ERROR',
+                    container_id: null,
+                    last_action: `network policy failed: ${r.error}`,
+                    last_action_code: 'network_policy_failed',
+                    last_action_at: Date.now(),
+                })
+            })
+            .catch(() => undefined)
     }
 
     /**

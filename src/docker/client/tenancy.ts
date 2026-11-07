@@ -43,6 +43,14 @@ export const HELPER_HARDENING = {
     SecurityOpt: ['no-new-privileges'],
 } as const
 
+/**
+ * The uids a remapped container needs: the isolated conversations run as
+ * 200000-299999 (net-policy.ts ISOLATED_UIDS). Docker's default remap gives
+ * 65536, and then neither their `exec -u` nor the rules naming them work;
+ * prepare-shared-host.sh gives `dockremap` 400000.
+ */
+export const USERNS_MIN_IDS = 300_000
+
 /** Where agent images come from. On a shared machine nothing else is run. */
 export const AGENT_IMAGE_REGISTRY = 'ghcr.io/calltek/'
 
@@ -138,16 +146,30 @@ export function quotaProjectId(agent_id: number): number {
  * cap it. `mount` is the XFS filesystem Docker's root lives on, `dir` the
  * volume's `_data` under it. Both come from the daemon, never from the
  * control, and are checked to be plain absolute paths before they get here.
+ *
+ * Two things only a real disk showed (2026-11-08): `xfs_quota` needs the
+ * filesystem's block device, which a container doesn't have — so the script
+ * makes the node from the mount's major:minor (CAP_MKNOD) — and it exits 0
+ * when it fails. So nothing is taken on its word: the script reads back the
+ * directory's project and the project's limit, and only then says `quota`.
  */
 export function buildQuotaScript(mount: string, dir: string, project: number, gb: number): string {
     const safe = /^\/[A-Za-z0-9._/-]+$/
     if (!safe.test(mount) || !safe.test(dir)) throw new Error('bad quota path')
     if (!Number.isInteger(project) || project <= 0) throw new Error('bad quota project')
     if (!Number.isInteger(gb) || gb <= 0 || gb > 10_000) throw new Error('bad quota size')
+    const kb = gb * 1024 * 1024
+    const row = `awk -v m=${mount} '$5==m'`
     return [
         'set -eu',
+        `src=$(${row} /proc/self/mountinfo | awk '{for(i=7;i<=NF;i++) if($i=="-"){print $(i+2); exit}}')`,
+        `majmin=$(${row} /proc/self/mountinfo | awk '{print $3; exit}')`,
+        'case "$src" in /dev/*) ;; *) echo "no block device under the mount" >&2; exit 3 ;; esac',
+        '[ -b "$src" ] || { mkdir -p "$(dirname "$src")"; mknod "$src" b "${majmin%%:*}" "${majmin##*:}"; }',
         `xfs_quota -x -c 'project -s -p ${dir} ${project}' ${mount} >/dev/null`,
         `xfs_quota -x -c 'limit -p bhard=${gb}g ${project}' ${mount}`,
+        `xfs_io -r -c lsproj ${dir} | grep -q 'projid = ${project}$' || { echo 'project not set' >&2; exit 4; }`,
+        `xfs_quota -x -c 'report -p -n -N' ${mount} | awk '$1=="#${project}" && $4==${kb} {f=1} END {exit !f}' || { echo 'limit not set' >&2; exit 5; }`,
         'echo quota',
     ].join('\n')
 }

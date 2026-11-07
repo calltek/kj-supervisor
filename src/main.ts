@@ -320,14 +320,15 @@ async function main(): Promise<void> {
             client.emitWithAck<unknown>('keychain:resolve', payload, timeout_ms),
     })
     streams = new AgentStreamManager({ docker, client, logger, mcp, exec, browser, keychain })
+    const netPolicy = new NetPolicyService(docker, logger)
     const eventsWatcher = new KJDockerEventsWatcher({
         docker,
         tracker,
         status: statusReporter,
         streams,
         logger,
+        netPolicy,
     })
-    const netPolicy = new NetPolicyService(docker, logger)
     const spawnHandler = new AgentSpawnHandler({
         docker,
         status: statusReporter,

@@ -59,6 +59,7 @@ import {
     SharedSpawnRefusedError,
     VolumeQuotaError,
     type Tenancy,
+    USERNS_MIN_IDS,
     buildQuotaScript,
     normalizeTenancy,
     quotaProjectId,
@@ -595,9 +596,12 @@ export class KJDocker {
                     DriverStatus?: unknown
                 }
                 const sec = Array.isArray(info.SecurityOptions) ? info.SecurityOptions : []
-                const userns_remap = sec.some(
-                    (s) => typeof s === 'string' && s.includes('name=userns')
-                )
+                // Remapped, and wide enough for the isolated conversations'
+                // uids: with Docker's default 65536 neither their `exec -u`
+                // nor the network rules that name them can work.
+                const userns_remap =
+                    sec.some((s) => typeof s === 'string' && s.includes('name=userns')) &&
+                    (await this.remappedIdCount()) >= USERNS_MIN_IDS
                 const status = Array.isArray(info.DriverStatus) ? info.DriverStatus : []
                 const backing = status.find(
                     (p) => Array.isArray(p) && p[0] === 'Backing Filesystem'
@@ -615,6 +619,36 @@ export class KJDocker {
             })
         }
         return this.hostIsolationCache
+    }
+
+    /** How many uids a container gets under the remap (its uid_map); 0 if unknown. */
+    private async remappedIdCount(): Promise<number> {
+        try {
+            await this.ensureFenceImage()
+            const c = await this.docker.createContainer({
+                Image: FENCE_IMAGE,
+                Cmd: ['cat', '/proc/self/uid_map'],
+                HostConfig: { NetworkMode: 'none', ...HELPER_HARDENING, ...HELPER_LIMITS },
+            })
+            try {
+                await c.start()
+                await withTimeout(c.wait(), FENCE_TIMEOUT_MS, 'uid map')
+                const map = stripDockerFrames(await c.logs({ stdout: true, follow: false }))
+                return map
+                    .split('\n')
+                    .map((l) => Number(l.trim().split(/\s+/)[2]))
+                    .filter((n) => Number.isInteger(n) && n > 0)
+                    .reduce((a, b) => a + b, 0)
+            } finally {
+                await c.remove({ force: true }).catch(() => undefined)
+            }
+        } catch (err) {
+            this.logger.info(
+                { err: err instanceof Error ? err.message : String(err) },
+                'could not read the remapped uid range'
+            )
+            return 0
+        }
     }
 
     private async probeStorageQuota(): Promise<boolean> {
@@ -677,13 +711,15 @@ export class KJDocker {
             Image: QUOTA_IMAGE,
             Cmd: ['sh', '-c', script],
             HostConfig: {
-                // xfs_quota needs the filesystem itself, and SYS_ADMIN for the
-                // quotactl. Nothing else: no network, nothing of the agent's.
+                // xfs_quota needs the filesystem, its block device (made here:
+                // MKNOD), SYS_ADMIN for the quotactl and FOWNER to set the
+                // project on a directory owned by the agent's (remapped) uid.
+                // Nothing else: no network, nothing of the agent's.
                 Binds: [`${root_dir}:${root_dir}`],
                 NetworkMode: 'none',
                 UsernsMode: 'host',
                 CapDrop: ['ALL'],
-                CapAdd: ['SYS_ADMIN'],
+                CapAdd: ['SYS_ADMIN', 'MKNOD', 'FOWNER'],
                 SecurityOpt: ['no-new-privileges'],
                 ...HELPER_LIMITS,
             },
@@ -1093,6 +1129,20 @@ export class KJDocker {
 
     /** An alpine with some packages, committed under `image` and kept. */
     private async buildToolImage(image: string, packages: string[]): Promise<void> {
+        // Alpine's mirror fails now and then (seen on the shared-host test,
+        // 2026-11-08): one more try before a shared agent refuses to start.
+        try {
+            await this.buildToolImageOnce(image, packages)
+        } catch (err) {
+            this.logger.warn(
+                { image, err: err instanceof Error ? err.message : String(err) },
+                'tool image build failed — trying once more'
+            )
+            await this.buildToolImageOnce(image, packages)
+        }
+    }
+
+    private async buildToolImageOnce(image: string, packages: string[]): Promise<void> {
         if (await this.imageExistsLocally(image)) return
         const base = 'alpine:3.20'
         if (!(await this.imageExistsLocally(base))) await this.pullImage(base, () => {})

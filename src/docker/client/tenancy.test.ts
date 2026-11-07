@@ -58,6 +58,10 @@ describe('tenancy', () => {
             20
         )
         expect(s).toContain('limit -p bhard=20g 1000007')
+        // xfs_quota exits 0 on failure: the script reads both back.
+        expect(s).toContain("grep -q 'projid = 1000007$'")
+        expect(s).toContain('$4==20971520')
+        expect(s).toContain('mknod "$src" b')
         expect(() => buildQuotaScript('/var/lib/docker', "/x'; rm -rf /", 1, 1)).toThrow()
         expect(() => buildQuotaScript('/var/lib/docker', '/x', 1, 0)).toThrow()
     })
