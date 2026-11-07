@@ -43,8 +43,32 @@ describe('the floor', () => {
         expect(conv).toContain(`-A ${CONV_CHAIN} -d 203.0.113.7 -j REJECT`)
     })
 
-    test('lets kj-keychain and the always-allowed endpoints through first', () => {
+    test('a dedicated machine without lists leaves the conversations open', () => {
         const conv = rules(buildNetPolicyScript(defaultNetPolicy(), T), 'iptables', CONV_CHAIN)
+        expect(conv.some((r) => r.includes('REJECT'))).toBe(false)
+        expect(conv.at(-1)).toBe(`-A ${CONV_CHAIN} -j ACCEPT`)
+    })
+
+    test('a shared machine floors the conversations and keeps them off the LAN', () => {
+        const shared = { ...T, shared: true }
+        const conv = rules(buildNetPolicyScript(defaultNetPolicy(), shared), 'iptables', CONV_CHAIN)
+        expect(conv).toContain(`-A ${CONV_CHAIN} -d 172.17.0.5/16 -j REJECT`)
+        expect(conv).toContain(`-A ${CONV_CHAIN} -d 192.168.0.0/16 -j REJECT`)
+        expect(conv).toContain(`-A ${CONV_CHAIN} -d 169.254.0.0/16 -j REJECT`)
+        const conv6 = rules(
+            buildNetPolicyScript(defaultNetPolicy(), shared),
+            'ip6tables',
+            CONV_CHAIN
+        )
+        expect(conv6).toContain(`-A ${CONV_CHAIN} -d fc00::/7 -j REJECT`)
+    })
+
+    test('lets kj-keychain and the always-allowed endpoints through first', () => {
+        const conv = rules(
+            buildNetPolicyScript(defaultNetPolicy(), { ...T, shared: true }),
+            'iptables',
+            CONV_CHAIN
+        )
         const keychain = conv.indexOf(
             `-A ${CONV_CHAIN} -d 172.17.0.1 -p tcp --dport 9890 -j ACCEPT`
         )

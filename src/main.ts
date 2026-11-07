@@ -34,6 +34,7 @@ import {
 } from './config/settings'
 import { KJDocker } from './docker/client/client'
 import { NetPolicyService } from './docker/client/net-policy-service'
+import type { SharedReadiness } from './docker/client/tenancy'
 import { KJDockerEventsWatcher } from './docker/events-watcher/events-watcher'
 import { startImageCleanupLoop } from './docker/image-cleanup/image-cleanup'
 import { OperationTracker } from './docker/operation-tracker/operation-tracker'
@@ -355,6 +356,7 @@ async function main(): Promise<void> {
         streams,
         logger,
         running: imageReporter,
+        docker,
         netPolicy,
     })
     const backupHandler = new AgentBackupHandler({
@@ -365,7 +367,10 @@ async function main(): Promise<void> {
     })
     const oauthExchangeHandler = new OAuthExchangeHandler({ logger })
     const oauthRevokeHandler = new OAuthRevokeHandler({ logger })
-    const connectionTestHandler = new ConnectionTestHandler({ logger })
+    const connectionTestHandler = new ConnectionTestHandler({
+        logger,
+        isShared: () => docker.isShared(),
+    })
     const sessionsPurgeHandler = new AgentSessionsPurgeHandler({ docker, streams, logger })
     const upgradeHandler = new SupervisorUpgradeHandler({
         docker,
@@ -527,12 +532,17 @@ async function main(): Promise<void> {
                 if (c.agent_id === null) continue
                 const p = docker.netPolicyOf(c.agent_id)
                 const named = p.always.some((e) => !isIP(e.host))
-                if (named && p.mode === 'allow')
-                    await netPolicy.enforce(c.agent_id, c.container_id)
+                if (named && p.mode === 'allow') await netPolicy.enforce(c.agent_id, c.container_id)
             }
         })()
     }, NET_POLICY_REFRESH_MS).unref?.()
 
+    // The partner turned sharing on or off in the panel. Running agents keep
+    // their container until it's recreated; what changes now is what starts
+    // next and the rules written from here on. Typed locally until protocol.ts.
+    client.onPush<{ tenancy?: unknown }>('server:tenancy', (payload) => {
+        docker.setTenancy(payload?.tenancy)
+    })
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
         const delivered = streams.warmup(payload)
         logger
@@ -666,6 +676,7 @@ async function main(): Promise<void> {
         // registration of the same box (one machine = one server = one org).
         // Best-effort: if the daemon won't answer we simply don't report it.
         const machine_id = await docker.machineId().catch(() => undefined)
+        const isolation = await docker.sharedReadiness()
 
         const payload: ServerHelloPayload = {
             kj_agent_version: settings.kj_agent_version,
@@ -680,7 +691,11 @@ async function main(): Promise<void> {
             cpu_cores: cpus().length,
             ram_mb: Math.round(totalmem() / 1024 / 1024),
             os: `${platform()} ${release()}`,
-        }
+            // What this host offers a shared tenancy (tenancy.ts): the panel
+            // only lets a partner share a machine where it holds. Typed locally
+            // until the control's protocol.ts ships it; an older one ignores it.
+            ...(isolation ? { isolation } : {}),
+        } as ServerHelloPayload & { isolation?: SharedReadiness }
 
         let ack: ServerHelloAck
         try {
@@ -720,6 +735,9 @@ async function main(): Promise<void> {
         }
 
         logger.info({ protocol_version: ack.protocol_version }, 'handshake complete')
+
+        // Who this machine serves. Absent (an older control) = dedicated.
+        docker.setTenancy((ack as { tenancy?: unknown }).tenancy)
 
         // Blue/green self-upgrade completion: if we're the fresh clone (our
         // container name differs from the canonical KJ_SUPERVISOR_CONTAINER),

@@ -161,7 +161,18 @@ export interface NetTargets {
     gateway: string | null
     keychain_port: number
     always: ResolvedEndpoint[]
+    /**
+     * A shared machine (tenancy.ts): the conversations get the floor and are
+     * kept off the private ranges too, like the browser — one tenant must not
+     * reach another, this host, or the LAN it sits on. On a dedicated machine
+     * the conversations stay as they were before lists existed: open, until
+     * someone writes a list for them.
+     */
+    shared?: boolean
 }
+
+/** IPv6 that is not the internet, for a shared machine's conversations. */
+const PRIVATE_V6 = ['fc00::/7']
 
 const only = (ips: string[], family: 4 | 6) => ips.filter((ip) => cidrFamily(ip) === family)
 
@@ -193,16 +204,21 @@ export function chainRules(
             out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
     if (family === 4 && t.gateway && cidrFamily(t.gateway) === 4)
         out.push(`${a} -d ${t.gateway} -p tcp --dport ${t.keychain_port} -j ACCEPT`)
-    const floor =
-        family === 4
-            ? [...FLOOR_V4, ...only(t.docker_nets, 4), ...only(t.host_ips, 4)]
-            : [...FLOOR_V6, ...only(t.docker_nets, 6), ...only(t.host_ips, 6)]
+    // The floor: always for the browser and on a shared machine; for the
+    // conversations of a dedicated one, only once a list exists.
+    const floored = browser || !!t.shared || isCustomNetPolicy({ ...scope, always: [] })
+    const floor = !floored
+        ? []
+        : family === 4
+          ? [...FLOOR_V4, ...only(t.docker_nets, 4), ...only(t.host_ips, 4)]
+          : [...FLOOR_V6, ...only(t.docker_nets, 6), ...only(t.host_ips, 6)]
     for (const n of floor) out.push(`${a} -d ${n} -j REJECT`)
     const hit = scope.mode === 'allow' ? 'ACCEPT' : 'REJECT'
     for (const e of scope.entries)
         if (cidrFamily(e.cidr) === family) out.push(...portRules(`${a} -d ${e.cidr}`, e.ports, hit))
-    if (browser && family === 4 && scope.mode === 'deny')
-        for (const n of PRIVATE_V4) out.push(`${a} -d ${n} -j REJECT`)
+    if ((browser || t.shared) && scope.mode === 'deny')
+        for (const n of family === 4 ? PRIVATE_V4 : t.shared ? PRIVATE_V6 : [])
+            out.push(`${a} -d ${n} -j REJECT`)
     out.push(`${a} -j ${scope.mode === 'allow' ? 'REJECT' : 'ACCEPT'}`)
     return out
 }

@@ -109,15 +109,19 @@ export interface ConnectionTestHandlerDeps {
     logger: KJLogger
     /** Injected so the tests do not depend on this machine's network. */
     fetchImpl?: typeof fetch
+    /** Whether this machine serves several organizations (tenancy.ts). */
+    isShared?: () => boolean
 }
 
 export class ConnectionTestHandler {
     private readonly logger: KJLogger
     private readonly fetchImpl: typeof fetch
+    private readonly isShared: () => boolean
 
     constructor(deps: ConnectionTestHandlerDeps) {
         this.logger = deps.logger.child({ component: 'connection-test' })
         this.fetchImpl = deps.fetchImpl ?? fetch
+        this.isShared = deps.isShared ?? (() => false)
     }
 
     async handle(payload: {
@@ -134,6 +138,27 @@ export class ConnectionTestHandler {
         // deadline, whose `catch` reads as «update your server». The customer
         // would be told to fix a supervisor that is perfectly fine.
         const deadline = Date.now() + (payload.timeout_ms > 0 ? payload.timeout_ms : 10_000)
+
+        // A shared machine only checks the subscription, whose address is
+        // fixed above. An address the customer typed is the reason these
+        // checks run from here — their LAN, a model on their host — and on a
+        // machine they share that is someone else's host and the other
+        // tenants' agents. It runs with this supervisor's host network, so
+        // there is nothing to fence it with: it doesn't run.
+        if (this.isShared() && check.kind !== 'anthropic_oauth') {
+            this.logger.warn(
+                { request_id, kind: check.kind },
+                'local check refused on a shared server'
+            )
+            return {
+                ok: false,
+                error: {
+                    code: WS_ERROR_CODES.INTERNAL_ERROR,
+                    message: 'Local and private connections are not available on a shared server',
+                    retryable: false,
+                },
+            }
+        }
 
         try {
             if (check.kind === 'anthropic_oauth') {

@@ -23,6 +23,7 @@ import type { KJLogger } from '../../logger'
 import { describeDockerRunFailure } from '../../docker/spawn-error'
 import { isMutableTag } from './image-tag'
 import type { NetPolicyService } from '../../docker/client/net-policy-service'
+import { SharedSpawnRefusedError, VolumeQuotaError } from '../../docker/client/tenancy'
 
 export interface AgentSpawnHandlerDeps {
     docker: KJDocker
@@ -363,12 +364,20 @@ export class AgentSpawnHandler {
             })
         } catch (err) {
             log.error({ err: errMessage(err) }, 'docker run failed')
+            const refused = err instanceof SharedSpawnRefusedError
+            const quota = err instanceof VolumeQuotaError
             this.status.push({
                 agent_id: payload.agent_id,
                 status: 'ERROR',
                 container_id: null,
-                last_action: describeDockerRunFailure(err, 'docker run failed'),
-                last_action_code: 'docker_run_failed',
+                last_action: refused
+                    ? `${err.message} [${err.code}]`
+                    : describeDockerRunFailure(err, 'docker run failed'),
+                last_action_code: refused
+                    ? 'shared_refused'
+                    : quota
+                      ? 'volume_quota_failed'
+                      : 'docker_run_failed',
                 last_action_at: Date.now(),
             })
             return

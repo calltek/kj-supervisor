@@ -32,6 +32,8 @@ export interface AgentSyncHandlerDeps {
     running?: RunningListener
     /** What the agent may reach (net-policy-service.ts). Optional for tests. */
     netPolicy?: Pick<NetPolicyService, 'enforce'>
+    /** Who a container belongs to, by its label. Optional for tests. */
+    docker?: { agentIdOfContainer(container_id: string): Promise<number | null> }
 }
 
 export class AgentSyncHandler {
@@ -40,7 +42,10 @@ export class AgentSyncHandler {
     private readonly running?: RunningListener
     private readonly netPolicy?: AgentSyncHandlerDeps['netPolicy']
 
+    private readonly docker?: AgentSyncHandlerDeps['docker']
+
     constructor(deps: AgentSyncHandlerDeps) {
+        this.docker = deps.docker
         this.netPolicy = deps.netPolicy
         this.streams = deps.streams
         this.running = deps.running
@@ -93,6 +98,18 @@ export class AgentSyncHandler {
     }
 
     private async attachOne(entry: AgentSyncEntry): Promise<void> {
+        // The container must be THIS agent's: attached to another, agent X's
+        // stream would carry agent Y's output and Y's tool calls would go out
+        // stamped as X — on a shared machine, another tenant's. The label is
+        // ours (agents can't create containers or labels), the id is the
+        // control's: if they disagree, nothing is attached.
+        if (this.docker) {
+            const owner = await this.docker.agentIdOfContainer(entry.container_id)
+            if (owner !== entry.agent_id)
+                throw new Error(
+                    `container ${entry.container_id} belongs to agent ${owner ?? 'none'}, not ${entry.agent_id}`
+                )
+        }
         await this.streams.attach({
             agent_id: entry.agent_id,
             container_id: entry.container_id,
