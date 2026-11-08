@@ -53,6 +53,43 @@ async function flush(): Promise<void> {
 }
 
 describe('KJDockerEventsWatcher', () => {
+    test('a restarted container gets its network rules back; if they fail, ERROR', async () => {
+        const docker = new FakeDocker()
+        const client = new FakeClient()
+        const enforced: Array<[number, string]> = []
+        const watcher = new KJDockerEventsWatcher({
+            streams: new FakeStreams() as never,
+            docker: docker as never,
+            tracker: new OperationTracker(),
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+            netPolicy: {
+                enforce: async (agent_id, container_id) => {
+                    enforced.push([agent_id, container_id])
+                    return agent_id === 8
+                        ? { ok: false, error: 'iptables', stopped: true }
+                        : { ok: true }
+                },
+            },
+        })
+
+        await watcher.start()
+        docker.stream.write(makeEvent('start', 'c-7', 7))
+        docker.stream.write(makeEvent('start', 'c-8', 8))
+        await flush()
+
+        expect(enforced).toEqual([
+            [7, 'c-7'],
+            [8, 'c-8'],
+        ])
+        const list = statuses(client)
+        expect(list).toHaveLength(1)
+        expect(list[0]?.agent_id).toBe(8)
+        expect(list[0]?.status).toBe('ERROR')
+        expect(list[0]?.last_action_code).toBe('network_policy_failed')
+        watcher.stop()
+    })
+
     test('translates external die → STOPPED push', async () => {
         const docker = new FakeDocker()
         const tracker = new OperationTracker()

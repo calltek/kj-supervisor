@@ -147,3 +147,42 @@ describe('AgentSyncHandler', () => {
         expect(docker.attached).toEqual(['c-1'])
     })
 })
+
+describe('AgentSyncHandler — container ownership', () => {
+    test('a container labeled for another agent is never attached', async () => {
+        const docker = new FakeDocker()
+        const streams = new AgentStreamManager({
+            docker: docker as unknown as ConstructorParameters<
+                typeof AgentStreamManager
+            >[0]['docker'],
+            client: new FakeClient(),
+            logger: silentLogger,
+        })
+        const owners: Record<string, number> = { 'c-1': 1, 'c-2': 9 }
+        const handler = new AgentSyncHandler({
+            streams,
+            logger: silentLogger,
+            docker: { agentIdOfContainer: async (id) => owners[id] ?? null },
+        })
+        await handler.handle({
+            request_id: 'req-own',
+            entries: [
+                {
+                    agent_id: 1,
+                    container_id: 'c-1',
+                    session_id: 's1',
+                    oauth_token: 't',
+                    conversations: [],
+                },
+                {
+                    agent_id: 2,
+                    container_id: 'c-2',
+                    session_id: 's2',
+                    oauth_token: 't',
+                    conversations: [],
+                },
+            ],
+        })
+        expect(docker.attached).toEqual(['c-1'])
+    })
+})

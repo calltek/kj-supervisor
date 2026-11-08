@@ -5,6 +5,7 @@
  * in tests and easier to swap implementation later.
  */
 
+import dns from 'node:dns'
 import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
@@ -24,7 +25,6 @@ import {
     withoutIsolationCaps,
 } from './hardening'
 import {
-    buildBrowserFenceScript,
     FENCE_BUILD_TIMEOUT_MS,
     FENCE_IMAGE,
     FENCE_TIMEOUT_MS,
@@ -34,8 +34,41 @@ import {
     RESOLV_CONF,
     withTimeout,
 } from './browser-fence'
-import { agentHostAliases, isHostGatewayUnsupported, recreatedHostAliases } from './host-access'
+import {
+    HOST_ALIAS,
+    agentHostAliases,
+    isHostGatewayUnsupported,
+    recreatedHostAliases,
+} from './host-access'
+import {
+    buildNetPolicyScript,
+    defaultNetPolicy,
+    type NetPolicy,
+    normalizeNetPolicy,
+    type ResolvedEndpoint,
+} from './net-policy'
+import { KEYCHAIN_AGENT_PORT } from '../../keychain/control-protocol'
 import { buildSeedScript } from './seed-script'
+import {
+    AGENT_PIDS_LIMIT,
+    HELPER_HARDENING,
+    HELPER_LIMITS,
+    SHARED_DEFAULT_DISK_GB,
+    type SharedReadiness,
+    type SharedSpawnCheck,
+    SharedSpawnRefusedError,
+    VolumeQuotaError,
+    type Tenancy,
+    USERNS_MIN_IDS,
+    buildQuotaScript,
+    normalizeTenancy,
+    quotaProjectId,
+    sharedReadiness,
+    sharedSpawnRefusal,
+} from './tenancy'
+
+/** The helper that sets XFS project quotas (shared machines only). */
+const QUOTA_IMAGE = 'kj-quota:1'
 
 /**
  * Our own container id, read from /proc — works under `--network host` where
@@ -55,6 +88,12 @@ function readOwnContainerId(): string | null {
         }
     }
     return null
+}
+
+/** Every address a name resolves to, both families. */
+async function dnsLookupAll(host: string): Promise<string[]> {
+    const found = await dns.promises.lookup(host, { all: true, verbatim: true })
+    return [...new Set(found.map((a) => a.address))]
 }
 
 /** Labels we attach to every container we spawn so we can reconcile later. */
@@ -482,6 +521,245 @@ export class KJDocker {
     }
 
     /**
+     * Who this machine serves (tenancy.ts). Dedicated until the control says
+     * otherwise: a supervisor that hasn't heard yet behaves exactly as before.
+     */
+    private tenancy: Tenancy = 'dedicated'
+
+    setTenancy(raw: unknown): Tenancy {
+        const next = normalizeTenancy(raw)
+        if (next !== this.tenancy)
+            this.logger.info({ from: this.tenancy, to: next }, 'server tenancy changed')
+        this.tenancy = next
+        return next
+    }
+
+    /** The agent a container belongs to, by our label; null if none or no such container. */
+    async agentIdOfContainer(container_id: string): Promise<number | null> {
+        const info = await this.docker
+            .getContainer(container_id)
+            .inspect()
+            .catch(() => null)
+        const id = Number(info?.Config?.Labels?.[KJ_LABEL_AGENT_ID])
+        return Number.isInteger(id) && id > 0 ? id : null
+    }
+
+    isShared(): boolean {
+        return this.tenancy === 'shared'
+    }
+
+    /**
+     * What this host offers a shared tenancy, read off the daemon: users
+     * remapped (`userns-remap`), Docker's root on XFS with project quotas, and
+     * our network helper able to run. Reported in `server:hello` so the panel
+     * only offers sharing where it holds.
+     *
+     * The first answer can take a while (it may build the helper image), and
+     * the handshake can't wait for it: past `wait_ms` this returns undefined
+     * and the work carries on, so the next `server:hello` has it.
+     */
+    async sharedReadiness(wait_ms = 3_000): Promise<SharedReadiness | undefined> {
+        if (!this.readinessJob) {
+            const job = (async () => {
+                const host = await this.hostIsolation()
+                const network_rules = await this.ensureFenceImage()
+                    .then(() => true)
+                    .catch(() => false)
+                return sharedReadiness({ ...host, network_rules })
+            })()
+            this.readinessJob = job
+            // A daemon that wasn't answering gets asked again next time.
+            job.catch(() => {
+                this.readinessJob = null
+                this.hostIsolationCache = null
+            })
+        }
+        return withTimeout(this.readinessJob, wait_ms, 'shared readiness').catch(() => undefined)
+    }
+
+    private readinessJob: Promise<SharedReadiness> | null = null
+
+    private hostIsolationCache: Promise<{
+        userns_remap: boolean
+        disk_quota: boolean
+        root_dir: string | null
+    }> | null = null
+
+    /** userns + quota support, asked once per process (both need a daemon restart to change). */
+    private hostIsolation() {
+        if (!this.hostIsolationCache) {
+            this.hostIsolationCache = (async () => {
+                const info = (await this.docker.info()) as {
+                    SecurityOptions?: unknown
+                    DockerRootDir?: unknown
+                    Driver?: unknown
+                    DriverStatus?: unknown
+                }
+                const sec = Array.isArray(info.SecurityOptions) ? info.SecurityOptions : []
+                // Remapped, and wide enough for the isolated conversations'
+                // uids: with Docker's default 65536 neither their `exec -u`
+                // nor the network rules that name them can work.
+                const userns_remap =
+                    sec.some((s) => typeof s === 'string' && s.includes('name=userns')) &&
+                    (await this.remappedIdCount()) >= USERNS_MIN_IDS
+                const status = Array.isArray(info.DriverStatus) ? info.DriverStatus : []
+                const backing = status.find(
+                    (p) => Array.isArray(p) && p[0] === 'Backing Filesystem'
+                )?.[1]
+                const root_dir = typeof info.DockerRootDir === 'string' ? info.DockerRootDir : null
+                const xfs = info.Driver === 'overlay2' && backing === 'xfs'
+                // XFS alone isn't enough: without `pquota` on the mount Docker
+                // refuses a size. Asking it for a tiny container is the only
+                // reliable test, and it never starts.
+                const disk_quota = xfs && root_dir ? await this.probeStorageQuota() : false
+                return { userns_remap, disk_quota, root_dir }
+            })()
+            this.hostIsolationCache.catch(() => {
+                this.hostIsolationCache = null
+            })
+        }
+        return this.hostIsolationCache
+    }
+
+    /** How many uids a container gets under the remap (its uid_map); 0 if unknown. */
+    private async remappedIdCount(): Promise<number> {
+        try {
+            await this.ensureFenceImage()
+            const c = await this.docker.createContainer({
+                Image: FENCE_IMAGE,
+                Cmd: ['cat', '/proc/self/uid_map'],
+                HostConfig: { NetworkMode: 'none', ...HELPER_HARDENING, ...HELPER_LIMITS },
+            })
+            try {
+                await c.start()
+                await withTimeout(c.wait(), FENCE_TIMEOUT_MS, 'uid map')
+                const map = stripDockerFrames(await c.logs({ stdout: true, follow: false }))
+                return map
+                    .split('\n')
+                    .map((l) => Number(l.trim().split(/\s+/)[2]))
+                    .filter((n) => Number.isInteger(n) && n > 0)
+                    .reduce((a, b) => a + b, 0)
+            } finally {
+                await c.remove({ force: true }).catch(() => undefined)
+            }
+        } catch (err) {
+            this.logger.info(
+                { err: err instanceof Error ? err.message : String(err) },
+                'could not read the remapped uid range'
+            )
+            return 0
+        }
+    }
+
+    private async probeStorageQuota(): Promise<boolean> {
+        try {
+            await this.ensureFenceImage()
+            const c = await this.docker.createContainer({
+                Image: FENCE_IMAGE,
+                Cmd: ['true'],
+                HostConfig: { StorageOpt: { size: '1G' }, ...HELPER_HARDENING, ...HELPER_LIMITS },
+            })
+            await c.remove({ force: true }).catch(() => undefined)
+            return true
+        } catch (err) {
+            this.logger.info(
+                { err: err instanceof Error ? err.message : String(err) },
+                'this host does not enforce disk quotas'
+            )
+            return false
+        }
+    }
+
+    /**
+     * On a shared machine, refuse what would let one tenant hurt another —
+     * BEFORE anything is stopped or created. Throws `SharedSpawnRefusedError`.
+     */
+    private async assertSharedSpawn(c: Omit<SharedSpawnCheck, 'disk_quota'>): Promise<void> {
+        if (!this.isShared()) return
+        const { disk_quota } = await this.hostIsolation()
+        const refusal = sharedSpawnRefusal({ ...c, disk_quota })
+        if (refusal) throw new SharedSpawnRefusedError(refusal)
+    }
+
+    /** The writable layer's cap on a shared machine; nothing on a dedicated one. */
+    private sharedStorageOpt(): { StorageOpt?: Record<string, string> } {
+        return this.isShared() ? { StorageOpt: { size: `${SHARED_DEFAULT_DISK_GB}G` } } : {}
+    }
+
+    /**
+     * Cap an agent's home volume on a shared machine: an XFS project on its
+     * `_data`, with a hard block limit. Named volumes have no size option, so
+     * this is the only way one tenant can't fill the disk under the others.
+     * Throws on a shared machine if it can't be set — the agent doesn't start
+     * without it.
+     */
+    async applyVolumeQuota(agent_id: number, volume: string): Promise<void> {
+        if (!this.isShared()) return
+        const { root_dir } = await this.hostIsolation()
+        if (!root_dir) throw new Error('docker root dir unknown')
+        const v = (await this.docker.getVolume(volume).inspect()) as { Mountpoint?: string }
+        if (!v.Mountpoint?.startsWith(`${root_dir}/volumes/`))
+            throw new Error(`volume ${volume} is not under ${root_dir}`)
+        const script = buildQuotaScript(
+            root_dir,
+            v.Mountpoint,
+            quotaProjectId(agent_id),
+            SHARED_DEFAULT_DISK_GB
+        )
+        await this.ensureQuotaImage()
+        const helper = await this.docker.createContainer({
+            Image: QUOTA_IMAGE,
+            Cmd: ['sh', '-c', script],
+            HostConfig: {
+                // xfs_quota needs the filesystem, its block device (made here:
+                // MKNOD), SYS_ADMIN for the quotactl and FOWNER to set the
+                // project on a directory owned by the agent's (remapped) uid.
+                // Nothing else: no network, nothing of the agent's.
+                Binds: [`${root_dir}:${root_dir}`],
+                NetworkMode: 'none',
+                UsernsMode: 'host',
+                CapDrop: ['ALL'],
+                CapAdd: ['SYS_ADMIN', 'MKNOD', 'FOWNER'],
+                SecurityOpt: ['no-new-privileges'],
+                ...HELPER_LIMITS,
+            },
+        })
+        try {
+            await helper.start()
+            const { StatusCode } = await withTimeout(
+                helper.wait(),
+                FENCE_TIMEOUT_MS,
+                'volume quota'
+            )
+            const logs = stripDockerFrames(
+                await helper
+                    .logs({ stdout: true, stderr: true, follow: false })
+                    .catch(() => Buffer.from(''))
+            )
+            if (StatusCode !== 0 || !logs.includes('quota'))
+                throw new Error(`volume quota exited ${StatusCode}: ${logs.trim().slice(0, 300)}`)
+        } finally {
+            await helper.remove({ force: true }).catch(() => undefined)
+        }
+    }
+
+    /** alpine with xfsprogs, built here the first time a quota is needed. */
+    private quotaImage: Promise<void> | null = null
+    private ensureQuotaImage(): Promise<void> {
+        if (!this.quotaImage) {
+            this.quotaImage = withTimeout(
+                this.buildToolImage(QUOTA_IMAGE, ['xfsprogs-extra']),
+                FENCE_BUILD_TIMEOUT_MS,
+                'quota image'
+            )
+            this.quotaImage.catch(() => {
+                this.quotaImage = null
+            })
+        }
+        return this.quotaImage
+    }
+
+    /**
      * The Docker daemon's own ID — a stable fingerprint of THIS machine.
      *
      * The control plane uses it to enforce one machine = one server = one
@@ -679,8 +957,18 @@ export class KJDocker {
      * can lose the jump the other just added.
      */
     async fenceBrowserNetwork(container_id: string, uid: number): Promise<void> {
+        return this.applyNetPolicy(container_id, uid)
+    }
+
+    /**
+     * Write the agent's network policy (net-policy.ts) into its namespace:
+     * both chains, the conversations' jumps and, with `browserUid`, that
+     * browser's. Throws if the rules didn't go in. Same helper, same
+     * one-at-a-time per container as the browser fence.
+     */
+    async applyNetPolicy(container_id: string, browserUid?: number): Promise<void> {
         const prev = this.fences.get(container_id) ?? Promise.resolve()
-        const run = prev.catch(() => undefined).then(() => this.fence(container_id, uid))
+        const run = prev.catch(() => undefined).then(() => this.fence(container_id, browserUid))
         const tail = run.catch(() => undefined)
         this.fences.set(container_id, tail)
         void tail.then(() => {
@@ -689,13 +977,81 @@ export class KJDocker {
         return run
     }
 
+    /**
+     * The policy the control sent for an agent (spawn, sync or a change),
+     * kept to what can be written as rules. Until one arrives, the default:
+     * what agents could reach before lists existed, plus the floor.
+     */
+    setNetPolicy(agent_id: number, raw: unknown): NetPolicy {
+        const policy = normalizeNetPolicy(raw)
+        this.netPolicies.set(agent_id, policy)
+        return policy
+    }
+
+    netPolicyOf(agent_id: number): NetPolicy {
+        return this.netPolicies.get(agent_id) ?? defaultNetPolicy()
+    }
+
+    private readonly netPolicies = new Map<number, NetPolicy>()
     private readonly fences = new Map<string, Promise<unknown>>()
 
-    private async fence(container_id: string, uid: number): Promise<void> {
-        const script = buildBrowserFenceScript(uid, {
-            nameservers: parseNameservers(await this.readContainerFile(container_id, RESOLV_CONF)),
-            host_ips: hostAddresses(),
-        })
+    /**
+     * The `always` endpoints as addresses. `host.docker.internal` is the
+     * bridge gateway (what `host-gateway` maps it to in the agent); other
+     * names are resolved here — the supervisor and the agent share the
+     * host's resolvers. A name that doesn't resolve is left out.
+     */
+    private async resolveAlways(
+        policy: NetPolicy,
+        gateway: string | null
+    ): Promise<ResolvedEndpoint[]> {
+        const out: ResolvedEndpoint[] = []
+        for (const e of policy.always) {
+            const port = e.port !== undefined ? { port: e.port } : {}
+            if (e.host.toLowerCase() === HOST_ALIAS) {
+                // On a shared machine the host is another tenant's too.
+                if (gateway && !this.isShared()) out.push({ ip: gateway, ...port })
+                continue
+            }
+            if (net.isIP(e.host)) {
+                out.push({ ip: e.host, ...port })
+                continue
+            }
+            const found = await withTimeout(dnsLookupAll(e.host), 5_000, `resolve ${e.host}`).catch(
+                () => [] as string[]
+            )
+            for (const ip of found) out.push({ ip, ...port })
+        }
+        return out
+    }
+
+    private async fence(container_id: string, browserUid?: number): Promise<void> {
+        const info = await this.inspect(container_id)
+        const agent_id = Number(info.Config?.Labels?.[KJ_LABEL_AGENT_ID])
+        const policy = this.netPolicyOf(agent_id)
+        const nets = Object.values(info.NetworkSettings?.Networks ?? {})
+        const gateway = nets.map((n) => n?.Gateway).find((g) => !!g && net.isIP(g) === 4) ?? null
+        const docker_nets = nets.flatMap((n) => [
+            ...(n?.IPAddress && n.IPPrefixLen ? [`${n.IPAddress}/${n.IPPrefixLen}`] : []),
+            ...(n?.GlobalIPv6Address && n.GlobalIPv6PrefixLen
+                ? [`${n.GlobalIPv6Address}/${n.GlobalIPv6PrefixLen}`]
+                : []),
+        ])
+        const script = buildNetPolicyScript(
+            policy,
+            {
+                nameservers: parseNameservers(
+                    await this.readContainerFile(container_id, RESOLV_CONF)
+                ),
+                host_ips: hostAddresses(),
+                docker_nets,
+                gateway,
+                keychain_port: KEYCHAIN_AGENT_PORT,
+                always: await this.resolveAlways(policy, gateway),
+                shared: this.isShared(),
+            },
+            browserUid
+        )
         await this.ensureFenceImage()
         const create = () =>
             this.docker.createContainer({
@@ -707,6 +1063,7 @@ export class KJDocker {
                     CapDrop: ['ALL'],
                     CapAdd: ['NET_ADMIN'],
                     SecurityOpt: ['no-new-privileges'],
+                    ...HELPER_LIMITS,
                 },
             })
         // The image may have been pruned since it was built (nothing runs it
@@ -722,15 +1079,15 @@ export class KJDocker {
             const { StatusCode } = await withTimeout(
                 helper.wait(),
                 FENCE_TIMEOUT_MS,
-                'browser fence'
+                'network policy'
             )
             const logs = stripDockerFrames(
                 await helper
                     .logs({ stdout: true, stderr: true, follow: false })
                     .catch(() => Buffer.from(''))
             )
-            if (StatusCode !== 0 || !logs.includes('fenced'))
-                throw new Error(`browser fence exited ${StatusCode}: ${logs.trim().slice(0, 300)}`)
+            if (StatusCode !== 0 || !logs.includes('netpolicy'))
+                throw new Error(`network policy exited ${StatusCode}: ${logs.trim().slice(0, 300)}`)
         } finally {
             await helper.remove({ force: true }).catch(() => undefined)
         }
@@ -767,19 +1124,44 @@ export class KJDocker {
         return this.fenceImage
     }
 
-    private async buildFenceImage(): Promise<void> {
-        if (await this.imageExistsLocally(FENCE_IMAGE)) return
+    private buildFenceImage(): Promise<void> {
+        return this.buildToolImage(FENCE_IMAGE, ['iptables', 'ip6tables'])
+    }
+
+    /** An alpine with some packages, committed under `image` and kept. */
+    private async buildToolImage(image: string, packages: string[]): Promise<void> {
+        // Alpine's mirror fails now and then (seen on the shared-host test,
+        // 2026-11-08): one more try before a shared agent refuses to start.
+        try {
+            await this.buildToolImageOnce(image, packages)
+        } catch (err) {
+            this.logger.warn(
+                { image, err: err instanceof Error ? err.message : String(err) },
+                'tool image build failed — trying once more'
+            )
+            await this.buildToolImageOnce(image, packages)
+        }
+    }
+
+    private async buildToolImageOnce(image: string, packages: string[]): Promise<void> {
+        if (await this.imageExistsLocally(image)) return
         const base = 'alpine:3.20'
         if (!(await this.imageExistsLocally(base))) await this.pullImage(base, () => {})
         const builder = await this.docker.createContainer({
             Image: base,
-            Cmd: ['apk', 'add', '--no-cache', 'iptables', 'ip6tables'],
+            Cmd: ['apk', 'add', '--no-cache', ...packages],
+            // A fixed command from Alpine's mirrors. Its capabilities stay
+            // Docker's defaults (apk sets owners and file caps, and a build
+            // that fails on some host would take the network rules with it),
+            // but it can't gain more nor run away.
+            HostConfig: { SecurityOpt: ['no-new-privileges'], ...HELPER_LIMITS },
         })
         try {
             await builder.start()
             const { StatusCode } = await builder.wait()
-            if (StatusCode !== 0) throw new Error(`could not install iptables (${StatusCode})`)
-            const [repo, tag] = FENCE_IMAGE.split(':')
+            if (StatusCode !== 0)
+                throw new Error(`could not install ${packages.join(' ')} (${StatusCode})`)
+            const [repo, tag] = image.split(':')
             await builder.commit({ repo, tag })
         } finally {
             await builder.remove({ force: true }).catch(() => undefined)
@@ -881,6 +1263,13 @@ export class KJDocker {
     async runContainer(opts: KJContainerRunOptions): Promise<string> {
         const envArray = Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
         const mode = await this.imageIsolationMode(opts.image_tag)
+        await this.assertSharedSpawn({
+            image_tag: opts.image_tag,
+            memory_mb: opts.resources.memory_mb,
+            cpu: opts.resources.cpu,
+            network_privileged: opts.network_privileged,
+            isolation_mode: mode,
+        })
         // Root launcher: its capabilities. Without root: none, only the volume.
         const isolation = mode === 'root'
         if (mode === 'exec' && opts.home_volume_name) {
@@ -937,6 +1326,10 @@ export class KJDocker {
                 // Resource limits
                 Memory: opts.resources.memory_mb * 1024 * 1024,
                 NanoCpus: Math.round(opts.resources.cpu * 1_000_000_000),
+                // Every machine: a fork bomb stops at its own container.
+                PidsLimit: AGENT_PIDS_LIMIT,
+                // Shared machine: its writable layer has a ceiling too.
+                ...this.sharedStorageOpt(),
                 // Security posture: drop everything, no privilege escalation,
                 // plus this agent's networking extras if it's entitled to them
                 // (KJ-156). Built by `agentHardening` so the recreate path gets
@@ -956,6 +1349,18 @@ export class KJDocker {
                 LogConfig: AGENT_LOG_CONFIG,
             },
         })
+
+        // The volume exists now (create made it); on a shared machine it gets
+        // its ceiling before anything runs, or nothing runs.
+        if (this.isShared() && opts.home_volume_name) {
+            const agent_id = Number(opts.labels[KJ_LABEL_AGENT_ID])
+            try {
+                await this.applyVolumeQuota(agent_id, opts.home_volume_name)
+            } catch (err) {
+                await container.remove({ force: true }).catch(() => undefined)
+                throw new VolumeQuotaError(err instanceof Error ? err.message : String(err))
+            }
+        }
 
         await container.start()
         this.logger.info(
@@ -1261,6 +1666,10 @@ export class KJDocker {
                 RestartPolicy: source.HostConfig.RestartPolicy,
                 NetworkMode: source.HostConfig.NetworkMode,
                 GroupAdd: source.HostConfig.GroupAdd,
+                // On a host that remaps users (a shared server) the supervisor
+                // runs outside the remap (`--userns=host`, install.sh); a clone
+                // without it couldn't take the host network and wouldn't start.
+                UsernsMode: source.HostConfig.UsernsMode || undefined,
                 // No ExtraHosts: this is the supervisor, not an agent — it runs
                 // with `--network host` and the Docker socket, and the host
                 // alias is an agent concern (host-access.ts, #34).
@@ -1324,6 +1733,16 @@ export class KJDocker {
         // read it from the image we are moving TO, not the one we are leaving.
         const mode = await this.imageIsolationMode(opts.new_image_tag)
         const isolation = mode === 'root'
+        // Before the old one is stopped: a refusal must leave the agent as it was.
+        await this.assertSharedSpawn({
+            image_tag: opts.new_image_tag,
+            memory_mb: opts.resources
+                ? opts.resources.memory_mb
+                : Math.floor((host.Memory ?? 0) / 1024 / 1024),
+            cpu: opts.resources ? opts.resources.cpu : (host.NanoCpus ?? 0) / 1_000_000_000,
+            network_privileged: (host.CapAdd ?? []).includes('NET_ADMIN'),
+            isolation_mode: mode,
+        })
         if (mode === 'exec') {
             const home = (host.Mounts ?? []).find((m) => m.Target === '/home/agent')
             if (home?.Source) {
@@ -1394,6 +1813,10 @@ export class KJDocker {
                 NanoCpus: opts.resources
                     ? Math.round(opts.resources.cpu * 1_000_000_000)
                     : host.NanoCpus,
+                PidsLimit: AGENT_PIDS_LIMIT,
+                // Ours, never the source's: a dedicated machine turned shared
+                // gets the ceiling, and one turned dedicated loses it.
+                StorageOpt: this.sharedStorageOpt().StorageOpt,
                 // The SAME posture a fresh spawn gets — same builder, so the two
                 // can't drift apart again (they did once: a recreated agent came
                 // back with Docker's ~14 default caps and no `no-new-privileges`).
@@ -1410,6 +1833,17 @@ export class KJDocker {
                 }),
             },
         })
+
+        // Idempotent: the same project and limit again if it already had one.
+        const home = (host.Mounts ?? []).find((m) => m.Target === '/home/agent')
+        if (this.isShared() && home?.Source) {
+            try {
+                await this.applyVolumeQuota(Number(config.Labels?.[KJ_LABEL_AGENT_ID]), home.Source)
+            } catch (err) {
+                await created.remove({ force: true }).catch(() => undefined)
+                throw new VolumeQuotaError(err instanceof Error ? err.message : String(err))
+            }
+        }
 
         await created.start()
         this.logger.info({ new_container_id: created.id }, 'recreate started')
@@ -1698,7 +2132,12 @@ export class KJDocker {
             HostConfig: {
                 Binds: [`${volume_name}:/v`],
                 AutoRemove: false,
+                // One chown, nothing else: Docker's default caps were all here.
+                CapDrop: ['ALL'],
                 CapAdd: ['CHOWN'],
+                SecurityOpt: ['no-new-privileges'],
+                NetworkMode: 'none',
+                ...HELPER_LIMITS,
             },
         })
         try {
@@ -1781,6 +2220,7 @@ export class KJDocker {
                 CapDrop: ['ALL'],
                 CapAdd: ['DAC_OVERRIDE', 'CHOWN'],
                 SecurityOpt: ['no-new-privileges'],
+                ...HELPER_LIMITS,
             },
         })
         // Attach to STDIN BEFORE starting so the helper's `sh -s`
@@ -1894,6 +2334,9 @@ export class KJDocker {
                 CapDrop: ['ALL'],
                 CapAdd: ['DAC_OVERRIDE', 'CHOWN', ...(opts.extra_caps ?? [])],
                 SecurityOpt: ['no-new-privileges'],
+                // Processes only: a backup streams a whole volume, and a
+                // memory cap there is a backup that dies half-way.
+                PidsLimit: HELPER_LIMITS.PidsLimit,
             },
         })
         let markerSeen = false

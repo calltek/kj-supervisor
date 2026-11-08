@@ -19,6 +19,7 @@ import type { KJLogger } from '../../logger'
 import type { AgentSyncEntry, AgentSyncPayload, ControlCommandAck } from '../../protocol'
 import type { AgentStreamManager } from '../../agent-stream/stream-manager'
 import type { RunningListener } from '../../reporters/agent-status/agent-status.reporter'
+import type { NetPolicyService } from '../../docker/client/net-policy-service'
 
 export interface AgentSyncHandlerDeps {
     streams: AgentStreamManager
@@ -29,14 +30,23 @@ export interface AgentSyncHandlerDeps {
      * agent that predates the image report would wait for its next recreate.
      */
     running?: RunningListener
+    /** What the agent may reach (net-policy-service.ts). Optional for tests. */
+    netPolicy?: Pick<NetPolicyService, 'enforce'>
+    /** Who a container belongs to, by its label. Optional for tests. */
+    docker?: { agentIdOfContainer(container_id: string): Promise<number | null> }
 }
 
 export class AgentSyncHandler {
     private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
     private readonly running?: RunningListener
+    private readonly netPolicy?: AgentSyncHandlerDeps['netPolicy']
+
+    private readonly docker?: AgentSyncHandlerDeps['docker']
 
     constructor(deps: AgentSyncHandlerDeps) {
+        this.docker = deps.docker
+        this.netPolicy = deps.netPolicy
         this.streams = deps.streams
         this.running = deps.running
         this.logger = deps.logger.child({ component: 'agent-sync' })
@@ -88,6 +98,18 @@ export class AgentSyncHandler {
     }
 
     private async attachOne(entry: AgentSyncEntry): Promise<void> {
+        // The container must be THIS agent's: attached to another, agent X's
+        // stream would carry agent Y's output and Y's tool calls would go out
+        // stamped as X — on a shared machine, another tenant's. The label is
+        // ours (agents can't create containers or labels), the id is the
+        // control's: if they disagree, nothing is attached.
+        if (this.docker) {
+            const owner = await this.docker.agentIdOfContainer(entry.container_id)
+            if (owner !== entry.agent_id)
+                throw new Error(
+                    `container ${entry.container_id} belongs to agent ${owner ?? 'none'}, not ${entry.agent_id}`
+                )
+        }
         await this.streams.attach({
             agent_id: entry.agent_id,
             container_id: entry.container_id,
@@ -95,5 +117,13 @@ export class AgentSyncHandler {
             conversations: entry.conversations,
         })
         this.running?.report(entry.agent_id, entry.container_id, { force: true })
+        // The rules survived this supervisor's restart (they live in the
+        // agent's namespace), but this one may write a newer version, and it
+        // needs the policy in memory for the next browser.
+        await this.netPolicy?.enforce(
+            entry.agent_id,
+            entry.container_id,
+            (entry as { network_policy?: unknown }).network_policy
+        )
     }
 }

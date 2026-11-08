@@ -22,6 +22,11 @@ export const LAST_ACTION_CODES = [
     'pause_failed',
     'resume_failed',
     'restore_failed',
+    'network_policy_failed',
+    // A shared machine refused the agent (tenancy.ts): `last_action` says why.
+    'shared_refused',
+    // The agent's home volume couldn't get its disk ceiling on a shared machine.
+    'volume_quota_failed',
 ] as const
 
 export type LastActionCode = (typeof LAST_ACTION_CODES)[number]
