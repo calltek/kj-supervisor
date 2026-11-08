@@ -1009,7 +1009,8 @@ export class KJDocker {
         for (const e of policy.always) {
             const port = e.port !== undefined ? { port: e.port } : {}
             if (e.host.toLowerCase() === HOST_ALIAS) {
-                if (gateway) out.push({ ip: gateway, ...port })
+                // On a shared machine the host is another tenant's too.
+                if (gateway && !this.isShared()) out.push({ ip: gateway, ...port })
                 continue
             }
             if (net.isIP(e.host)) {

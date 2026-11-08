@@ -14,7 +14,10 @@
  * Both chains end in a verdict (ACCEPT or REJECT), never fall through: a
  * browser uid must not end up in the conversations' chain too.
  *
- * In each chain, in order:
+ * In each chain, in order (on a shared machine the floor, private ranges
+ * included, comes right after kj-keychain: nothing a tenant configures —
+ * a list or an `always` endpoint — reaches another tenant, this host or its
+ * LAN):
  *  1. loopback, DNS to the container's own resolvers;
  *  2. always allowed: kj-keychain on the bridge gateway, and the endpoints
  *     the control lists (the agent's model connections, Kujira's API) — the
@@ -199,9 +202,6 @@ export function chainRules(
         out.push(`${a} -j REJECT`)
         return out
     }
-    for (const e of t.always)
-        if (cidrFamily(e.ip) === family)
-            out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
     if (family === 4 && t.gateway && cidrFamily(t.gateway) === 4)
         out.push(`${a} -d ${t.gateway} -p tcp --dport ${t.keychain_port} -j ACCEPT`)
     // The floor: always for the browser and on a shared machine; for the
@@ -212,13 +212,27 @@ export function chainRules(
         : family === 4
           ? [...FLOOR_V4, ...only(t.docker_nets, 4), ...only(t.host_ips, 4)]
           : [...FLOOR_V6, ...only(t.docker_nets, 6), ...only(t.host_ips, 6)]
-    for (const n of floor) out.push(`${a} -d ${n} -j REJECT`)
+    // Shared: the floor and the private ranges go BEFORE `always` and the
+    // list, whatever its mode — a model endpoint or an allow list naming
+    // 10.0.0.0/8 must not open the provider's network or another tenant.
+    const always = () => {
+        for (const e of t.always)
+            if (cidrFamily(e.ip) === family)
+                out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
+    }
+    if (t.shared) {
+        for (const n of [...floor, ...(family === 4 ? PRIVATE_V4 : PRIVATE_V6)])
+            out.push(`${a} -d ${n} -j REJECT`)
+        always()
+    } else {
+        always()
+        for (const n of floor) out.push(`${a} -d ${n} -j REJECT`)
+    }
     const hit = scope.mode === 'allow' ? 'ACCEPT' : 'REJECT'
     for (const e of scope.entries)
         if (cidrFamily(e.cidr) === family) out.push(...portRules(`${a} -d ${e.cidr}`, e.ports, hit))
-    if ((browser || t.shared) && scope.mode === 'deny')
-        for (const n of family === 4 ? PRIVATE_V4 : t.shared ? PRIVATE_V6 : [])
-            out.push(`${a} -d ${n} -j REJECT`)
+    if (!t.shared && browser && scope.mode === 'deny' && family === 4)
+        for (const n of PRIVATE_V4) out.push(`${a} -d ${n} -j REJECT`)
     out.push(`${a} -j ${scope.mode === 'allow' ? 'REJECT' : 'ACCEPT'}`)
     return out
 }

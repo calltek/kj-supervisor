@@ -63,21 +63,56 @@ describe('the floor', () => {
         expect(conv6).toContain(`-A ${CONV_CHAIN} -d fc00::/7 -j REJECT`)
     })
 
-    test('lets kj-keychain and the always-allowed endpoints through first', () => {
+    test('kj-keychain always goes first; a model endpoint goes before the floor only on a dedicated machine', () => {
+        const at = (t: NetTargets, p = defaultNetPolicy()) => {
+            const conv = rules(buildNetPolicyScript(p, t), 'iptables', CONV_CHAIN)
+            return {
+                keychain: conv.indexOf(
+                    `-A ${CONV_CHAIN} -d 172.17.0.1 -p tcp --dport 9890 -j ACCEPT`
+                ),
+                model: conv.indexOf(
+                    `-A ${CONV_CHAIN} -d 160.79.104.10 -p tcp --dport 443 -j ACCEPT`
+                ),
+                floor: conv.indexOf(`-A ${CONV_CHAIN} -d 172.17.0.5/16 -j REJECT`),
+            }
+        }
+        // A model on this LAN must keep answering a dedicated machine with a list.
+        const dedicated = at(T, policy({ mode: 'deny', entries: [{ cidr: '198.51.100.0/24' }] }))
+        expect(dedicated.keychain).toBeLessThan(dedicated.floor)
+        expect(dedicated.model).toBeLessThan(dedicated.floor)
+        const shared = at({ ...T, shared: true })
+        expect(shared.keychain).toBeGreaterThan(-1)
+        expect(shared.keychain).toBeLessThan(shared.floor)
+        expect(shared.model).toBeGreaterThan(shared.floor)
+    })
+
+    test('on a shared machine neither an allow list nor an always endpoint opens a private range', () => {
+        const t: NetTargets = {
+            ...T,
+            shared: true,
+            always: [{ ip: '10.0.0.5' }, { ip: '169.254.169.254', port: 80 }],
+        }
         const conv = rules(
-            buildNetPolicyScript(defaultNetPolicy(), { ...T, shared: true }),
+            buildNetPolicyScript(policy({ mode: 'allow', entries: [{ cidr: '10.0.0.0/8' }] }), t),
             'iptables',
             CONV_CHAIN
         )
-        const keychain = conv.indexOf(
-            `-A ${CONV_CHAIN} -d 172.17.0.1 -p tcp --dport 9890 -j ACCEPT`
+        const cut = conv.indexOf(`-A ${CONV_CHAIN} -d 10.0.0.0/8 -j REJECT`)
+        const meta = conv.indexOf(`-A ${CONV_CHAIN} -d 169.254.0.0/16 -j REJECT`)
+        expect(cut).toBeGreaterThan(-1)
+        expect(cut).toBeLessThan(conv.indexOf(`-A ${CONV_CHAIN} -d 10.0.0.0/8 -j ACCEPT`))
+        expect(cut).toBeLessThan(conv.indexOf(`-A ${CONV_CHAIN} -d 10.0.0.5 -j ACCEPT`))
+        expect(meta).toBeLessThan(
+            conv.indexOf(`-A ${CONV_CHAIN} -d 169.254.169.254 -p tcp --dport 80 -j ACCEPT`)
         )
-        const model = conv.indexOf(`-A ${CONV_CHAIN} -d 160.79.104.10 -p tcp --dport 443 -j ACCEPT`)
-        const floor = conv.indexOf(`-A ${CONV_CHAIN} -d 172.17.0.5/16 -j REJECT`)
-        expect(keychain).toBeGreaterThan(-1)
-        expect(model).toBeGreaterThan(-1)
-        expect(keychain).toBeLessThan(floor)
-        expect(model).toBeLessThan(floor)
+        const web = rules(
+            buildNetPolicyScript(policy({ mode: 'allow', entries: [{ cidr: '10.0.0.0/8' }] }), t),
+            'iptables',
+            WEB_CHAIN
+        )
+        expect(web.indexOf(`-A ${WEB_CHAIN} -d 10.0.0.0/8 -j REJECT`)).toBeLessThan(
+            web.indexOf(`-A ${WEB_CHAIN} -d 10.0.0.0/8 -j ACCEPT`)
+        )
     })
 })
 

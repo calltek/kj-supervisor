@@ -524,16 +524,16 @@ async function main(): Promise<void> {
             })()
         }
     )
-    // Names in an allow list's always-allowed endpoints (the model's API,
-    // Kujira's) resolve to addresses that move: rewrite those rules now and
-    // then. Only where it matters — an allow list with a name in it.
+    // Names in the always-allowed endpoints (the model's API, Kujira's)
+    // resolve to addresses that move: rewrite those rules now and then.
     setInterval(() => {
         void (async () => {
             for (const c of await docker.listKjContainers().catch(() => [])) {
                 if (c.agent_id === null) continue
                 const p = docker.netPolicyOf(c.agent_id)
                 const named = p.always.some((e) => !isIP(e.host))
-                if (named && p.mode === 'allow') await netPolicy.enforce(c.agent_id, c.container_id)
+                // `always` is written in both modes; enforce skips where nothing is.
+                if (named) await netPolicy.enforce(c.agent_id, c.container_id)
             }
         })()
     }, NET_POLICY_REFRESH_MS).unref?.()

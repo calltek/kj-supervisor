@@ -38,13 +38,14 @@ export class NetPolicyService {
      * container's namespace when there is something to write.
      */
     async enforce(agent_id: number, container_id: string, raw?: unknown): Promise<EnforceResult> {
-        const policy =
-            raw === undefined
-                ? this.docker.netPolicyOf(agent_id)
-                : this.docker.setNetPolicy(agent_id, raw)
+        const before = this.docker.netPolicyOf(agent_id)
+        const policy = raw === undefined ? before : this.docker.setNetPolicy(agent_id, raw)
         const shared = this.docker.isShared()
         const custom = isCustomNetPolicy(policy)
-        if (!shared && !custom) return { ok: true }
+        // Back to the default from a list: the old rules are still written
+        // in the container, so they get rewritten (open) rather than left.
+        const clearing = raw !== undefined && isCustomNetPolicy(before)
+        if (!shared && !custom && !clearing) return { ok: true }
         try {
             await this.docker.applyNetPolicy(container_id)
             return { ok: true }
