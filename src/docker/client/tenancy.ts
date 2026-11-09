@@ -5,8 +5,9 @@
  * own box. SHARED: the agents of several organizations — a partner's clients,
  * or Kujira's demos — on one machine. A shared machine is STRICTER than a
  * dedicated one, never the same: one tenant must not reach, read or starve
- * another. What only makes sense on the customer's own box (its LAN, a model
- * on the host, a VPN) doesn't exist there.
+ * another: not its agents, not this supervisor, not the cloud's metadata, and
+ * no VPN. The machine's LAN and a model on the host stay reachable: they are
+ * the partner's, and so is the risk (decided 2026-11-09).
  *
  * The control says which one this is (`server:hello` ack, `server:tenancy`).
  * The supervisor refuses on its side too: two locks, so a bug in one of them

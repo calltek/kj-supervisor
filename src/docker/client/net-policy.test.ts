@@ -4,6 +4,7 @@ import {
     buildNetPolicyScript,
     CONV_CHAIN,
     defaultNetPolicy,
+    inCidr,
     isCustomNetPolicy,
     type NetPolicy,
     type NetTargets,
@@ -49,21 +50,17 @@ describe('the floor', () => {
         expect(conv.at(-1)).toBe(`-A ${CONV_CHAIN} -j ACCEPT`)
     })
 
-    test('a shared machine floors the conversations and keeps them off the LAN', () => {
+    test('a shared machine floors the conversations but leaves the LAN to the partner', () => {
         const shared = { ...T, shared: true }
         const conv = rules(buildNetPolicyScript(defaultNetPolicy(), shared), 'iptables', CONV_CHAIN)
         expect(conv).toContain(`-A ${CONV_CHAIN} -d 172.17.0.5/16 -j REJECT`)
-        expect(conv).toContain(`-A ${CONV_CHAIN} -d 192.168.0.0/16 -j REJECT`)
         expect(conv).toContain(`-A ${CONV_CHAIN} -d 169.254.0.0/16 -j REJECT`)
-        const conv6 = rules(
-            buildNetPolicyScript(defaultNetPolicy(), shared),
-            'ip6tables',
-            CONV_CHAIN
-        )
-        expect(conv6).toContain(`-A ${CONV_CHAIN} -d fc00::/7 -j REJECT`)
+        expect(conv).toContain(`-A ${CONV_CHAIN} -d 203.0.113.7 -j REJECT`)
+        expect(conv.some((r) => r.includes('192.168.0.0/16'))).toBe(false)
+        expect(conv.at(-1)).toBe(`-A ${CONV_CHAIN} -j ACCEPT`)
     })
 
-    test('kj-keychain always goes first; a model endpoint goes before the floor only on a dedicated machine', () => {
+    test('kj-keychain always goes first; a model endpoint goes before the floor', () => {
         const at = (t: NetTargets, p = defaultNetPolicy()) => {
             const conv = rules(buildNetPolicyScript(p, t), 'iptables', CONV_CHAIN)
             return {
@@ -83,36 +80,71 @@ describe('the floor', () => {
         const shared = at({ ...T, shared: true })
         expect(shared.keychain).toBeGreaterThan(-1)
         expect(shared.keychain).toBeLessThan(shared.floor)
-        expect(shared.model).toBeGreaterThan(shared.floor)
+        expect(shared.model).toBeLessThan(shared.floor)
     })
 
-    test('on a shared machine neither an allow list nor an always endpoint opens a private range', () => {
+    test('on a shared machine an always endpoint opens the LAN and the host, never the metadata or another agent', () => {
         const t: NetTargets = {
             ...T,
             shared: true,
-            always: [{ ip: '10.0.0.5' }, { ip: '169.254.169.254', port: 80 }],
+            always: [
+                { ip: '10.0.0.5', port: 11434 },
+                { ip: '172.17.0.1', port: 11434 },
+                { ip: '172.17.0.9', port: 8080 },
+                { ip: '169.254.169.254', port: 80 },
+            ],
         }
-        const conv = rules(
-            buildNetPolicyScript(policy({ mode: 'allow', entries: [{ cidr: '10.0.0.0/8' }] }), t),
-            'iptables',
-            CONV_CHAIN
+        const conv = rules(buildNetPolicyScript(defaultNetPolicy(), t), 'iptables', CONV_CHAIN)
+        const accept = (ip: string, port: number) =>
+            conv.indexOf(`-A ${CONV_CHAIN} -d ${ip} -p tcp --dport ${port} -j ACCEPT`)
+        expect(accept('10.0.0.5', 11434)).toBeGreaterThan(-1)
+        expect(accept('172.17.0.1', 11434)).toBeGreaterThan(-1)
+        expect(accept('172.17.0.9', 8080)).toBe(-1)
+        expect(accept('169.254.169.254', 80)).toBe(-1)
+        expect(conv.indexOf(`-A ${CONV_CHAIN} -d 169.254.0.0/16 -j REJECT`)).toBeLessThan(
+            accept('10.0.0.5', 11434)
         )
-        const cut = conv.indexOf(`-A ${CONV_CHAIN} -d 10.0.0.0/8 -j REJECT`)
-        const meta = conv.indexOf(`-A ${CONV_CHAIN} -d 169.254.0.0/16 -j REJECT`)
-        expect(cut).toBeGreaterThan(-1)
-        expect(cut).toBeLessThan(conv.indexOf(`-A ${CONV_CHAIN} -d 10.0.0.0/8 -j ACCEPT`))
-        expect(cut).toBeLessThan(conv.indexOf(`-A ${CONV_CHAIN} -d 10.0.0.5 -j ACCEPT`))
-        expect(meta).toBeLessThan(
-            conv.indexOf(`-A ${CONV_CHAIN} -d 169.254.169.254 -p tcp --dport 80 -j ACCEPT`)
-        )
-        const web = rules(
-            buildNetPolicyScript(policy({ mode: 'allow', entries: [{ cidr: '10.0.0.0/8' }] }), t),
-            'iptables',
-            WEB_CHAIN
-        )
-        expect(web.indexOf(`-A ${WEB_CHAIN} -d 10.0.0.0/8 -j REJECT`)).toBeLessThan(
-            web.indexOf(`-A ${WEB_CHAIN} -d 10.0.0.0/8 -j ACCEPT`)
-        )
+    })
+
+    test('on a shared machine the other metadata services and the tailnet stay closed, before any always', () => {
+        const t: NetTargets = {
+            ...T,
+            shared: true,
+            always: [
+                { ip: '100.100.100.200', port: 80 },
+                { ip: '168.63.129.16', port: 80 },
+                { ip: 'fd7a:115c:a1e0::1', port: 22 },
+                { ip: '::ffff:169.254.169.254', port: 80 },
+                { ip: '10.0.0.7' },
+            ],
+        }
+        const script = buildNetPolicyScript(defaultNetPolicy(), t)
+        const conv = rules(script, 'iptables', CONV_CHAIN)
+        const conv6 = rules(script, 'ip6tables', CONV_CHAIN)
+        for (const n of ['100.64.0.0/10', '168.63.129.16/32'])
+            expect(conv).toContain(`-A ${CONV_CHAIN} -d ${n} -j REJECT`)
+        expect(conv6).toContain(`-A ${CONV_CHAIN} -d fd7a:115c:a1e0::/48 -j REJECT`)
+        // None of them, nor an endpoint without a port, gets an ACCEPT.
+        expect(
+            conv.filter((r) => r.endsWith('-j ACCEPT') && /100.100|168.63|10.0.0.7/.test(r))
+        ).toEqual([])
+        expect(
+            conv6
+                .filter((r) => r.includes('fd7a') || r.includes('::ffff'))
+                .every((r) => r.endsWith('REJECT'))
+        ).toBe(true)
+    })
+
+    test('inCidr', () => {
+        expect(inCidr('::ffff:169.254.169.254', '::ffff:0:0/96')).toBe(true)
+        expect(inCidr('fe80::1%eth0', 'fe80::/10')).toBe(false)
+        expect(inCidr('10.0.0.1', '1.2.3.4/')).toBe(false)
+        expect(inCidr('10.0.0.1', '1.2.3.4/40')).toBe(false)
+        expect(inCidr('172.17.0.9', '172.17.0.5/16')).toBe(true)
+        expect(inCidr('172.18.0.9', '172.17.0.5/16')).toBe(false)
+        expect(inCidr('169.254.169.254', '169.254.0.0/16')).toBe(true)
+        expect(inCidr('fe80::1', 'fe80::/10')).toBe(true)
+        expect(inCidr('10.0.0.1', 'fe80::/10')).toBe(false)
     })
 })
 
