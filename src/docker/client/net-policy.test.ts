@@ -106,7 +106,38 @@ describe('the floor', () => {
         )
     })
 
+    test('on a shared machine the other metadata services and the tailnet stay closed, before any always', () => {
+        const t: NetTargets = {
+            ...T,
+            shared: true,
+            always: [
+                { ip: '100.100.100.200', port: 80 },
+                { ip: '168.63.129.16', port: 80 },
+                { ip: 'fd7a:115c:a1e0::1', port: 22 },
+                { ip: '::ffff:169.254.169.254', port: 80 },
+                { ip: '10.0.0.7' },
+            ],
+        }
+        const script = buildNetPolicyScript(defaultNetPolicy(), t)
+        const conv = rules(script, 'iptables', CONV_CHAIN)
+        const conv6 = rules(script, 'ip6tables', CONV_CHAIN)
+        for (const n of ['100.64.0.0/10', '168.63.129.16/32'])
+            expect(conv).toContain(`-A ${CONV_CHAIN} -d ${n} -j REJECT`)
+        expect(conv6).toContain(`-A ${CONV_CHAIN} -d fd7a:115c:a1e0::/48 -j REJECT`)
+        // None of them, nor an endpoint without a port, gets an ACCEPT.
+        expect(
+            conv.filter((r) => r.endsWith('-j ACCEPT') && /100.100|168.63|10.0.0.7/.test(r))
+        ).toEqual([])
+        expect(
+            conv6
+                .filter((r) => r.includes('fd7a') || r.includes('::ffff'))
+                .every((r) => r.endsWith('REJECT'))
+        ).toBe(true)
+    })
+
     test('inCidr', () => {
+        expect(inCidr('::ffff:169.254.169.254', '::ffff:0:0/96')).toBe(true)
+        expect(inCidr('fe80::1%eth0', 'fe80::/10')).toBe(false)
         expect(inCidr('172.17.0.9', '172.17.0.5/16')).toBe(true)
         expect(inCidr('172.18.0.9', '172.17.0.5/16')).toBe(false)
         expect(inCidr('169.254.169.254', '169.254.0.0/16')).toBe(true)

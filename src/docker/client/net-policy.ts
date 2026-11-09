@@ -85,6 +85,15 @@ export const PRIVATE_V4 = [
 const FLOOR_V4 = ['169.254.0.0/16']
 const FLOOR_V6 = ['fe80::/10', '::ffff:0:0/96', 'fd00:ec2::254/128']
 
+/**
+ * Closed on a shared machine besides the floor, before any `always`: the
+ * metadata services that don't live in link-local (Alibaba's 100.100.100.200,
+ * inside CGNAT; Azure's WireServer) and the host's tailnet (CGNAT and
+ * Tailscale's IPv6 range). The rest of the LAN stays the partner's.
+ */
+const SHARED_CLOSED_V4 = ['100.64.0.0/10', '168.63.129.16/32']
+const SHARED_CLOSED_V6 = ['fd7a:115c:a1e0::/48']
+
 /** As things were before lists existed: conversations open, the browser off the private ranges. */
 export function defaultNetPolicy(): NetPolicy {
     return { mode: 'deny', entries: [], always: [] }
@@ -170,15 +179,30 @@ export interface NetTargets {
      * A shared machine (tenancy.ts): the conversations always get the floor —
      * one tenant must not reach another's agent, this supervisor or the
      * cloud's metadata — and no `always` endpoint opens it. The LAN is left
-     * as on a dedicated machine: it is the partner's, and so is the risk. On a
+     * as on a dedicated machine: it is the partner's, and so is the risk. That
+     * includes the host's OTHER Docker networks (`docker_nets` is only this
+     * container's): they are kept apart by Docker's isolation between
+     * bridges, not by these rules. On a
      * dedicated machine the conversations stay as they were before lists
      * existed: open, until someone writes a list for them.
      */
     shared?: boolean
 }
 
-/** An address as a number, for CIDR checks. Null if it doesn't parse. */
+/**
+ * An address as a number, for CIDR checks. Null if it doesn't parse (a zone
+ * like `%eth0`, anything odd): callers treat that as closed.
+ */
 function ipValue(ip: string): { family: 4 | 6; value: bigint } | null {
+    // An IPv6 ending in an IPv4 (`::ffff:169.254.169.254`): the IPv4 as two groups.
+    const embedded = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(ip)
+    if (embedded && isIP(ip) === 6) {
+        const v4 = ipValue(embedded[2] as string)
+        if (!v4) return null
+        const hi = ((v4.value >> 16n) & 0xffffn).toString(16)
+        const lo = (v4.value & 0xffffn).toString(16)
+        return ipValue(`${embedded[1]}${hi}:${lo}`)
+    }
     const family = isIP(ip)
     if (family === 4) {
         const n = ip.split('.').reduce((acc, p) => (acc << 8n) + BigInt(Number(p)), 0n)
@@ -210,15 +234,20 @@ export function inCidr(ip: string, cidr: string): boolean {
 }
 
 /**
- * The `always` endpoints a shared machine lets through before the floor: not
- * inside the Docker network (another tenant's agent, this supervisor) unless
- * it's the gateway — a model on the host — and never the cloud's metadata.
+ * The `always` endpoints a shared machine lets through before the floor: one
+ * port each (an endpoint without one would open every port of the gateway or
+ * a LAN host), not inside the Docker network (another tenant's agent, this
+ * supervisor) unless it's the gateway — a model on the host — and never what
+ * `SHARED_CLOSED` or the floor close. An address that doesn't parse is
+ * dropped: closed by default.
  */
 function sharedAlways(t: NetTargets): ResolvedEndpoint[] {
-    const floor = [...FLOOR_V4, ...FLOOR_V6]
+    const closed = [...FLOOR_V4, ...FLOOR_V6, ...SHARED_CLOSED_V4, ...SHARED_CLOSED_V6]
     return t.always.filter(
         (e) =>
-            !floor.some((n) => inCidr(e.ip, n)) &&
+            e.port !== undefined &&
+            ipValue(e.ip) !== null &&
+            !closed.some((n) => inCidr(e.ip, n)) &&
             (e.ip === t.gateway || !t.docker_nets.some((n) => inCidr(e.ip, n)))
     )
 }
@@ -262,7 +291,10 @@ export function chainRules(
     // would cross to another tenant, so a model endpoint can't open either.
     // The floor itself then comes before the list, as on a dedicated machine.
     if (t.shared)
-        for (const n of family === 4 ? FLOOR_V4 : FLOOR_V6) out.push(`${a} -d ${n} -j REJECT`)
+        for (const n of family === 4
+            ? [...FLOOR_V4, ...SHARED_CLOSED_V4]
+            : [...FLOOR_V6, ...SHARED_CLOSED_V6])
+            out.push(`${a} -d ${n} -j REJECT`)
     for (const e of t.shared ? sharedAlways(t) : t.always)
         if (cidrFamily(e.ip) === family)
             out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
