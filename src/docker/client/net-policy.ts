@@ -14,10 +14,12 @@
  * Both chains end in a verdict (ACCEPT or REJECT), never fall through: a
  * browser uid must not end up in the conversations' chain too.
  *
- * In each chain, in order (on a shared machine the floor, private ranges
- * included, comes right after kj-keychain: nothing a tenant configures —
- * a list or an `always` endpoint — reaches another tenant, this host or its
- * LAN):
+ * In each chain, in order (on a shared machine the cloud's metadata goes
+ * right after kj-keychain, and an `always` endpoint inside the Docker network
+ * other than the gateway is dropped: nothing a tenant configures reaches
+ * another tenant's agent or the metadata. This host's LAN and a model on the
+ * host stay reachable: they are the partner's, and so is the risk — decided
+ * 2026-11-09):
  *  1. loopback, DNS to the container's own resolvers;
  *  2. always allowed: kj-keychain on the bridge gateway, and the endpoints
  *     the control lists (the agent's model connections, Kujira's API) — the
@@ -165,17 +167,61 @@ export interface NetTargets {
     keychain_port: number
     always: ResolvedEndpoint[]
     /**
-     * A shared machine (tenancy.ts): the conversations get the floor and are
-     * kept off the private ranges too, like the browser — one tenant must not
-     * reach another, this host, or the LAN it sits on. On a dedicated machine
-     * the conversations stay as they were before lists existed: open, until
-     * someone writes a list for them.
+     * A shared machine (tenancy.ts): the conversations always get the floor —
+     * one tenant must not reach another's agent, this supervisor or the
+     * cloud's metadata — and no `always` endpoint opens it. The LAN is left
+     * as on a dedicated machine: it is the partner's, and so is the risk. On a
+     * dedicated machine the conversations stay as they were before lists
+     * existed: open, until someone writes a list for them.
      */
     shared?: boolean
 }
 
-/** IPv6 that is not the internet, for a shared machine's conversations. */
-const PRIVATE_V6 = ['fc00::/7']
+/** An address as a number, for CIDR checks. Null if it doesn't parse. */
+function ipValue(ip: string): { family: 4 | 6; value: bigint } | null {
+    const family = isIP(ip)
+    if (family === 4) {
+        const n = ip.split('.').reduce((acc, p) => (acc << 8n) + BigInt(Number(p)), 0n)
+        return { family: 4, value: n }
+    }
+    if (family === 6) {
+        const [head, tail = ''] = ip.split('::')
+        const h = head ? head.split(':') : []
+        const t = tail ? tail.split(':') : []
+        const groups = ip.includes('::')
+            ? [...h, ...Array(8 - h.length - t.length).fill('0'), ...t]
+            : h
+        if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/i.test(g))) return null
+        return { family: 6, value: groups.reduce((acc, g) => (acc << 16n) + BigInt(`0x${g}`), 0n) }
+    }
+    return null
+}
+
+/** Is `ip` inside `cidr`? Families must match. */
+export function inCidr(ip: string, cidr: string): boolean {
+    const [base, bits] = cidr.split('/')
+    const a = ipValue(ip)
+    const b = ipValue(base ?? '')
+    if (!a || !b || a.family !== b.family) return false
+    const width = a.family === 4 ? 32 : 128
+    const prefix = bits === undefined ? width : Number(bits)
+    const shift = BigInt(width - prefix)
+    return a.value >> shift === b.value >> shift
+}
+
+/**
+ * The `always` endpoints a shared machine lets through before the floor: not
+ * inside the Docker network (another tenant's agent, this supervisor) unless
+ * it's the gateway — a model on the host — and never the cloud's metadata.
+ */
+function sharedAlways(t: NetTargets): ResolvedEndpoint[] {
+    const floor = [...FLOOR_V4, ...FLOOR_V6]
+    return t.always.filter(
+        (e) =>
+            !floor.some((n) => inCidr(e.ip, n)) &&
+            (e.ip === t.gateway || !t.docker_nets.some((n) => inCidr(e.ip, n)))
+    )
+}
 
 const only = (ips: string[], family: 4 | 6) => ips.filter((ip) => cidrFamily(ip) === family)
 
@@ -212,26 +258,19 @@ export function chainRules(
         : family === 4
           ? [...FLOOR_V4, ...only(t.docker_nets, 4), ...only(t.host_ips, 4)]
           : [...FLOOR_V6, ...only(t.docker_nets, 6), ...only(t.host_ips, 6)]
-    // Shared: the floor and the private ranges go BEFORE `always` and the
-    // list, whatever its mode — a model endpoint or an allow list naming
-    // 10.0.0.0/8 must not open the provider's network or another tenant.
-    const always = () => {
-        for (const e of t.always)
-            if (cidrFamily(e.ip) === family)
-                out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
-    }
-    if (t.shared) {
-        for (const n of [...floor, ...(family === 4 ? PRIVATE_V4 : PRIVATE_V6)])
-            out.push(`${a} -d ${n} -j REJECT`)
-        always()
-    } else {
-        always()
-        for (const n of floor) out.push(`${a} -d ${n} -j REJECT`)
-    }
+    // Shared: the metadata goes BEFORE `always`, and `always` drops what
+    // would cross to another tenant, so a model endpoint can't open either.
+    // The floor itself then comes before the list, as on a dedicated machine.
+    if (t.shared)
+        for (const n of family === 4 ? FLOOR_V4 : FLOOR_V6) out.push(`${a} -d ${n} -j REJECT`)
+    for (const e of t.shared ? sharedAlways(t) : t.always)
+        if (cidrFamily(e.ip) === family)
+            out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
+    for (const n of floor) out.push(`${a} -d ${n} -j REJECT`)
     const hit = scope.mode === 'allow' ? 'ACCEPT' : 'REJECT'
     for (const e of scope.entries)
         if (cidrFamily(e.cidr) === family) out.push(...portRules(`${a} -d ${e.cidr}`, e.ports, hit))
-    if (!t.shared && browser && scope.mode === 'deny' && family === 4)
+    if (browser && scope.mode === 'deny' && family === 4)
         for (const n of PRIVATE_V4) out.push(`${a} -d ${n} -j REJECT`)
     out.push(`${a} -j ${scope.mode === 'allow' ? 'REJECT' : 'ACCEPT'}`)
     return out
