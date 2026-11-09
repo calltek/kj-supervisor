@@ -8,13 +8,10 @@
  * destination, and returns the answer with every value used hidden.
  */
 
-import { lookup as dnsLookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
-
 import type { KeychainSite } from './control-protocol'
 import { KeychainError, errorResponse } from './errors'
-import { isBlockedAddress } from './addresses'
 import type { KeychainLog } from './log'
+import { type LookupAll, defaultLookup, resolvePublicAddress } from './public-address'
 import {
     type CredentialReference,
     REFERENCE_HEADERS,
@@ -62,7 +59,7 @@ const RESPONSE_DROP = new Set([
     'content-encoding',
 ])
 
-export type LookupAll = (host: string) => Promise<{ address: string; family: number }[]>
+export type { LookupAll }
 export type Fetcher = (url: string, init: BunFetchRequestInit) => Promise<Response>
 
 export interface KeychainHandlerDeps {
@@ -72,8 +69,6 @@ export interface KeychainHandlerDeps {
     fetch?: Fetcher
     lookup?: LookupAll
 }
-
-const defaultLookup: LookupAll = (host) => dnsLookup(host, { all: true, verbatim: true })
 
 export function createKeychainHandler(deps: KeychainHandlerDeps) {
     const doFetch: Fetcher = deps.fetch ?? ((url, init) => fetch(url, init))
@@ -317,34 +312,9 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
     }
 
     async function checkDestination(hostname: string): Promise<PinnedDestination> {
-        const blocked = () =>
-            new KeychainError(
-                'KEYCHAIN_PRIVATE_ADDRESS',
-                `${hostname} apunta a una dirección privada o local. Las credenciales sólo se ` +
-                    'usan contra servicios públicos en internet.'
-            )
-        if (isIP(hostname)) {
-            if (isBlockedAddress(hostname)) throw blocked()
-            return literalDestination()
-        }
-        let addresses: { address: string; family: number }[]
-        try {
-            addresses = await lookup(hostname)
-        } catch {
-            addresses = []
-        }
-        if (!addresses.length) {
-            throw new KeychainError(
-                'KEYCHAIN_DNS_FAILED',
-                `No se encuentra ${hostname}. Revisa que la dirección esté bien escrita.`
-            )
-        }
-        if (addresses.some((a) => isBlockedAddress(a.address))) throw blocked()
-        // IPv4 first: the default bridge has no IPv6 route, so an AAAA first would
-        // fail even with a good A record behind it.
-        const first = addresses.find((a) => a.family === 4) ?? addresses[0]
-        if (!first) throw blocked()
-        return pinnedDestination(hostname, first.address, first.family)
+        const checked = await resolvePublicAddress(hostname, lookup)
+        if (checked.literal) return literalDestination()
+        return pinnedDestination(hostname, checked.address, checked.family)
     }
 }
 

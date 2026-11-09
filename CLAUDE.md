@@ -780,6 +780,25 @@ es `src/keychain/`.
   Un nodo sin túneles abiertos 30 min hace logout y se para; uno abierto
   nunca lo corta el barrido. Tope de 16 túneles por agente y 8 MiB en cola.
   Un túnel ya abierto no se corta si se retira «Usar»: se comprueba al abrir.
+- **Base de datos y correo también los pone kj-keychain** (`sql-handler.ts`,
+  `mail-handler.ts`): `POST /sql` (`kj-sql`) ejecuta UNA sentencia en MySQL/MariaDB
+  (`mysql2`) o PostgreSQL (`pg`) y `POST /mail` (`kj-mail`) envía por SMTP
+  (`nodemailer`), con la contraseña de la credencial y sin que el agente la vea.
+  **El transporte es de kj-keychain de punta a punta**: con `ssh` abre él el túnel
+  (`ssh-tunnel.ts`, `ssh2` en JS puro; la clave se firma con `ssh-keys.ts`, como
+  `/ssh/sign`) y habla con la base por él; nunca se reenvían bytes por el
+  contenedor del agente, que podría hacerse pasar por el servidor y quedarse la
+  contraseña. La contraseña sólo va al **primer salto** (el servidor SSH, o la
+  base/el SMTP si no hay túnel) si es destino de su credencial, y ese salto tiene
+  que ser una dirección pública (la misma regla que `/r`, `public-address.ts`);
+  detrás del túnel, `127.0.0.1` vale. Los campos se leen por etiqueta
+  (`credential-fields.ts`), y **una credencial SSH sin destinos no da su host ni
+  su usuario** (el backend sólo entrega la clave): entonces van en `ssh.host` /
+  `ssh.user`. Sin `known_hosts`: la clave de host del servidor SSH no se fija. SMTP:
+  465 es TLS directo y cualquier otro puerto exige STARTTLS antes de autenticar; el
+  certificado se comprueba contra el nombre aunque se conecte a la IP comprobada.
+  Todo valor resuelto sale tapado de filas y errores (`redactJson`). Las pruebas
+  inyectan túnel, base y SMTP: no abren sockets.
 - **Compila sin el backend**: `keychain:resolve` usa tipos locales hasta que
   llegue en `protocol.ts`. **Orden de despliegue**: backend (que exista
   `keychain:resolve`; sin él, `KEYCHAIN_UNAVAILABLE` a los 8 s) → este

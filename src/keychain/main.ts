@@ -18,6 +18,8 @@ import { log } from './log'
 import { AgentTokenRegistry } from './registry'
 import { ControlLink, ResolveCache } from './resolver'
 import { CONNECT_PATH, type ConnectData, createConnectHandler } from './connect-handler'
+import { MAIL_PATH, createMailHandler } from './mail-handler'
+import { SQL_PATH, createSqlHandler } from './sql-handler'
 import { createSshHandler, isSshPath } from './ssh-handler'
 import { TailnetPool } from './tailnet'
 
@@ -36,6 +38,8 @@ const sessions = new ControlSessions({ secret, registry, link, cache, log })
 const resolve = cache.wrap(link.resolve)
 const handleHttp = createKeychainHandler({ registry, resolve, log })
 const handleSsh = createSshHandler({ registry, resolve, log })
+const handleSql = createSqlHandler({ registry, resolve, log })
+const handleMail = createMailHandler({ registry, resolve, log })
 const tailnet = new TailnetPool({ log, hostname: `kj-keychain-${hostname()}` })
 const connect = createConnectHandler({ registry, resolve, log, tailnet })
 
@@ -49,6 +53,8 @@ Bun.serve<ConnectData, never>({
     fetch(request, server) {
         const path = new URL(request.url).pathname
         if (path === CONNECT_PATH) return connect.upgrade(request, server)
+        if (path === SQL_PATH) return handleSql(request)
+        if (path === MAIL_PATH) return handleMail(request)
         return isSshPath(path) ? handleSsh(request) : handleHttp(request)
     },
     // An SSH session through a VPN stays open for as long as it is used.

@@ -14,6 +14,7 @@
  * trust its public key, and the host is not part of what an agent signs.
  */
 
+import { authenticate, credentialName, readJsonObject } from './agent-request'
 import type { KeychainResolveAck } from './control-protocol'
 import { KeychainError, errorResponse } from './errors'
 import type { KeychainLog } from './log'
@@ -28,7 +29,6 @@ export const SSH_SIGN_PATH = '/ssh/sign'
 export const SSH_KEY_FIELD = 'ssh_private_key'
 
 const MAX_BODY_BYTES = 64 * 1024
-const MAX_NAME = 200
 
 export interface SshHandlerDeps {
     registry: AgentTokenRegistry
@@ -53,53 +53,20 @@ export function createSshHandler(deps: SshHandlerDeps) {
         for (const [value, entry] of parsed) if (entry.expires <= now) parsed.delete(value)
         const hit = parsed.get(ack.value)
         if (hit) return hit.key
-        try {
-            const key = parseSshPrivateKey(ack.value)
-            parsed.set(ack.value, { key, expires: now + CACHE_TTL_MS })
-            return key
-        } catch (error) {
-            if (error instanceof SshKeyError && error.reason === 'encrypted') {
-                throw new KeychainError(
-                    'KEYCHAIN_KEY_ENCRYPTED',
-                    `La clave SSH de «${credential}» está protegida con frase de paso y Kujira ` +
-                        'todavía no sabe abrirla. Pide al operador que la guarde sin frase en ' +
-                        'Credenciales.'
-                )
-            }
-            throw new KeychainError(
-                'KEYCHAIN_NOT_SSH_KEY',
-                `La credencial «${credential}» no lleva una clave privada SSH que Kujira sepa ` +
-                    'usar (ed25519, RSA o ECDSA). Pide al operador que la revise en Credenciales.'
-            )
-        }
+        const key = parseCredentialKey(credential, ack.value)
+        parsed.set(ack.value, { key, expires: now + CACHE_TTL_MS })
+        return key
     }
 
     return async function handleSsh(request: Request): Promise<Response> {
         const path = new URL(request.url).pathname
         let agent_id: number | null = null
         try {
-            if (request.method !== 'POST') {
-                throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'Sólo POST.', 405)
-            }
-            agent_id = deps.registry.agentFor(request.headers.get('x-kj-token'))
-            if (agent_id === null) {
-                throw new KeychainError(
-                    'KEYCHAIN_UNAUTHORIZED',
-                    'Petición sin un token de agente válido.'
-                )
-            }
-            const session = request.headers.get('x-kj-session')?.trim()
-            if (!session) {
-                throw new KeychainError(
-                    'KEYCHAIN_BAD_REQUEST',
-                    'Falta la sesión de la conversación.'
-                )
-            }
-            const body = await readJson(request)
-            const credential = typeof body.credential === 'string' ? body.credential.trim() : ''
-            if (!credential || credential.length > MAX_NAME) {
-                throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'Falta el nombre de la credencial.')
-            }
+            const caller = authenticate(request, deps.registry)
+            agent_id = caller.agent_id
+            const session = caller.session
+            const body = await readJsonObject(request, MAX_BODY_BYTES)
+            const credential = credentialName(body.credential)
             const key = keyFrom(
                 credential,
                 await deps.resolve({
@@ -153,22 +120,28 @@ export function createSshHandler(deps: SshHandlerDeps) {
     }
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown>> {
-    const length = Number(request.headers.get('content-length') ?? 0)
-    if (length > MAX_BODY_BYTES) {
-        throw new KeychainError('KEYCHAIN_REQUEST_TOO_LARGE', 'Petición demasiado grande.')
-    }
-    const text = await request.text()
-    if (text.length > MAX_BODY_BYTES) {
-        throw new KeychainError('KEYCHAIN_REQUEST_TOO_LARGE', 'Petición demasiado grande.')
-    }
+/**
+ * The private key of an SSH credential, parsed, or the error the agent relays.
+ * `/sql` signs its tunnel with the same.
+ */
+export function parseCredentialKey(credential: string, value: string): SshKey {
     try {
-        const value = JSON.parse(text) as unknown
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
-            return value as Record<string, unknown>
+        return parseSshPrivateKey(value)
+    } catch (error) {
+        if (error instanceof SshKeyError && error.reason === 'encrypted') {
+            throw new KeychainError(
+                'KEYCHAIN_KEY_ENCRYPTED',
+                `La clave SSH de «${credential}» está protegida con frase de paso y Kujira ` +
+                    'todavía no sabe abrirla. Pide al operador que la guarde sin frase en ' +
+                    'Credenciales.'
+            )
         }
-    } catch {}
-    throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'El cuerpo tiene que ser un objeto JSON.')
+        throw new KeychainError(
+            'KEYCHAIN_NOT_SSH_KEY',
+            `La credencial «${credential}» no lleva una clave privada SSH que Kujira sepa ` +
+                'usar (ed25519, RSA o ECDSA). Pide al operador que la revise en Credenciales.'
+        )
+    }
 }
 
 function decode(value: unknown): Buffer | null {
