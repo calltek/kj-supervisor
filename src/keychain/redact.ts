@@ -73,6 +73,30 @@ export function redactText(text: string, variants: string[]): string {
 }
 
 /**
+ * A JSON value with every secret hidden: in strings and object keys, and in
+ * numbers too (a short numeric password would show in a number), which then
+ * come back as text.
+ */
+export function redactJson(value: unknown, variants: string[]): unknown {
+    if (!variants.length) return value
+    if (typeof value === 'string') return redactText(value, variants)
+    if (typeof value === 'number' || typeof value === 'bigint') {
+        const text = String(value)
+        const redacted = redactText(text, variants)
+        return redacted === text ? value : redacted
+    }
+    if (Array.isArray(value)) return value.map((v) => redactJson(v, variants))
+    if (value && typeof value === 'object') {
+        const out: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(value)) {
+            out[redactText(k, variants)] = redactJson(v, variants)
+        }
+        return out
+    }
+    return value
+}
+
+/**
  * Byte-level redaction, so a binary or non-UTF-8 body keeps every other byte
  * as it was. Works on a latin1 view, where one char is one byte.
  */
