@@ -15,7 +15,7 @@ import {
     parseSqlRequest,
 } from './sql-handler'
 import { type SqlRunOptions, SqlFailure } from './sql-engines'
-import { type SshTunnelOptions, innerSignature } from './ssh-tunnel'
+import { KnownHosts, type SshTunnelOptions, innerSignature } from './ssh-tunnel'
 import { sshString } from './ssh-keys'
 
 const TOKEN = 'agent-token-42'
@@ -195,7 +195,12 @@ describe('/sql: direct connection', () => {
         expect(tunnels).toEqual([])
         expect(runs[0]).toMatchObject({
             engine: 'mysql',
-            transport: { kind: 'tcp', address: '203.0.114.10', port: 3306 },
+            transport: {
+                kind: 'tls',
+                address: '203.0.114.10',
+                port: 3306,
+                servername: 'db.example.com',
+            },
             user: 'reader',
             password: PASSWORD,
             database: null,
@@ -286,7 +291,7 @@ describe('/sql: through an SSH tunnel', () => {
             dst_host: '127.0.0.1',
             dst_port: 3306,
         })
-        expect(runs[0]?.transport).toMatchObject({ kind: 'stream', host: '127.0.0.1', port: 3306 })
+        expect(runs[0]?.transport).toMatchObject({ kind: 'tunnel', host: '127.0.0.1', port: 3306 })
         expect(runs[0]?.database).toBe('shop')
         expect(closed()).toBe(1)
     })
@@ -399,6 +404,106 @@ describe('/sql: the password never comes back', () => {
     test('redactJson keeps the shape', () => {
         expect(redactJson({ a: ['x', 1, null, true] }, [])).toEqual({ a: ['x', 1, null, true] })
         expect(redactJson({ a: ['pw!', 7] }, ['pw!'])).toEqual({ a: [REDACTED, 7] })
+    })
+})
+
+describe('/sql: the body cannot send the password elsewhere', () => {
+    // A listener of the agent's own on the SSH server, or another port of the
+    // database host, would catch the password (or its scramble).
+    test('behind the tunnel, another host than the credential’s', async () => {
+        const { handle, tunnels, runs } = setup({ 'DB prod': PROD_DB, Bastion: BASTION })
+        const res = await handle(post({ ...VIA_BASTION, host: '10.1.2.3' }))
+        expect((await error(res)).code).toBe('KEYCHAIN_WRONG_SITE')
+        expect(tunnels).toEqual([])
+        expect(runs).toEqual([])
+    })
+
+    test('behind the tunnel, another port than the credential’s', async () => {
+        const { handle, tunnels } = setup({ 'DB prod': PROD_DB, Bastion: BASTION })
+        const res = await handle(post({ ...VIA_BASTION, port: 3307 }))
+        expect((await error(res)).code).toBe('KEYCHAIN_WRONG_SITE')
+        expect(tunnels).toEqual([])
+    })
+
+    test('the same host and port as the credential are fine', async () => {
+        const { handle } = setup({ 'DB prod': PROD_DB, Bastion: BASTION })
+        const res = await handle(post({ ...VIA_BASTION, host: '127.0.0.1', port: 3306 }))
+        expect(res.status).toBe(200)
+    })
+
+    test('a credential without host or port: only loopback and the default port', async () => {
+        const bare: FakeCredential = {
+            ...PROD_DB,
+            fields: { username: 'app', password: PASSWORD },
+        }
+        const ok = setup({ 'DB prod': bare, Bastion: BASTION })
+        expect((await ok.handle(post({ ...VIA_BASTION, host: 'localhost' }))).status).toBe(200)
+        expect(ok.tunnels[0]).toMatchObject({ dst_host: 'localhost', dst_port: 3306 })
+        for (const body of [
+            { ...VIA_BASTION, host: 'db.internal' },
+            { ...VIA_BASTION, port: 3307 },
+        ]) {
+            const s = setup({ 'DB prod': bare, Bastion: BASTION })
+            expect((await error(await s.handle(post(body)))).code).toBe('KEYCHAIN_WRONG_SITE')
+            expect(s.tunnels).toEqual([])
+        }
+    })
+
+    test('another SSH port than the credential’s (or 22)', async () => {
+        const { handle, tunnels } = setup({ 'DB prod': PROD_DB, Bastion: BASTION })
+        const res = await handle(post({ ...VIA_BASTION, ssh: { ...VIA_BASTION.ssh, port: 2222 } }))
+        expect((await error(res)).code).toBe('KEYCHAIN_WRONG_SITE')
+        expect(tunnels).toEqual([])
+    })
+
+    test('direct: another port than the default when the credential has none', async () => {
+        const { handle, runs } = setup({ DB: DIRECT_DB })
+        const res = await handle(post({ credential: 'DB', sql: 'x', port: 4444 }))
+        expect((await error(res)).code).toBe('KEYCHAIN_WRONG_SITE')
+        expect(runs).toEqual([])
+    })
+
+    test('direct: another host than the credential’s', async () => {
+        const { handle, runs } = setup({ DB: DIRECT_DB })
+        const res = await handle(post({ credential: 'DB', sql: 'x', host: 'api.example.com' }))
+        expect((await error(res)).code).toBe('KEYCHAIN_WRONG_SITE')
+        expect(runs).toEqual([])
+    })
+})
+
+describe('/sql: never the password in clear', () => {
+    test('direct needs a name: TLS is verified against it', async () => {
+        const { handle, runs } = setup({
+            DB: {
+                fields: { ...DIRECT_DB.fields, host: '203.0.114.10' },
+                sites: [{ host: '203.0.114.10', subdomains: false }],
+            },
+        })
+        const e = await error(await handle(post({ credential: 'DB', sql: 'x' })))
+        expect(e.code).toBe('KEYCHAIN_DB_TLS_REQUIRED')
+        expect(runs).toEqual([])
+    })
+
+    test('a server without valid TLS, or asking for the password as is', async () => {
+        for (const [kind, code] of [
+            ['tls', 'KEYCHAIN_DB_TLS_REQUIRED'],
+            ['cleartext', 'KEYCHAIN_DB_AUTH_FAILED'],
+        ] as const) {
+            const { handle } = setup({ DB: DIRECT_DB }, async () => {
+                throw new SqlFailure(kind, 'x')
+            })
+            expect((await error(await handle(post({ credential: 'DB', sql: 'x' })))).code).toBe(
+                code
+            )
+        }
+    })
+
+    test('an SSH host key that changes is refused', () => {
+        const known = new KnownHosts()
+        expect(known.check('bastion:22', Buffer.from('key-a'))).toBe(true)
+        expect(known.check('bastion:22', Buffer.from('key-a'))).toBe(true)
+        expect(known.check('bastion:22', Buffer.from('key-b'))).toBe(false)
+        expect(known.check('other:22', Buffer.from('key-b'))).toBe(true)
     })
 })
 

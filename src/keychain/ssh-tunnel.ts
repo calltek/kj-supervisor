@@ -10,22 +10,47 @@
  * an in-process agent: ssh2 never parses the private key itself, so every
  * format `/ssh/key` accepts works here too.
  *
- * There is no known_hosts: kj-keychain keeps no state. The SSH server's host
- * key is not pinned (the first connection of an `ssh` without known_hosts,
- * every time). An impostor in between would not get in with the key (the
- * signature covers the session), but it would see what goes through the
- * tunnel.
+ * There is no known_hosts on disk: kj-keychain keeps no state. Host keys are
+ * remembered in memory per `host:port` (trust on first use, like `ssh`), so a
+ * key that changes while this kj-keychain lives is refused. An impostor on the
+ * very first connection would not get in with the key (the signature covers
+ * the session), but it would see what goes through the tunnel.
  */
 
+import { createHash } from 'node:crypto'
 import type { Duplex } from 'node:stream'
 
 import { BaseAgent, Client, type ParsedKey } from 'ssh2'
 
 import { SSH_AGENT_RSA_SHA2_256, SSH_AGENT_RSA_SHA2_512, type SshKey, signSsh } from './ssh-keys'
 
+const MAX_KNOWN_HOSTS = 1000
+
+/** Host key fingerprints seen, by `host:port`, for as long as this process lives. */
+export class KnownHosts {
+    private readonly keys = new Map<string, string>()
+
+    /** True when `key` is the one seen before for `id`, or the first one. */
+    check(id: string, key: Buffer): boolean {
+        const fingerprint = createHash('sha256').update(key).digest('base64')
+        const known = this.keys.get(id)
+        if (known !== undefined) return known === fingerprint
+        if (this.keys.size >= MAX_KNOWN_HOSTS) {
+            const oldest = this.keys.keys().next().value
+            if (oldest !== undefined) this.keys.delete(oldest)
+        }
+        this.keys.set(id, fingerprint)
+        return true
+    }
+}
+
+const knownHosts = new KnownHosts()
+
 export interface SshTunnelOptions {
     /** The address already checked (never re-resolved here). */
     address: string
+    /** The name the SSH server was asked by: its host key is remembered by it. */
+    host: string
     port: number
     username: string
     key: SshKey
@@ -33,6 +58,8 @@ export interface SshTunnelOptions {
     dst_host: string
     dst_port: number
     timeout_ms: number
+    /** Where host keys are remembered; the process-wide memory by default. */
+    known_hosts?: KnownHosts
 }
 
 export interface SshTunnel {
@@ -45,7 +72,7 @@ export type OpenSshTunnel = (options: SshTunnelOptions) => Promise<SshTunnel>
 /** Why a tunnel did not open, for the message the agent relays. */
 export class SshTunnelError extends Error {
     constructor(
-        readonly reason: 'auth' | 'unreachable' | 'timeout' | 'forward',
+        readonly reason: 'auth' | 'unreachable' | 'timeout' | 'forward' | 'host_key',
         message: string
     ) {
         super(message)
@@ -99,6 +126,7 @@ export const openSshTunnel: OpenSshTunnel = (options) =>
     new Promise<SshTunnel>((resolve, reject) => {
         const client = new Client()
         let settled = false
+        let hostKeyChanged = false
         const fail = (error: SshTunnelError) => {
             if (settled) return
             settled = true
@@ -106,7 +134,9 @@ export const openSshTunnel: OpenSshTunnel = (options) =>
             reject(error)
         }
         client.on('error', (error: Error & { level?: string; code?: string }) => {
-            if (error.level === 'client-authentication') {
+            if (hostKeyChanged) {
+                fail(new SshTunnelError('host_key', 'la clave del servidor SSH ha cambiado'))
+            } else if (error.level === 'client-authentication') {
                 fail(new SshTunnelError('auth', 'el servidor SSH no ha aceptado la clave'))
             } else if (error.level === 'client-timeout') {
                 fail(new SshTunnelError('timeout', 'el servidor SSH no contesta'))
@@ -148,8 +178,15 @@ export const openSshTunnel: OpenSshTunnel = (options) =>
             username: options.username,
             agent: new KeyAgent(options.key),
             readyTimeout: options.timeout_ms,
-            // No known_hosts here (see above).
-            hostVerifier: () => true,
+            // Trust on first use, in memory (see above).
+            hostVerifier: (key: Buffer) => {
+                const ok = (options.known_hosts ?? knownHosts).check(
+                    `${options.host}:${options.port}`,
+                    key
+                )
+                if (!ok) hostKeyChanged = true
+                return ok
+            },
             keepaliveInterval: 0,
         })
     })

@@ -794,7 +794,14 @@ es `src/keychain/`.
   detrás del túnel, `127.0.0.1` vale. Los campos se leen por etiqueta
   (`credential-fields.ts`), y **una credencial SSH sin destinos no da su host ni
   su usuario** (el backend sólo entrega la clave): entonces van en `ssh.host` /
-  `ssh.user`. Sin `known_hosts`: la clave de host del servidor SSH no se fija. SMTP:
+  `ssh.user`. **El host y el puerto del cuerpo sólo valen si repiten los de la
+  credencial** (sin ellos: loopback detrás del túnel y el puerto por defecto del
+  motor; el SSH, su puerto o 22): otro podría ser un listener del propio agente en
+  el servidor SSH esperando la contraseña (SOKI y Nova, #100). **Sin túnel va por
+  TLS** verificado contra el nombre (una IP se rechaza), y nunca se manda la
+  contraseña en claro (`AuthenticationCleartextPassword` de pg, `mysql_clear_password`).
+  La clave de host SSH se recuerda en memoria por `host:port` (TOFU). Tope de 4
+  consultas/envíos a la vez por agente y 500 destinatarios por hora. SMTP:
   465 es TLS directo y cualquier otro puerto exige STARTTLS antes de autenticar; el
   certificado se comprueba contra el nombre aunque se conecte a la IP comprobada.
   Todo valor resuelto sale tapado de filas y errores (`redactJson`). Las pruebas

@@ -29,6 +29,7 @@ import {
     parsePort,
 } from './credential-fields'
 import { KeychainError, errorResponse } from './errors'
+import { ConcurrencyLimit, WindowQuota } from './limits'
 import type { KeychainLog } from './log'
 import { type LookupAll, defaultLookup, resolvePublicAddress } from './public-address'
 import { collectVariants, redactJson, redactText } from './redact'
@@ -95,6 +96,7 @@ export interface MailHandlerDeps {
     log: KeychainLog
     lookup?: LookupAll
     send?: SendMail
+    quota?: WindowQuota
 }
 
 function bad(message: string): KeychainError {
@@ -115,7 +117,8 @@ export function checkAddress(value: unknown, what: string): string {
     if (!text || text.length > MAX_ADDRESS) throw bad(`${what} no es una dirección válida.`)
     const named = /^(.*)<([^<>]+)>$/.exec(text)
     const bare = named ? (named[2] ?? '').trim() : text
-    if (!BARE_ADDRESS.test(bare) || (named && /[<>]/.test(named[1] ?? ''))) {
+    // No , ; " \ in the name either: nodemailer would split `a@x, B <b@y>` in two.
+    if (!BARE_ADDRESS.test(bare) || (named && /[<>,;"\\]/.test(named[1] ?? ''))) {
         throw bad(`${what} no es una dirección válida: ${text}`)
     }
     return text
@@ -260,18 +263,26 @@ export function smtpFailure(error: unknown): SmtpFailure {
     return new SmtpFailure('unreachable', e?.code ?? detail)
 }
 
+/** Mail sends of one agent at once, and recipients per agent per hour. */
+export const MAX_CONCURRENT_SENDS = 4
+export const MAX_RECIPIENTS_PER_HOUR = 500
+
 export function createMailHandler(deps: MailHandlerDeps) {
     const lookup = deps.lookup ?? defaultLookup
     const send = deps.send ?? sendWithNodemailer
+    const slots = new ConcurrencyLimit(MAX_CONCURRENT_SENDS, 'envíos')
+    const quota = deps.quota ?? new WindowQuota(MAX_RECIPIENTS_PER_HOUR, 60 * 60 * 1000)
 
     return async function handleMail(request: Request): Promise<Response> {
         const started = Date.now()
         let agent_id: number | null = null
         let host: string | null = null
         let variants: string[] = []
+        let release: (() => void) | null = null
         try {
             const caller = authenticate(request, deps.registry)
             agent_id = caller.agent_id
+            release = slots.acquire(caller.agent_id)
             const req = parseMailRequest(await readJsonObject(request, MAX_BODY_BYTES))
             const ref: CredentialRef = {
                 agent_id: caller.agent_id,
@@ -342,6 +353,19 @@ export function createMailHandler(deps: MailHandlerDeps) {
 
             // 2. A public address, and the connection goes to the one checked.
             const address = await resolvePublicAddress(host, lookup)
+            const recipients =
+                req.message.to.length + req.message.cc.length + req.message.bcc.length
+            quota.take(
+                caller.agent_id,
+                recipients,
+                () =>
+                    new KeychainError(
+                        'KEYCHAIN_RATE_LIMITED',
+                        `Este agente ya ha enviado a ${MAX_RECIPIENTS_PER_HOUR} destinatarios en ` +
+                            'la última hora, el máximo con una credencial. Espera o díselo al ' +
+                            'operador.'
+                    )
+            )
 
             let result: SmtpSendResult
             try {
@@ -385,6 +409,8 @@ export function createMailHandler(deps: MailHandlerDeps) {
                     'No se ha podido enviar el correo con la credencial.'
                 )
             )
+        } finally {
+            release?.()
         }
     }
 }

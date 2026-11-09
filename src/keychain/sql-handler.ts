@@ -12,16 +12,21 @@
  *
  * The transport is kj-keychain's own, end to end: with `ssh` it opens the
  * tunnel itself (key from the SSH credential, signed here) and talks to the
- * database through it; without, it connects to the checked public address.
- * Nothing goes through the agent's container, which therefore cannot pose as
- * the server to catch the password.
+ * database through it; without, it connects to the checked public address
+ * over TLS, verified against the server's name. Nothing goes through the
+ * agent's container, which therefore cannot pose as the server to catch the
+ * password.
  *
  * The password only goes to the first hop that is one of the DB credential's
  * destinations: the SSH server when tunnelled (the database host is then
  * relative to it, so 127.0.0.1 is fine), the database itself otherwise. The
- * first hop must be a public address. The body may change every non-secret
- * field; never the password.
+ * first hop must be a public address. Host and port may come in the body only
+ * when they repeat the credential's (or, without them, loopback behind a
+ * tunnel and the engine's default port): any other one could be a listener of
+ * the agent waiting for the password. The password never comes in the body.
  */
+
+import { isIP } from 'node:net'
 
 import { authenticate, credentialName, readJsonObject } from './agent-request'
 import {
@@ -34,6 +39,7 @@ import {
     parsePort,
 } from './credential-fields'
 import { KeychainError, errorResponse } from './errors'
+import { ConcurrencyLimit } from './limits'
 import type { KeychainLog } from './log'
 import { type LookupAll, defaultLookup, resolvePublicAddress } from './public-address'
 import { collectVariants, redactJson, redactText } from './redact'
@@ -187,19 +193,27 @@ export function defaultPort(engine: SqlEngine): number {
 
 const found = (l: FieldLookup): string | null => (l.status === 'found' ? l.value : null)
 
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1'])
+
+/** Queries of one agent running at once. */
+export const MAX_CONCURRENT_QUERIES = 4
+
 export function createSqlHandler(deps: SqlHandlerDeps) {
     const lookup = deps.lookup ?? defaultLookup
     const openTunnel = deps.openTunnel ?? openSshTunnel
     const run = deps.runSql ?? runSql
+    const slots = new ConcurrencyLimit(MAX_CONCURRENT_QUERIES, 'consultas')
 
     return async function handleSql(request: Request): Promise<Response> {
         const started = Date.now()
         let agent_id: number | null = null
         let host: string | null = null
         let variants: string[] = []
+        let release: (() => void) | null = null
         try {
             const caller = authenticate(request, deps.registry)
             agent_id = caller.agent_id
+            release = slots.acquire(caller.agent_id)
             const req = parseSqlRequest(await readJsonObject(request, MAX_BODY_BYTES))
             const ref: CredentialRef = {
                 agent_id: caller.agent_id,
@@ -255,15 +269,54 @@ export function createSqlHandler(deps: SqlHandlerDeps) {
                         `La credencial ${sshLabel} no lleva una clave privada SSH.`
                     )
                 }
+                // Another port of the same machine could be a listener of whoever
+                // has a shell there: only the credential's port, or 22.
+                const sshCredentialPort = parsePort(found(sshPort), sshLabel)
+                const sPort = sshCredentialPort ?? 22
+                if (req.ssh.port !== null && req.ssh.port !== sPort) {
+                    throw new KeychainError(
+                        'KEYCHAIN_WRONG_SITE',
+                        `El túnel sólo se abre al puerto ${sPort} del servidor SSH ` +
+                            `(${sshCredentialPort ? `el de ${sshLabel}` : 'el de SSH; Kujira no lee otro de la credencial'}), ` +
+                            `no al ${req.ssh.port}. Si es otro, pide al operador que lo ponga ` +
+                            `en ${sshLabel} y que le añada un destino.`
+                    )
+                }
                 ssh = {
                     host: sHost,
-                    port: req.ssh.port ?? parsePort(found(sshPort), sshLabel) ?? 22,
+                    port: sPort,
                     user: sUser,
                     key: parseCredentialKey(req.ssh.credential, sshKey.value),
                 }
             }
+
+            // Where the password goes. The body may only repeat what the
+            // credential says: any other host or port could be a listener of the
+            // agent itself (on the SSH server, say) waiting for the password.
             const credentialHost = optionalHost(found(dbHost), `El host de ${label}`)
-            const databaseHost = req.host ?? credentialHost ?? (ssh ? '127.0.0.1' : null)
+            let databaseHost: string | null
+            if (credentialHost) {
+                if (req.host && req.host !== credentialHost) {
+                    throw new KeychainError(
+                        'KEYCHAIN_WRONG_SITE',
+                        `La credencial ${label} es para el host ${credentialHost}, no para ` +
+                            `${req.host}. No se ha conectado.`
+                    )
+                }
+                databaseHost = credentialHost
+            } else if (ssh) {
+                if (req.host && !LOOPBACK.has(req.host)) {
+                    throw new KeychainError(
+                        'KEYCHAIN_WRONG_SITE',
+                        `${label} no dice en qué host está la base, así que detrás del túnel ` +
+                            `sólo se usa en la propia máquina (127.0.0.1), no en ${req.host}. ` +
+                            'Si está en otro, pide al operador que lo ponga en la credencial.'
+                    )
+                }
+                databaseHost = req.host ?? '127.0.0.1'
+            } else {
+                databaseHost = req.host
+            }
             const firstHop = ssh ? ssh.host : databaseHost
             host = firstHop
             if (dbPassword.status === 'no_destination')
@@ -291,8 +344,28 @@ export function createSqlHandler(deps: SqlHandlerDeps) {
                 )
             }
             const credentialPort = parsePort(found(dbPort), label)
-            const engine = chooseEngine(req.engine, req.port ?? credentialPort)
-            const port = req.port ?? credentialPort ?? defaultPort(engine)
+            const engine = chooseEngine(req.engine, credentialPort ?? req.port)
+            const port = credentialPort ?? defaultPort(engine)
+            if (req.port !== null && req.port !== port) {
+                throw new KeychainError(
+                    'KEYCHAIN_WRONG_SITE',
+                    `La contraseña de ${label} sólo va al puerto ${port}` +
+                        (credentialPort
+                            ? ''
+                            : ` (el de ${engine} por defecto; la credencial no dice otro)`) +
+                        `, no al ${req.port}. Si es otro, pide al operador que lo ponga en la ` +
+                        'credencial.'
+                )
+            }
+            // Without a tunnel it goes over TLS, verified against the server's name.
+            if (!ssh && isIP(databaseHost)) {
+                throw new KeychainError(
+                    'KEYCHAIN_DB_TLS_REQUIRED',
+                    `Sin túnel, la conexión con la base va cifrada y su certificado se comprueba ` +
+                        `contra el nombre del servidor, así que hace falta su nombre, no la IP ` +
+                        `${databaseHost}. O conéctate por un túnel SSH (ssh).`
+                )
+            }
 
             // 2. The first hop must be public; we connect to the address checked.
             const address = await resolvePublicAddress(firstHop ?? databaseHost, lookup)
@@ -304,6 +377,7 @@ export function createSqlHandler(deps: SqlHandlerDeps) {
                 if (ssh) {
                     tunnel = await openTunnel({
                         address: address.address,
+                        host: ssh.host,
                         port: ssh.port,
                         username: ssh.user,
                         key: ssh.key,
@@ -313,9 +387,14 @@ export function createSqlHandler(deps: SqlHandlerDeps) {
                     }).catch((error) => {
                         throw tunnelError(error, ssh, databaseHost, port)
                     })
-                    transport = { kind: 'stream', stream: tunnel.stream, host: databaseHost, port }
+                    transport = { kind: 'tunnel', stream: tunnel.stream, host: databaseHost, port }
                 } else {
-                    transport = { kind: 'tcp', address: address.address, port }
+                    transport = {
+                        kind: 'tls',
+                        address: address.address,
+                        port,
+                        servername: databaseHost,
+                    }
                 }
                 const result = await run({
                     engine,
@@ -363,6 +442,8 @@ export function createSqlHandler(deps: SqlHandlerDeps) {
                     'No se ha podido ejecutar la consulta con la credencial.'
                 )
             )
+        } finally {
+            release?.()
         }
     }
 }
@@ -387,6 +468,10 @@ function tunnelError(
         forward:
             `El servidor SSH ${where} no deja abrir una conexión a ${dbHost}:${dbPort}. Revisa ` +
             'que la base de datos escuche ahí, vista desde ese servidor.',
+        host_key:
+            `La clave del servidor SSH ${where} no es la de la última conexión: podría ser un ` +
+            'impostor, así que no se ha conectado. Si el servidor se ha reinstalado, díselo ' +
+            'al operador.',
     }[error.reason]
     return new KeychainError('KEYCHAIN_SSH_FAILED', message)
 }
@@ -422,6 +507,21 @@ function sqlError(
                 'La base de datos no ha contestado a tiempo (máximo ' +
                     `${CONNECT_TIMEOUT_MS / 1000} s para conectar y ` +
                     `${STATEMENT_TIMEOUT_MS / 1000} s por consulta).`
+            )
+        case 'tls':
+            return new KeychainError(
+                'KEYCHAIN_DB_TLS_REQUIRED',
+                `La base de datos en ${host}:${port} no ofrece una conexión cifrada con un ` +
+                    `certificado válido para ese nombre (${error.message}). Sin cifrado la ` +
+                    'contraseña no sale de Kujira: conéctate por un túnel SSH (ssh) o pide al ' +
+                    'operador que active TLS en el servidor.'
+            )
+        case 'cleartext':
+            return new KeychainError(
+                'KEYCHAIN_DB_AUTH_FAILED',
+                `La base de datos en ${host}:${port} pide la contraseña sin cifrar, y Kujira ` +
+                    'no la manda así. Pide al operador que el usuario use otro método de ' +
+                    'autenticación (scram-sha-256, caching_sha2_password o mysql_native_password).'
             )
         case 'sql':
             return new KeychainError(

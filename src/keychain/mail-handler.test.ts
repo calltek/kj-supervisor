@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { KeychainResolveAck, KeychainSite } from './control-protocol'
+import { ConcurrencyLimit, WindowQuota } from './limits'
 import { silentLog } from './log'
 import {
     MAIL_PATH,
@@ -150,6 +151,9 @@ describe('/mail: limits', () => {
         expect(() => checkAddress('Nombre <a@b.c>', 'to')).not.toThrow()
         expect(() => checkAddress('a@b.c, d@e.f', 'to')).toThrow()
         expect(() => checkAddress('<a@b.c> <d@e.f>', 'to')).toThrow()
+        // One entry must stay one recipient: nodemailer would split these.
+        expect(() => checkAddress('a@x.com, Bob <b@y.com>', 'to')).toThrow()
+        expect(() => checkAddress('"Bob; Ann" <b@y.com>', 'to')).toThrow()
     })
 
     test(`at most ${MAX_RECIPIENTS} recipients in all`, () => {
@@ -163,6 +167,25 @@ describe('/mail: limits', () => {
         expect(() => parseMailRequest({ ...MESSAGE, text: 'x'.repeat(1024 * 1024 + 1) })).toThrow()
         expect(() => parseMailRequest({ ...MESSAGE, text: undefined })).toThrow()
         expect(() => parseMailRequest({ ...MESSAGE, password: 'x' })).toThrow()
+    })
+
+    test('recipients per hour, per agent', () => {
+        let now = 0
+        const quota = new WindowQuota(10, 1000, () => now)
+        const refuse = () => new Error('limit') as never
+        quota.take(1, 6, refuse)
+        expect(() => quota.take(1, 5, refuse)).toThrow('limit')
+        quota.take(2, 10, refuse)
+        now = 1001
+        quota.take(1, 10, refuse)
+    })
+
+    test('sends of one agent at once', () => {
+        const limit = new ConcurrencyLimit(1, 'envíos')
+        const release = limit.acquire(1)
+        expect(() => limit.acquire(1)).toThrow()
+        release()
+        limit.acquire(1)
     })
 
     test('failures from nodemailer by kind', () => {
