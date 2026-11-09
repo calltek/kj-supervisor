@@ -228,6 +228,8 @@ export function inCidr(ip: string, cidr: string): boolean {
     const b = ipValue(base ?? '')
     if (!a || !b || a.family !== b.family) return false
     const width = a.family === 4 ? 32 : 128
+    // A malformed mask (`1.2.3.4/`, `/abc`, `/40`) matches nothing, never everything.
+    if (bits !== undefined && (!/^\d{1,3}$/.test(bits) || Number(bits) > width)) return false
     const prefix = bits === undefined ? width : Number(bits)
     const shift = BigInt(width - prefix)
     return a.value >> shift === b.value >> shift

@@ -138,6 +138,8 @@ describe('the floor', () => {
     test('inCidr', () => {
         expect(inCidr('::ffff:169.254.169.254', '::ffff:0:0/96')).toBe(true)
         expect(inCidr('fe80::1%eth0', 'fe80::/10')).toBe(false)
+        expect(inCidr('10.0.0.1', '1.2.3.4/')).toBe(false)
+        expect(inCidr('10.0.0.1', '1.2.3.4/40')).toBe(false)
         expect(inCidr('172.17.0.9', '172.17.0.5/16')).toBe(true)
         expect(inCidr('172.18.0.9', '172.17.0.5/16')).toBe(false)
         expect(inCidr('169.254.169.254', '169.254.0.0/16')).toBe(true)
