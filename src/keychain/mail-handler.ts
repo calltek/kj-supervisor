@@ -4,9 +4,17 @@
  * the `kj-mail` CLI of kj-agent-base calls this).
  *
  * ```
- * { credential, to: string[], cc?, bcc?, reply_to?, from?, subject, text?, html? }
- * → { ok: true, message_id, accepted, rejected }
+ * { credential, to: string[], cc?, bcc?, reply_to?, from?, subject, text?, html?,
+ *   attachments?: [{ filename, content_base64, content_type? }] }
+ * → { ok: true, message_id, accepted, rejected, attachments: number }
  * ```
+ *
+ * Attachments come as bytes, read by `kj-mail` in the conversation's own
+ * process — so only a file that conversation can read — and never as a path:
+ * this container has no files of the agent's, and nodemailer's file and URL
+ * access stay off. `kj-mail` sends them to `/mail/attach`, which an older
+ * kj-keychain doesn't know (nothing goes out) instead of `/mail`, where it
+ * would drop the attachments and send the rest.
  *
  * Host, port, user, password and `from` come from the credential; the body
  * may only pick another `from` (the server decides whether it lets it). Port
@@ -38,14 +46,20 @@ import type { Resolve } from './resolver'
 import { normalizeHost } from './sites'
 
 export const MAIL_PATH = '/mail'
+/** Same handler; the path `kj-mail` uses when it attaches (see above). */
+export const MAIL_ATTACH_PATH = '/mail/attach'
 
 export const MAX_RECIPIENTS = 50
 export const MAX_MESSAGE_BYTES = 1024 * 1024
 export const MAX_SUBJECT = 998
 export const DEFAULT_SMTP_PORT = 587
+/** What most mail servers take whole (they refuse past 20–25 MB, base64 included). */
+export const MAX_ATTACHMENTS = 10
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_FILENAME = 255
 
-/** JSON escaping can grow the message; this only stops what is plainly too big. */
-const MAX_BODY_BYTES = 4 * 1024 * 1024
+/** The message plus its attachments in base64 and JSON escaping, with room. */
+const MAX_BODY_BYTES = 4 * 1024 * 1024 + Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3)
 const MAX_ADDRESS = 320
 
 export interface SmtpSendOptions {
@@ -70,6 +84,13 @@ export interface MailMessage {
     subject: string
     text: string | null
     html: string | null
+    attachments: MailAttachment[]
+}
+
+export interface MailAttachment {
+    filename: string
+    content: Buffer
+    content_type: string
 }
 
 export interface SmtpSendResult {
@@ -224,8 +245,65 @@ export function parseMailRequest(body: Record<string, unknown>): MailRequest {
     return {
         credential,
         from,
-        message: { to, cc, bcc, reply_to, subject: body.subject, text, html },
+        message: {
+            to,
+            cc,
+            bcc,
+            reply_to,
+            subject: body.subject,
+            text,
+            html,
+            attachments: parseAttachments(body.attachments),
+        },
     }
+}
+
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
+const CONTENT_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i
+
+/**
+ * The attachments as bytes. A name is only a name — never a path, a line break
+ * or a header — and a type that doesn't read as one becomes a plain download.
+ */
+export function parseAttachments(value: unknown): MailAttachment[] {
+    if (value === undefined || value === null) return []
+    if (!Array.isArray(value)) throw bad('attachments tiene que ser una lista.')
+    if (value.length > MAX_ATTACHMENTS) {
+        throw bad(`Como mucho ${MAX_ATTACHMENTS} adjuntos por correo.`)
+    }
+    let total = 0
+    return value.map((raw, i) => {
+        const what = `El adjunto ${i + 1}`
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw bad(`${what} no tiene la forma { filename, content_base64 }.`)
+        }
+        const a = raw as Record<string, unknown>
+        if (typeof a.filename !== 'string' || !a.filename.trim()) {
+            throw bad(`${what} no tiene nombre.`)
+        }
+        const filename = a.filename.trim()
+        if (CONTROL.test(filename) || /[/\\]/.test(filename) || filename.length > MAX_FILENAME) {
+            throw bad(`${what} tiene un nombre no válido: sólo el nombre, sin carpetas.`)
+        }
+        if (typeof a.content_base64 !== 'string' || !BASE64.test(a.content_base64)) {
+            throw bad(`${what} (${filename}) no viene en base64.`)
+        }
+        const content = Buffer.from(a.content_base64, 'base64')
+        total += content.byteLength
+        if (total > MAX_ATTACHMENT_BYTES) {
+            throw new KeychainError(
+                'KEYCHAIN_REQUEST_TOO_LARGE',
+                `Los adjuntos pasan de ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB en total, el ` +
+                    'máximo para enviar con una credencial. Comprime los ficheros o compártelos ' +
+                    'con un enlace.'
+            )
+        }
+        const content_type =
+            typeof a.content_type === 'string' && CONTENT_TYPE.test(a.content_type)
+                ? a.content_type.toLowerCase()
+                : 'application/octet-stream'
+        return { filename, content, content_type }
+    })
 }
 
 function isEmail(value: string): boolean {
@@ -262,6 +340,13 @@ export const sendWithNodemailer: SendMail = async (o) => {
             subject: m.subject,
             text: m.text ?? undefined,
             html: m.html ?? undefined,
+            attachments: m.attachments.length
+                ? m.attachments.map((a) => ({
+                      filename: a.filename,
+                      content: a.content,
+                      contentType: a.content_type,
+                  }))
+                : undefined,
             disableFileAccess: true,
             disableUrlAccess: true,
         })
@@ -434,9 +519,20 @@ export function createMailHandler(deps: MailHandlerDeps) {
                 recipients: req.message.to.length + req.message.cc.length + req.message.bcc.length,
                 accepted: result.accepted.length,
                 rejected: result.rejected.length,
+                // How many and how big; never their names or contents.
+                attachments: req.message.attachments.length,
+                attachment_bytes: req.message.attachments.reduce(
+                    (n, a) => n + a.content.byteLength,
+                    0
+                ),
                 ms: Date.now() - started,
             })
-            return Response.json(redactJson({ ok: true, ...result }, variants))
+            return Response.json(
+                redactJson(
+                    { ok: true, ...result, attachments: req.message.attachments.length },
+                    variants
+                )
+            )
         } catch (error) {
             if (error instanceof KeychainError) {
                 deps.log('warn', 'mail refused', {

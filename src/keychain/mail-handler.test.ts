@@ -5,6 +5,7 @@ import { ConcurrencyLimit, WindowQuota } from './limits'
 import { silentLog } from './log'
 import {
     MAIL_PATH,
+    MAX_ATTACHMENT_BYTES,
     MAX_RECIPIENTS,
     SmtpFailure,
     type SmtpSendOptions,
@@ -90,6 +91,7 @@ describe('/mail', () => {
             message_id: '<id@example.com>',
             accepted: ['cliente@example.org'],
             rejected: [],
+            attachments: 0,
         })
         expect(sent[0]).toMatchObject({
             address: '203.0.114.25',
@@ -216,5 +218,57 @@ describe('/mail: limits', () => {
         ).toBe('tls')
         expect(smtpFailure({ code: 'EENVELOPE', response: '550 no' }).kind).toBe('rejected')
         expect(smtpFailure({ code: 'ECONNECTION' }).kind).toBe('unreachable')
+    })
+})
+
+describe('/mail attachments', () => {
+    const file = (filename: string, bytes: Buffer, content_type?: string) => ({
+        filename,
+        content_base64: bytes.toString('base64'),
+        ...(content_type ? { content_type } : {}),
+    })
+
+    test('go to the SMTP server as bytes with their name and type', async () => {
+        const { handle, sent } = setup(SMTP)
+        const pdf = Buffer.from('%PDF-1.7 tarifa')
+        const res = await handle(
+            post({ ...MESSAGE, attachments: [file('tarifa.pdf', pdf, 'application/pdf')] })
+        )
+        expect(res.status).toBe(200)
+        expect(((await res.json()) as { attachments: number }).attachments).toBe(1)
+        const [a] = sent[0]?.message.attachments ?? []
+        expect(a?.filename).toBe('tarifa.pdf')
+        expect(a?.content_type).toBe('application/pdf')
+        expect(a?.content.equals(pdf)).toBe(true)
+    })
+
+    test('a name is only a name: no folders, no line breaks; nothing is sent', async () => {
+        for (const filename of ['../etc/passwd', 'a\\b.txt', 'x\r\nBcc: y@z.w']) {
+            const { handle, sent } = setup(SMTP)
+            const res = await handle(
+                post({ ...MESSAGE, attachments: [file(filename, Buffer.from('x'))] })
+            )
+            expect(res.status).toBe(400)
+            expect(sent).toHaveLength(0)
+        }
+    })
+
+    test('past the total size nothing is sent, and an odd type becomes a download', async () => {
+        const big = setup(SMTP)
+        const half = Buffer.alloc(MAX_ATTACHMENT_BYTES / 2 + 1)
+        const res = await big.handle(
+            post({ ...MESSAGE, attachments: [file('a.bin', half), file('b.bin', half)] })
+        )
+        expect((await error(res)).code).toBe('KEYCHAIN_REQUEST_TOO_LARGE')
+        expect(big.sent).toHaveLength(0)
+
+        const odd = setup(SMTP)
+        await odd.handle(
+            post({
+                ...MESSAGE,
+                attachments: [file('a.txt', Buffer.from('x'), 'text/html\r\nX: y')],
+            })
+        )
+        expect(odd.sent[0]?.message.attachments[0]?.content_type).toBe('application/octet-stream')
     })
 })
