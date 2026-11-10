@@ -42,7 +42,11 @@ export type KeychainResolveErrorCode = (typeof KEYCHAIN_RESOLVE_ERROR_CODES)[num
 
 /** Respuesta de `keychain:resolve` (backend → supervisor → kj-keychain). */
 export type KeychainResolveAck =
-    | { ok: true; value: string; sites: KeychainSite[] }
+    /**
+     * `recipients`: only when the credential lists some, who mail sent with it
+     * may go to (`ana@acme.com` or `*@acme.com`). Absent = anyone.
+     */
+    | { ok: true; value: string; sites: KeychainSite[]; recipients?: string[] }
     | { ok: false; code: KeychainResolveErrorCode; message: string }
 
 /** Supervisor → kj-keychain. */

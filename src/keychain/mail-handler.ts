@@ -134,6 +134,47 @@ function addressList(value: unknown, what: string, required: boolean): string[] 
     return value.map((v) => checkAddress(v, what))
 }
 
+/** The bare address of `a@b.c` or `Nombre <a@b.c>`, lower-cased. */
+function bareAddress(value: string): string {
+    const named = /<([^<>]+)>$/.exec(value.trim())
+    return (named ? (named[1] ?? '') : value).trim().toLowerCase()
+}
+
+/**
+ * Whether `address` is let in by one of the credential's recipients: the same
+ * address, or `*@domain` for exactly that domain (never a subdomain), as a
+ * mail channel's recipient list reads it (kj-backend `sender-filter.ts`).
+ */
+export function recipientAllowed(address: string, allowed: readonly string[]): boolean {
+    const addr = bareAddress(address)
+    return allowed.some((entry) => {
+        const want = entry.trim().toLowerCase()
+        if (want.startsWith('*@')) return addr.endsWith(want.slice(1))
+        return want === addr
+    })
+}
+
+/**
+ * Every to, cc and bcc has to be one the credential allows, or nothing is sent.
+ * No list = anyone: a credential without recipients, or a backend that does not
+ * send them yet.
+ */
+export function assertRecipients(
+    credential: string,
+    addresses: readonly string[],
+    allowed: readonly string[] | undefined
+): void {
+    if (!allowed?.length) return
+    const out = addresses.filter((a) => !recipientAllowed(a, allowed))
+    if (out.length === 0) return
+    throw new KeychainError(
+        'KEYCHAIN_WRONG_RECIPIENT',
+        `La credencial «${credential}» sólo puede escribir a ${allowed.join(', ')}; no a ` +
+            `${out.map(bareAddress).join(', ')}. No se ha enviado nada. Si hace falta, quien ` +
+            'gestione la credencial puede añadirlo en Credenciales.'
+    )
+}
+
 export interface MailRequest {
     credential: string
     from: string | null
@@ -326,6 +367,12 @@ export function createMailHandler(deps: MailHandlerDeps) {
             }
             // 1. The password only goes to a destination of its credential.
             assertDestination(req.credential, host, smtpPassword.sites)
+            // 2. And the mail only to the recipients it allows, if it lists any.
+            assertRecipients(
+                req.credential,
+                [...req.message.to, ...req.message.cc, ...req.message.bcc],
+                smtpPassword.recipients
+            )
             const user = smtpUser.status === 'found' ? smtpUser.value.trim() : ''
             if (!user) {
                 throw new KeychainError(

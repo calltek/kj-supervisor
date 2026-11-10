@@ -28,7 +28,7 @@ export const FIELD_LABELS = {
 } as const
 
 export type FieldLookup =
-    | { status: 'found'; value: string; sites: KeychainSite[] }
+    | { status: 'found'; value: string; sites: KeychainSite[]; recipients?: string[] }
     | { status: 'absent' }
     | { status: 'no_destination' }
 
@@ -50,7 +50,14 @@ export async function lookupField(
     const acks = await Promise.all(labels.map((field) => resolve({ ...ref, field })))
     let noDestination = false
     for (const ack of acks) {
-        if (ack.ok) return { status: 'found', value: ack.value, sites: ack.sites }
+        if (ack.ok) {
+            return {
+                status: 'found',
+                value: ack.value,
+                sites: ack.sites,
+                recipients: ack.recipients,
+            }
+        }
         if (ack.code === 'KEYCHAIN_NO_FIELD') continue
         if (ack.code === 'KEYCHAIN_NO_DESTINATION') {
             noDestination = true
