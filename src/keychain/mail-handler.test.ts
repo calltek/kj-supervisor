@@ -28,7 +28,8 @@ function setup(
         message_id: '<id@example.com>',
         accepted: o.message.to,
         rejected: [],
-    })
+    }),
+    recipients?: string[]
 ) {
     const registry = new AgentTokenRegistry()
     registry.set(42, TOKEN)
@@ -41,7 +42,7 @@ function setup(
             if (!sites.length) {
                 return { ok: false, code: 'KEYCHAIN_NO_DESTINATION', message: 'none' }
             }
-            return { ok: true, value, sites }
+            return { ok: true, value, sites, ...(recipients ? { recipients } : {}) }
         },
         log: silentLog,
         lookup: async (host) =>
@@ -124,6 +125,25 @@ describe('/mail', () => {
         expect((await error(await other.handle(post(MESSAGE)))).code).toBe('KEYCHAIN_WRONG_SITE')
         expect(none.sent).toEqual([])
         expect(other.sent).toEqual([])
+    })
+
+    test('with recipients on the credential, every to/cc/bcc has to be one of them', async () => {
+        const allowed = ['ana@example.org', '*@acme.example']
+        const ok = setup(SMTP, undefined, undefined, allowed)
+        const res = await ok.handle(
+            post({ ...MESSAGE, to: ['Ana <ANA@example.org>'], cc: ['pepe@acme.example'] })
+        )
+        expect(res.status).toBe(200)
+
+        const no = setup(SMTP, undefined, undefined, allowed)
+        const e = await error(
+            await no.handle(
+                post({ ...MESSAGE, to: ['ana@example.org'], bcc: ['x@sub.acme.example'] })
+            )
+        )
+        expect(e.code).toBe('KEYCHAIN_WRONG_RECIPIENT')
+        expect(e.message).toContain('x@sub.acme.example')
+        expect(no.sent).toEqual([])
     })
 
     test('a private SMTP server is refused', async () => {
