@@ -21,7 +21,9 @@
  *   agent), so it is reachable from the containers and not from the internet.
  *   The control port only on loopback. Without a bridge gateway (Docker
  *   Desktop, where `host.docker.internal` IS the host's loopback) both go on
- *   127.0.0.1.
+ *   127.0.0.1. The gateway port is for the agents made before kj-keychain
+ *   had its own network: the ones made now call it there, by name
+ *   (keychain-network.ts), which a firewall on the host doesn't see.
  */
 
 import type Docker from 'dockerode'
@@ -109,6 +111,3 @@ export function keychainControlUrl(
           : 'host.docker.internal'
     return `ws://${host}:${KEYCHAIN_CONTROL_PORT}/control`
 }
-
-/** What the agents' launcher calls (`KJ_KEYCHAIN_ENDPOINT`). */
-export const KEYCHAIN_AGENT_ENDPOINT = `http://host.docker.internal:${KEYCHAIN_AGENT_PORT}`

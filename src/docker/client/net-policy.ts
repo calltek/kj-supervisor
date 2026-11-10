@@ -174,6 +174,12 @@ export interface NetTargets {
     /** The bridge gateway, where kj-keychain listens for the agents. */
     gateway: string | null
     keychain_port: number
+    /**
+     * kj-keychain on its own network (keychain-network.ts), where agents made
+     * by this supervisor call it. Inside `docker_nets`, so on a shared machine
+     * the floor would close it: only its agents' port is opened, before.
+     */
+    keychain_ip?: string | null
     always: ResolvedEndpoint[]
     /**
      * A shared machine (tenancy.ts): the conversations always get the floor —
@@ -281,6 +287,8 @@ export function chainRules(
     }
     if (family === 4 && t.gateway && cidrFamily(t.gateway) === 4)
         out.push(`${a} -d ${t.gateway} -p tcp --dport ${t.keychain_port} -j ACCEPT`)
+    if (t.keychain_ip && cidrFamily(t.keychain_ip) === family)
+        out.push(`${a} -d ${t.keychain_ip} -p tcp --dport ${t.keychain_port} -j ACCEPT`)
     // The floor: always for the browser and on a shared machine; for the
     // conversations of a dedicated one, only once a list exists.
     const floored = browser || !!t.shared || isCustomNetPolicy({ ...scope, always: [] })
