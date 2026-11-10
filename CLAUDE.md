@@ -746,6 +746,22 @@ es `src/keychain/`.
   bridge, y desde ahí el `127.0.0.1` del host no le llega (sin canal no hay
   tokens, y todo da `KEYCHAIN_UNAUTHORIZED`). La IP se relee en cada
   reconexión.
+- **Los agentes lo llaman por su red, no por el host** (2026-11-10,
+  `keychain-network.ts`): de contenedor a máquina lo corta un cortafuegos con
+  `INPUT DROP` (el Plesk de Austral) y fallaban todas las referencias; de
+  contenedor a contenedor no. El supervisor crea o reutiliza `kj-keychain-net`
+  (bridge **interna** y con nuestra etiqueta: no da ruta por defecto, la salida
+  del agente sigue por el `bridge`; una red con ese nombre que no sea nuestra
+  no se toca), mete en ella a kj-keychain y a cada agente que crea o recrea —
+  spawn y `agent:image:update`, en `createAgentContainer` — y les reescribe
+  `KJ_KEYCHAIN_ENDPOINT` a `http://kj-keychain:9890`. Sin red, o si un agente
+  no entra en ella, vuelve a `host.docker.internal:9890`. Los agentes de antes
+  siguen por el puerto de la pasarela hasta que se recreen. En modo compartido
+  el suelo de net-policy cierra esa red: se abre sólo la IP de kj-keychain y el
+  9890, que se lee al aplicar la política (el `agent:sync` llega tras crear
+  kj-keychain, así que la IP es la nueva). Un supervisor viejo de vuelta
+  (marcha atrás del blue/green) recrea kj-keychain sin la red, y los agentes
+  nuevos no lo alcanzan hasta reiniciar el bueno.
 - **Un token por contenedor de agente**, en `KJ_KEYCHAIN_TOKEN`. Tras un
   reinicio no hay estado: se relee del `Config.Env` de cada agente vivo al
   arrancar y en cada `attach` (spawn, `agent:sync`, recreate por imagen, que

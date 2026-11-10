@@ -26,16 +26,16 @@ import {
     type KeychainResolveErrorCode,
 } from '../keychain/control-protocol'
 import { type ControlSocketFactory, KeychainControlChannel } from './keychain-control-channel'
+import { buildKeychainContainerSpec, keychainControlUrl, LOOPBACK } from './keychain-container'
 import {
-    buildKeychainContainerSpec,
-    KEYCHAIN_AGENT_ENDPOINT,
-    keychainControlUrl,
-    LOOPBACK,
-} from './keychain-container'
+    KEYCHAIN_ENDPOINT_ENV,
+    KEYCHAIN_HOST_ENDPOINT,
+    KEYCHAIN_NETWORK_ENDPOINT,
+} from './keychain-network'
 import type Docker from 'dockerode'
 
 export const KEYCHAIN_TOKEN_ENV = 'KJ_KEYCHAIN_TOKEN'
-export const KEYCHAIN_ENDPOINT_ENV = 'KJ_KEYCHAIN_ENDPOINT'
+export { KEYCHAIN_ENDPOINT_ENV }
 /** How long the control gets to answer a `keychain:resolve`. */
 export const KEYCHAIN_RESOLVE_TIMEOUT_MS = 8_000
 
@@ -58,7 +58,11 @@ export interface KeychainDocker {
     inspectOwnContainer(): Promise<{ image: string; network_mode?: string } | null>
     bridgeGateway(): Promise<string | null>
     isDockerDesktop(): Promise<boolean>
-    replaceContainer(spec: Docker.ContainerCreateOptions): Promise<string>
+    /** Our network for agents ↔ kj-keychain (keychain-network.ts), or null. */
+    ensureKeychainNetwork(): Promise<string | null>
+    /** kj-keychain is not on it after all: agents go back to the host's address. */
+    dropKeychainNetwork(): void
+    replaceContainer(spec: Docker.ContainerCreateOptions, networks?: string[]): Promise<string>
     listKjContainers(): Promise<Array<{ container_id: string; agent_id: number | null }>>
     inspect(container_id: string): Promise<{
         Config?: { Env?: string[] | null } | null
@@ -97,6 +101,8 @@ export class KeychainHost {
     private readonly tokens = new Map<number, string>()
     private channel: KeychainControlChannel | null = null
     private controlUrl = ''
+    /** What `envFor` hands out: through our network once kj-keychain is on it. */
+    private endpoint = KEYCHAIN_HOST_ENDPOINT
 
     constructor(deps: KeychainHostDeps) {
         this.docker = deps.docker
@@ -121,15 +127,40 @@ export class KeychainHost {
             const desktop = await this.docker.isDockerDesktop().catch(() => false)
             const agent_host_ip = gateway && !desktop ? gateway : LOOPBACK
             const secret = randomBytes(32).toString('hex')
-            const id = await this.docker.replaceContainer(
-                buildKeychainContainerSpec({
-                    image: own.image,
-                    control_secret: secret,
-                    agent_host_ip,
-                })
-            )
+            const spec = buildKeychainContainerSpec({
+                image: own.image,
+                control_secret: secret,
+                agent_host_ip,
+            })
+            // Its own network as well as the bridge: a firewall that drops what
+            // enters the host drops an agent calling the gateway, not one
+            // calling a container (keychain-network.ts). The port on the
+            // gateway stays, for the agents made before.
+            const network = await this.docker.ensureKeychainNetwork()
+            let id: string
+            if (network) {
+                try {
+                    id = await this.docker.replaceContainer(spec, [network])
+                    this.endpoint = KEYCHAIN_NETWORK_ENDPOINT
+                } catch (err) {
+                    this.logger.warn(
+                        { network, err: err instanceof Error ? err.message : String(err) },
+                        'keychain: could not put kj-keychain on its network — agents call it through the host'
+                    )
+                    this.docker.dropKeychainNetwork()
+                    id = await this.docker.replaceContainer(spec)
+                }
+            } else {
+                id = await this.docker.replaceContainer(spec)
+            }
             this.logger.info(
-                { container_id: id, agent_host_ip, image: own.image },
+                {
+                    container_id: id,
+                    agent_host_ip,
+                    image: own.image,
+                    network,
+                    endpoint: this.endpoint,
+                },
                 'keychain: kj-keychain started'
             )
             await this.adoptLive()
@@ -150,6 +181,8 @@ export class KeychainHost {
             })
             this.channel.start()
         } catch (err) {
+            this.docker.dropKeychainNetwork()
+            this.endpoint = KEYCHAIN_HOST_ENDPOINT
             this.logger.error(
                 { err: err instanceof Error ? err.message : String(err) },
                 'keychain: could not start kj-keychain — the supervisor carries on without it'
@@ -169,7 +202,7 @@ export class KeychainHost {
     envFor(agent_id: number): Record<string, string> {
         const token = randomBytes(32).toString('hex')
         this.register(agent_id, token)
-        return { [KEYCHAIN_TOKEN_ENV]: token, [KEYCHAIN_ENDPOINT_ENV]: KEYCHAIN_AGENT_ENDPOINT }
+        return { [KEYCHAIN_TOKEN_ENV]: token, [KEYCHAIN_ENDPOINT_ENV]: this.endpoint }
     }
 
     /**

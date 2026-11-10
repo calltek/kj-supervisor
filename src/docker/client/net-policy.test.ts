@@ -232,3 +232,23 @@ describe("the control's policy", () => {
         expect(isCustomNetPolicy(policy({ mode: 'allow', entries: [] }))).toBe(true)
     })
 })
+
+describe('kj-keychain on its own network', () => {
+    test('a shared machine opens its port to kj-keychain, before the floor closes that network', () => {
+        const t: NetTargets = {
+            ...T,
+            docker_nets: [...T.docker_nets, '172.20.0.3/16'],
+            keychain_ip: '172.20.0.2',
+            shared: true,
+        }
+        for (const chain of [CONV_CHAIN, WEB_CHAIN]) {
+            const r = rules(buildNetPolicyScript(defaultNetPolicy(), t, 1001), 'iptables', chain)
+            const open = r.indexOf(`-A ${chain} -d 172.20.0.2 -p tcp --dport 9890 -j ACCEPT`)
+            const floor = r.indexOf(`-A ${chain} -d 172.20.0.3/16 -j REJECT`)
+            expect(open).toBeGreaterThanOrEqual(0)
+            expect(floor).toBeGreaterThan(open)
+            // Only that port: the rest of kj-keychain stays behind the floor.
+            expect(r.filter((l) => l.includes('172.20.0.2'))).toHaveLength(1)
+        }
+    })
+})

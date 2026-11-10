@@ -72,9 +72,21 @@ class FakeDocker implements KeychainDocker {
     async isDockerDesktop() {
         return this.desktop
     }
-    async replaceContainer(spec: any) {
+    network: string | null = 'kj-keychain-net'
+    networkError: Error | null = null
+    dropped = false
+    networksOf: string[][] = []
+    async ensureKeychainNetwork() {
+        return this.network
+    }
+    dropKeychainNetwork() {
+        this.dropped = true
+    }
+    async replaceContainer(spec: any, networks: string[] = []) {
         if (this.replaceError) throw this.replaceError
+        if (networks.length && this.networkError) throw this.networkError
         this.created.push(spec)
+        this.networksOf.push(networks)
         return 'kc1'
     }
     async listKjContainers() {
@@ -241,12 +253,35 @@ describe('tokens por agente', () => {
         sockets[0]!.open()
         const env = host.envFor(3)
         expect(env[KEYCHAIN_TOKEN_ENV]).toMatch(/^[0-9a-f]{64}$/)
-        expect(env[KEYCHAIN_ENDPOINT_ENV]).toBe(
-            `http://host.docker.internal:${KEYCHAIN_AGENT_PORT}`
-        )
+        expect(env[KEYCHAIN_ENDPOINT_ENV]).toBe(`http://kj-keychain:${KEYCHAIN_AGENT_PORT}`)
         expect(host.envFor(3)[KEYCHAIN_TOKEN_ENV]).not.toBe(env[KEYCHAIN_TOKEN_ENV])
         expect(sockets[0]!.sent.filter((m) => m.type === 'agent:token')).toHaveLength(2)
         host.stop()
+    })
+
+    test('kj-keychain va a su red y los agentes lo llaman por su nombre en ella', async () => {
+        const { docker, host } = setup()
+        await host.start()
+        expect(docker.networksOf).toEqual([['kj-keychain-net']])
+        expect(host.envFor(1)[KEYCHAIN_ENDPOINT_ENV]).toBe(
+            `http://kj-keychain:${KEYCHAIN_AGENT_PORT}`
+        )
+        host.stop()
+    })
+
+    test('sin red, o si kj-keychain no entra en ella, los agentes van por el host como antes', async () => {
+        for (const broken of ['no-network', 'no-connect'] as const) {
+            const { docker, host } = setup()
+            if (broken === 'no-network') docker.network = null
+            else docker.networkError = new Error('connect failed')
+            await host.start()
+            expect(docker.networksOf).toEqual([[]])
+            expect(docker.dropped).toBe(broken === 'no-connect')
+            expect(host.envFor(1)[KEYCHAIN_ENDPOINT_ENV]).toBe(
+                `http://host.docker.internal:${KEYCHAIN_AGENT_PORT}`
+            )
+            host.stop()
+        }
     })
 
     test('adopt lee el token del entorno (recreate, reinicio) sin repetirlo; forget lo quita', async () => {

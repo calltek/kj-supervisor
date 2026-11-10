@@ -47,7 +47,15 @@ import {
     normalizeNetPolicy,
     type ResolvedEndpoint,
 } from './net-policy'
-import { KEYCHAIN_AGENT_PORT } from '../../keychain/control-protocol'
+import { KEYCHAIN_AGENT_PORT, KEYCHAIN_CONTAINER } from '../../keychain/control-protocol'
+import {
+    KEYCHAIN_ENDPOINT_ENV,
+    KEYCHAIN_HOST_ENDPOINT,
+    KEYCHAIN_NETWORK,
+    KEYCHAIN_NETWORK_ENDPOINT,
+    KEYCHAIN_NETWORK_LABEL,
+    withKeychainEndpoint,
+} from '../../keychain-host/keychain-network'
 import { buildSeedScript } from './seed-script'
 import {
     AGENT_PIDS_LIMIT,
@@ -1047,6 +1055,7 @@ export class KJDocker {
                 docker_nets,
                 gateway,
                 keychain_port: KEYCHAIN_AGENT_PORT,
+                keychain_ip: await this.keychainNetworkIp(),
                 always: await this.resolveAlways(policy, gateway),
                 shared: this.isShared(),
             },
@@ -1861,6 +1870,104 @@ export class KJDocker {
     private async createAgentContainer(
         spec: Docker.ContainerCreateOptions
     ): Promise<Docker.Container> {
+        const env = spec.Env ?? []
+        const prefix = `${KEYCHAIN_ENDPOINT_ENV}=`
+        // An agent with no kj-keychain address has no business on its network.
+        if (!env.some((e) => e.startsWith(prefix))) return this.createWithHostAlias(spec)
+        const network = this.keychainNet
+        if (network) {
+            const container = await this.createWithHostAlias({
+                ...spec,
+                Env: withKeychainEndpoint(env, KEYCHAIN_NETWORK_ENDPOINT),
+            })
+            try {
+                // Before `start`: by the time the launcher runs, the name resolves.
+                await this.docker.getNetwork(network).connect({ Container: container.id })
+                return container
+            } catch (err) {
+                this.logger.warn(
+                    { name: spec.name, err: err instanceof Error ? err.message : String(err) },
+                    'could not put the agent on the kj-keychain network — it calls it through the host'
+                )
+                await container.remove({ force: true }).catch(() => undefined)
+            }
+        }
+        // No network (it could not be made, or kj-keychain did not start):
+        // the address through the host, as before — also for an agent that
+        // carried the network one and is recreated here.
+        return this.createWithHostAlias({
+            ...spec,
+            Env: withKeychainEndpoint(env, KEYCHAIN_HOST_ENDPOINT),
+        })
+    }
+
+    /**
+     * The kj-keychain network (keychain-network.ts), made if missing. Null when
+     * it can't be had: the agents then keep calling kj-keychain through the
+     * host. A network of that name that isn't internal or lacks our label is
+     * not ours, and is left alone. Remembered for the agents created from now on.
+     */
+    async ensureKeychainNetwork(): Promise<string | null> {
+        type Info = { Labels?: Record<string, string> | null; Internal?: boolean }
+        const inspect = async () =>
+            (await this.docker.getNetwork(KEYCHAIN_NETWORK).inspect()) as Info
+        this.keychainNet = null
+        try {
+            let info = await inspect().catch(() => null)
+            if (!info) {
+                await this.docker
+                    .createNetwork({
+                        Name: KEYCHAIN_NETWORK,
+                        Driver: 'bridge',
+                        Internal: true,
+                        CheckDuplicate: true,
+                        Labels: { [KEYCHAIN_NETWORK_LABEL]: 'true' },
+                    })
+                    // Made meanwhile (the other half of a blue/green): read it back.
+                    .catch(() => undefined)
+                info = await inspect()
+            }
+            if (info.Labels?.[KEYCHAIN_NETWORK_LABEL] !== 'true' || info.Internal !== true) {
+                this.logger.error(
+                    { network: KEYCHAIN_NETWORK },
+                    'a network with the kj-keychain name exists and is not ours — agents call kj-keychain through the host'
+                )
+                return null
+            }
+            this.keychainNet = KEYCHAIN_NETWORK
+            return KEYCHAIN_NETWORK
+        } catch (err) {
+            this.logger.error(
+                { err: err instanceof Error ? err.message : String(err) },
+                'could not make the kj-keychain network — agents call kj-keychain through the host'
+            )
+            return null
+        }
+    }
+
+    /** Set by `ensureKeychainNetwork`, cleared with `dropKeychainNetwork`. */
+    private keychainNet: string | null = null
+
+    /** kj-keychain did not come up on the network: stop sending agents there. */
+    dropKeychainNetwork(): void {
+        this.keychainNet = null
+    }
+
+    /** kj-keychain's address on its network, for the agents' rules; null without one. */
+    private async keychainNetworkIp(): Promise<string | null> {
+        if (!this.keychainNet) return null
+        try {
+            const info = await this.docker.getContainer(KEYCHAIN_CONTAINER).inspect()
+            const ip = info.NetworkSettings?.Networks?.[this.keychainNet]?.IPAddress
+            return ip && net.isIP(ip) ? ip : null
+        } catch {
+            return null
+        }
+    }
+
+    private async createWithHostAlias(
+        spec: Docker.ContainerCreateOptions
+    ): Promise<Docker.Container> {
         try {
             return await this.docker.createContainer(spec)
         } catch (err) {
@@ -2024,7 +2131,10 @@ export class KJDocker {
      * Remove whatever container holds `spec.name` and create + start a new one
      * from `spec`. Returns the new id. For kj-keychain — never an agent.
      */
-    async replaceContainer(spec: Docker.ContainerCreateOptions): Promise<string> {
+    async replaceContainer(
+        spec: Docker.ContainerCreateOptions,
+        networks: string[] = []
+    ): Promise<string> {
         if (spec.name) {
             await this.docker
                 .getContainer(spec.name)
@@ -2032,6 +2142,13 @@ export class KJDocker {
                 .catch(() => undefined)
         }
         const created = await this.docker.createContainer(spec)
+        try {
+            for (const network of networks)
+                await this.docker.getNetwork(network).connect({ Container: created.id })
+        } catch (err) {
+            await created.remove({ force: true }).catch(() => undefined)
+            throw err
+        }
         await created.start()
         return created.id
     }
