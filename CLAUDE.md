@@ -805,7 +805,11 @@ es `src/keychain/`.
   465 es TLS directo y cualquier otro puerto exige STARTTLS antes de autenticar; el
   certificado se comprueba contra el nombre aunque se conecte a la IP comprobada.
   Todo valor resuelto sale tapado de filas y errores (`redactJson`). Las pruebas
-  inyectan túnel, base y SMTP: no abren sockets.
+  inyectan túnel, base y SMTP: no abren sockets. **Adjuntos** (2026-11-10):
+  llegan como bytes en base64, nunca como ruta (`kj-mail --attach` lee el
+  fichero en el proceso de la conversación, así que sólo adjunta lo que ella
+  puede leer), hasta 10 y 10 MB; por `/mail/attach`, que un kj-keychain viejo no
+  conoce y no envía nada, en vez de `/mail`, que mandaría el correo sin ellos.
 - **Compila sin el backend**: `keychain:resolve` usa tipos locales hasta que
   llegue en `protocol.ts`. **Orden de despliegue**: backend (que exista
   `keychain:resolve`; sin él, `KEYCHAIN_UNAVAILABLE` a los 8 s) → este

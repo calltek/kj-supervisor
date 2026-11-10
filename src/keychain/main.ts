@@ -18,7 +18,7 @@ import { log } from './log'
 import { AgentTokenRegistry } from './registry'
 import { ControlLink, ResolveCache } from './resolver'
 import { CONNECT_PATH, type ConnectData, createConnectHandler } from './connect-handler'
-import { MAIL_PATH, createMailHandler } from './mail-handler'
+import { MAIL_ATTACH_PATH, MAIL_PATH, createMailHandler } from './mail-handler'
 import { SQL_PATH, createSqlHandler } from './sql-handler'
 import { createSshHandler, isSshPath } from './ssh-handler'
 import { TailnetPool } from './tailnet'
@@ -54,7 +54,7 @@ Bun.serve<ConnectData, never>({
         const path = new URL(request.url).pathname
         if (path === CONNECT_PATH) return connect.upgrade(request, server)
         if (path === SQL_PATH) return handleSql(request)
-        if (path === MAIL_PATH) return handleMail(request)
+        if (path === MAIL_PATH || path === MAIL_ATTACH_PATH) return handleMail(request)
         return isSshPath(path) ? handleSsh(request) : handleHttp(request)
     },
     // An SSH session through a VPN stays open for as long as it is used.
