@@ -85,6 +85,27 @@ export class AgentSpawnHandler {
                     { container_id: existing },
                     'agent already has a LIVE container — rejecting (control adopts)'
                 )
+                // The control adopts it as RUNNING, so it has to BE reachable.
+                // Docker's restart policy brings a crashed agent back behind our
+                // back (OOM, a crash of the wrapper): the old attach died with
+                // it and nobody opened a new one, so the agent ran deaf with
+                // the panel saying RUNNING. Idempotent if it's already attached.
+                if (!this.streams.isAttached(payload.agent_id)) {
+                    log.warn({ container_id: existing }, 're-attaching to the adopted container')
+                    void this.streams
+                        .attach({
+                            agent_id: payload.agent_id,
+                            container_id: existing,
+                            session_id: payload.session_id,
+                            conversations: payload.conversations,
+                        })
+                        .catch((err) =>
+                            log.warn(
+                                { err: errMessage(err) },
+                                're-attach to adopted container failed'
+                            )
+                        )
+                }
                 return ackError(
                     'ALREADY_RUNNING',
                     `agent ${payload.agent_id} already has a container`,

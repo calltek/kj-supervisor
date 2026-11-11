@@ -28,8 +28,31 @@ class FakeClient {
 
 class FakeStreams {
     public detached: number[] = []
+    public attached: Array<{ agent_id: number; container_id: string; session_id: string }> = []
+    private live = new Set<number>()
     detach(agent_id: number): void {
         this.detached.push(agent_id)
+        this.live.delete(agent_id)
+    }
+    isAttached(agent_id: number): boolean {
+        return this.live.has(agent_id)
+    }
+    async attach(opts: { agent_id: number; container_id: string; session_id: string }) {
+        this.attached.push(opts)
+        this.live.add(opts.agent_id)
+    }
+}
+
+class RestartingDocker extends FakeDocker {
+    constructor(private readonly restart_count: number) {
+        super()
+    }
+    async inspect() {
+        return {
+            State: { Running: true },
+            RestartCount: this.restart_count,
+            Config: { Env: ['KJ_AGENT_ID=48', 'KJ_SESSION_ID=sess-48'] },
+        }
     }
 }
 
@@ -53,6 +76,51 @@ async function flush(): Promise<void> {
 }
 
 describe('KJDockerEventsWatcher', () => {
+    test('an agent Docker restarted on its own is re-attached and reported RUNNING', async () => {
+        // GAZ, 2026-11-11: OOM inside its 2 GB, `unless-stopped` brought it
+        // back, and nobody attached to the new run — RUNNING and deaf.
+        const docker = new RestartingDocker(1)
+        const streams = new FakeStreams()
+        const client = new FakeClient()
+        const watcher = new KJDockerEventsWatcher({
+            streams: streams as never,
+            docker: docker as never,
+            tracker: new OperationTracker(),
+            status: new AgentStatusReporter(client, silentLogger),
+            logger: silentLogger,
+        })
+
+        await watcher.start()
+        docker.stream.write(makeEvent('die', 'c-48', 48))
+        docker.stream.write(makeEvent('start', 'c-48', 48))
+        await flush()
+
+        expect(streams.attached).toEqual([
+            { agent_id: 48, container_id: 'c-48', session_id: 'sess-48' },
+        ])
+        expect(statuses(client).map((s) => s.status)).toEqual(['STOPPED', 'RUNNING'])
+        watcher.stop()
+    })
+
+    test('a first start is left to the spawn handler', async () => {
+        const docker = new RestartingDocker(0)
+        const streams = new FakeStreams()
+        const watcher = new KJDockerEventsWatcher({
+            streams: streams as never,
+            docker: docker as never,
+            tracker: new OperationTracker(),
+            status: new AgentStatusReporter(new FakeClient(), silentLogger),
+            logger: silentLogger,
+        })
+
+        await watcher.start()
+        docker.stream.write(makeEvent('start', 'c-48', 48))
+        await flush()
+
+        expect(streams.attached).toEqual([])
+        watcher.stop()
+    })
+
     test('a restarted container gets its network rules back; if they fail, ERROR', async () => {
         const docker = new FakeDocker()
         const client = new FakeClient()
