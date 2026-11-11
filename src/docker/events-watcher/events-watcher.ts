@@ -167,7 +167,17 @@ export class KJDockerEventsWatcher {
             this.streams.detach(agent_id)
         }
 
-        if (event.Action === 'start') this.reapplyNetPolicy(agent_id, container_id)
+        if (event.Action === 'start') {
+            this.reapplyNetPolicy(agent_id, container_id)
+            if (!this.tracker.isTracked(container_id)) {
+                void this.reattachAfterRestart(agent_id, container_id).catch((err) =>
+                    this.logger.warn(
+                        { agent_id, container_id, err: errMessage(err) },
+                        're-attach after docker restart failed'
+                    )
+                )
+            }
+        }
 
         if (this.tracker.isTracked(container_id)) {
             this.logger.debug(
@@ -185,6 +195,45 @@ export class KJDockerEventsWatcher {
             'external docker event — reporting drift'
         )
         this.status.push(report)
+    }
+
+    /**
+     * Docker's restart policy (`unless-stopped`) brings a crashed agent back
+     * on its own — an OOM inside its memory limit, a crash of the wrapper.
+     * The `die` before it detached the stream and reported STOPPED, and
+     * nobody attached to the new run: the agent came back deaf, and the
+     * `agent:spawn` the control sends next is rejected because the container
+     * is alive. So re-attach here and report RUNNING.
+     *
+     * Only for restarts Docker did itself (`RestartCount > 0`): a container
+     * the spawn handler just started also emits an untracked `start`, and
+     * that one is attached by the spawn with the conversation routes, which
+     * this path doesn't have.
+     */
+    private async reattachAfterRestart(agent_id: number, container_id: string): Promise<void> {
+        if (this.streams.isAttached(agent_id)) return
+        const info = await this.docker.inspect(container_id)
+        if (!info?.State?.Running || !(info.RestartCount > 0)) return
+        const session_id = (info.Config?.Env ?? [])
+            .find((e) => e.startsWith('KJ_SESSION_ID='))
+            ?.slice('KJ_SESSION_ID='.length)
+        if (!session_id) {
+            this.logger.warn({ agent_id, container_id }, 'restarted agent has no KJ_SESSION_ID')
+            return
+        }
+        this.logger.warn(
+            { agent_id, container_id, restart_count: info.RestartCount },
+            'agent restarted by docker — re-attaching'
+        )
+        await this.streams.attach({ agent_id, container_id, session_id })
+        if (!this.streams.isAttached(agent_id)) return
+        this.status.push({
+            agent_id,
+            status: 'RUNNING',
+            container_id,
+            last_action: 'restarted after a crash',
+            last_action_at: Date.now(),
+        })
     }
 
     private reapplyNetPolicy(agent_id: number, container_id: string): void {

@@ -147,6 +147,13 @@ export class AgentStreamManager {
     private readonly client: AgentStreamClient
     private readonly logger: KJLogger
     private readonly streams = new Map<number, AgentStream>()
+    /**
+     * Enganches en curso. El spawn, el sync y el vigilante de eventos pueden
+     * pedir el mismo a la vez (un reinicio de Docker y el `agent:spawn` del
+     * keep-alive llegan casi juntos): sin esto, los dos pasan el `has()` y el
+     * contenedor acaba con dos attach.
+     */
+    private readonly attaching = new Map<number, Promise<void>>()
     private readonly mcp?: McpDispatcher
     private readonly exec?: ExecDispatcher
     private readonly browser?: BrowserRelay
@@ -394,7 +401,19 @@ export class AgentStreamManager {
             this.logger.debug({ agent_id: opts.agent_id }, 'attach skipped — already streaming')
             return
         }
+        const inflight = this.attaching.get(opts.agent_id)
+        if (inflight) return inflight
+        const job = this.doAttach(opts).finally(() => this.attaching.delete(opts.agent_id))
+        this.attaching.set(opts.agent_id, job)
+        return job
+    }
 
+    /** ¿Hay un stream vivo con este agente? */
+    isAttached(agent_id: number): boolean {
+        return this.streams.has(agent_id)
+    }
+
+    private async doAttach(opts: Parameters<AgentStreamManager['attach']>[0]): Promise<void> {
         const log = this.logger.child({
             agent_id: opts.agent_id,
             container_id: opts.container_id,
@@ -475,7 +494,9 @@ export class AgentStreamManager {
 
         stream.on('end', () => {
             log.info('agent stream ended')
-            this.streams.delete(opts.agent_id)
+            // Sólo si sigue siendo el nuestro: tras un reinicio, el stream del
+            // contenedor muerto puede cerrar cuando ya hay uno nuevo enganchado.
+            if (this.streams.get(opts.agent_id) === entry) this.streams.delete(opts.agent_id)
         })
         stream.on('error', (err) => {
             log.warn(

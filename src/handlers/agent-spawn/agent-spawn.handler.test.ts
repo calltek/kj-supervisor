@@ -237,6 +237,11 @@ describe('AgentSpawnHandler', () => {
         // No pull, no run, and the live container is left untouched.
         expect(docker.pulled).toEqual([])
         expect(docker.removed).toEqual([])
+        // …but it gets attached: the control adopts it as RUNNING, and a
+        // container Docker restarted on its own has nobody listening (GAZ,
+        // 2026-11-11: OOM, restart, RUNNING in the panel and deaf).
+        await new Promise((r) => setImmediate(r))
+        expect(docker.attached).toEqual(['existing-abc'])
     })
 
     test('removes a DEAD leftover container and spawns fresh (KJ-48)', async () => {
