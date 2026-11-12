@@ -25,8 +25,10 @@ export const LAST_ACTION_CODES = [
     'network_policy_failed',
     // A shared machine refused the agent (tenancy.ts): `last_action` says why.
     'shared_refused',
-    // The agent's home volume couldn't get its disk ceiling on a shared machine.
+    // No longer sent (the disk ceiling is soft, disk-watch.ts); kept for the list's sake.
     'volume_quota_failed',
+    // The agent is at its disk ceiling: stopped by the disk watch, or not started.
+    'disk_limit_reached',
 ] as const
 
 export type LastActionCode = (typeof LAST_ACTION_CODES)[number]

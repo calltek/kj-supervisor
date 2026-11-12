@@ -27,6 +27,7 @@ import { ExecDispatcher } from './agent-stream/exec-dispatcher'
 import { AgentStreamManager } from './agent-stream/stream-manager'
 import { KeychainHost } from './keychain-host/keychain-host'
 import {
+    AGENT_DISK_INTERVAL_MS,
     AGENT_METRICS_INTERVAL_MS,
     KJSettings,
     PING_INTERVAL_MS,
@@ -90,6 +91,10 @@ import {
     WS_ERROR_CODES,
     type WsErrorPayload,
 } from './protocol'
+import {
+    type AgentDiskHandle,
+    startAgentDiskLoop,
+} from './reporters/agent-disk/agent-disk.reporter'
 import {
     type AgentMetricsHandle,
     startAgentMetricsLoop,
@@ -631,6 +636,7 @@ async function main(): Promise<void> {
     let healthHandle: HealthLoopHandle | null = null
     let serverMetricsHandle: ServerMetricsHandle | null = null
     let agentMetricsHandle: AgentMetricsHandle | null = null
+    let agentDiskHandle: AgentDiskHandle | null = null
     let updateCheckHandle: UpdateCheckHandle | null = null
     // Blue/green self-upgrade: a fresh clone (`kj-supervisor-new-*`) finishes
     // the swap on its first handshake (remove the old + rename to canonical).
@@ -644,6 +650,8 @@ async function main(): Promise<void> {
         healthHandle?.stop()
         serverMetricsHandle?.stop()
         agentMetricsHandle?.stop()
+        agentDiskHandle?.stop()
+        agentDiskHandle = null
         healthHandle = null
         serverMetricsHandle = null
         agentMetricsHandle = null
@@ -806,6 +814,14 @@ async function main(): Promise<void> {
             client,
             logger,
             interval_ms: AGENT_METRICS_INTERVAL_MS,
+        })
+        agentDiskHandle = startAgentDiskLoop({
+            docker,
+            client,
+            status: statusReporter,
+            tracker,
+            logger,
+            interval_ms: AGENT_DISK_INTERVAL_MS,
         })
         // Una sola instancia: stopLoops() al inicio de `ready` cancela la anterior.
         updateCheckHandle = startUpdateCheckLoop({

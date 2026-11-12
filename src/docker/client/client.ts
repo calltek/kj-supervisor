@@ -61,12 +61,13 @@ import {
     AGENT_PIDS_LIMIT,
     HELPER_HARDENING,
     HELPER_LIMITS,
-    SHARED_DEFAULT_DISK_GB,
+    DiskLimitError,
+    KJ_LABEL_DISK_GB,
     type SharedReadiness,
     type SharedSpawnCheck,
     SharedSpawnRefusedError,
-    VolumeQuotaError,
     type Tenancy,
+    effectiveDiskGb,
     USERNS_MIN_IDS,
     buildQuotaScript,
     normalizeTenancy,
@@ -77,6 +78,9 @@ import {
 
 /** The helper that sets XFS project quotas (shared machines only). */
 const QUOTA_IMAGE = 'kj-quota:1'
+
+/** `du` over an agent's volumes: big homes (node_modules, browsers) take a while. */
+const DISK_MEASURE_TIMEOUT_MS = 120_000
 
 /**
  * Our own container id, read from /proc — works under `--network host` where
@@ -123,7 +127,12 @@ export interface KJContainerRunOptions {
     env: Record<string, string>
     cmd?: string[]
     labels: Record<string, string>
-    resources: { memory_mb: number; cpu: number }
+    /**
+     * `disk_gb`: the agent's disk ceiling (0/absent = none from the control;
+     * a shared machine then applies its default). Enforced by disk-watch.ts,
+     * and by XFS too where the host already has project quotas.
+     */
+    resources: { memory_mb: number; cpu: number; disk_gb?: number | null }
     /**
      * Named docker volume to mount at /home/agent for this container.
      * Persists the agent's home (claude transcripts under .claude/,
@@ -682,38 +691,164 @@ export class KJDocker {
      * On a shared machine, refuse what would let one tenant hurt another —
      * BEFORE anything is stopped or created. Throws `SharedSpawnRefusedError`.
      */
-    private async assertSharedSpawn(c: Omit<SharedSpawnCheck, 'disk_quota'>): Promise<void> {
+    private async assertSharedSpawn(c: SharedSpawnCheck): Promise<void> {
         if (!this.isShared()) return
-        const { disk_quota } = await this.hostIsolation()
-        const refusal = sharedSpawnRefusal({ ...c, disk_quota })
+        const refusal = sharedSpawnRefusal(c)
         if (refusal) throw new SharedSpawnRefusedError(refusal)
     }
 
-    /** The writable layer's cap on a shared machine; nothing on a dedicated one. */
-    private sharedStorageOpt(): { StorageOpt?: Record<string, string> } {
-        return this.isShared() ? { StorageOpt: { size: `${SHARED_DEFAULT_DISK_GB}G` } } : {}
+    /**
+     * Whether this machine can make the disk ceiling HARD: shared, and Docker
+     * already on XFS with project quotas. Never something Kujira sets up
+     * (it means moving the whole Docker of the machine, decided 2026-11-12);
+     * where it isn't, the soft ceiling of disk-watch.ts is the only one.
+     */
+    private async hardDiskQuota(disk_gb: number | null): Promise<boolean> {
+        if (!disk_gb || !this.isShared()) return false
+        return (await this.hostIsolation().catch(() => null))?.disk_quota === true
+    }
+
+    /** The agent's ceiling as a label, so a recreate and the disk watch read it back. */
+    private static withDiskLabel(
+        labels: Record<string, string> | undefined,
+        disk_gb: number | null
+    ): Record<string, string> {
+        const out = { ...(labels ?? {}) }
+        if (disk_gb) out[KJ_LABEL_DISK_GB] = String(disk_gb)
+        else delete out[KJ_LABEL_DISK_GB]
+        return out
     }
 
     /**
-     * Cap an agent's home volume on a shared machine: an XFS project on its
-     * `_data`, with a hard block limit. Named volumes have no size option, so
-     * this is the only way one tenant can't fill the disk under the others.
-     * Throws on a shared machine if it can't be set — the agent doesn't start
-     * without it.
+     * Hard-cap an agent's volume where the host already has XFS project
+     * quotas. Best effort: the soft ceiling (disk-watch.ts) holds without it,
+     * so a failure here is logged and the agent starts anyway.
      */
-    async applyVolumeQuota(agent_id: number, volume: string): Promise<void> {
-        if (!this.isShared()) return
+    private async tryVolumeQuota(agent_id: number, volume: string, gb: number): Promise<void> {
+        try {
+            await this.applyVolumeQuota(agent_id, volume, gb)
+        } catch (err) {
+            this.logger.warn(
+                { agent_id, err: err instanceof Error ? err.message : String(err) },
+                'could not set the hard volume quota; the soft disk ceiling still applies'
+            )
+        }
+    }
+
+    /**
+     * Refuse to start an agent that is already at its ceiling: started, it
+     * would only be stopped again by the next disk watch. Throws DiskLimitError.
+     */
+    private async assertDiskRoom(volumes: string[], disk_gb: number | null): Promise<void> {
+        if (!disk_gb || volumes.length === 0) return
+        const used = await this.measureVolumes(new Map([[0, volumes]])).catch((err) => {
+            this.logger.warn(
+                { err: err instanceof Error ? err.message : String(err) },
+                'could not measure the agent volume before start'
+            )
+            return null
+        })
+        const used_bytes = used?.get(0)
+        if (used_bytes == null) return
+        const limit_bytes = disk_gb * 1024 ** 3
+        if (used_bytes >= limit_bytes)
+            throw new DiskLimitError(Math.round(used_bytes / 1024 ** 2), disk_gb * 1024)
+    }
+
+    /**
+     * Bytes used by each group of named volumes, in ONE helper container: the
+     * volumes mounted read-only, `du` over each group. Only volumes of ours
+     * are ever passed here; nothing else of the machine is mounted or read.
+     * The helper has no network and only DAC_READ_SEARCH (the files belong to
+     * the agent's and the conversations' uids).
+     */
+    async measureVolumes(groups: Map<number, string[]>): Promise<Map<number, number>> {
+        const binds: string[] = []
+        for (const [key, volumes] of groups)
+            volumes.forEach((v, i) => {
+                if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(v))
+                    throw new Error(`bad volume name: ${v}`)
+                binds.push(`${v}:/v/${key}/${i}:ro`)
+            })
+        const out = new Map<number, number>()
+        if (binds.length === 0) return out
+        await this.ensureFenceImage()
+        const c = await this.docker.createContainer({
+            Image: FENCE_IMAGE,
+            Cmd: ['sh', '-c', 'cd /v && du -sk -- *'],
+            HostConfig: {
+                Binds: binds,
+                NetworkMode: 'none',
+                CapDrop: ['ALL'],
+                CapAdd: ['DAC_READ_SEARCH'],
+                SecurityOpt: ['no-new-privileges'],
+                ...HELPER_LIMITS,
+            },
+        })
+        try {
+            await c.start()
+            await withTimeout(c.wait(), DISK_MEASURE_TIMEOUT_MS, 'disk measure')
+            const text = stripDockerFrames(await c.logs({ stdout: true, follow: false }))
+            for (const line of text.split('\n')) {
+                const [kb, key] = line.trim().split(/\s+/)
+                const k = Number(key)
+                const n = Number(kb)
+                if (Number.isInteger(k) && Number.isFinite(n)) out.set(k, n * 1024)
+            }
+            return out
+        } finally {
+            await c.remove({ force: true }).catch(() => undefined)
+        }
+    }
+
+    /**
+     * Every running agent with a disk ceiling: its ceiling, its named volumes
+     * and its writable layer's size. What disk-watch.ts measures.
+     */
+    async listDiskLimitedAgents(): Promise<
+        Array<{
+            agent_id: number
+            container_id: string
+            disk_gb: number
+            volumes: string[]
+            writable_bytes: number
+        }>
+    > {
+        const list = await this.docker.listContainers({
+            size: true,
+            filters: { label: [KJ_LABEL, KJ_LABEL_DISK_GB] },
+        })
+        const out = []
+        for (const c of list) {
+            const agent_id = Number(c.Labels?.[KJ_LABEL_AGENT_ID])
+            const disk_gb = Number(c.Labels?.[KJ_LABEL_DISK_GB])
+            if (!Number.isInteger(agent_id) || agent_id <= 0 || !(disk_gb > 0)) continue
+            const volumes = (c.Mounts ?? [])
+                .filter((m) => m.Type === 'volume' && typeof m.Name === 'string')
+                .map((m) => m.Name as string)
+            out.push({
+                agent_id,
+                container_id: c.Id,
+                disk_gb,
+                volumes,
+                writable_bytes: (c as { SizeRw?: number }).SizeRw ?? 0,
+            })
+        }
+        return out
+    }
+
+    /**
+     * Cap an agent's home volume: an XFS project on its `_data`, with a hard
+     * block limit. Named volumes have no size option, so this is the only hard
+     * way. Only where the host already has project quotas (hardDiskQuota).
+     */
+    private async applyVolumeQuota(agent_id: number, volume: string, gb: number): Promise<void> {
         const { root_dir } = await this.hostIsolation()
         if (!root_dir) throw new Error('docker root dir unknown')
         const v = (await this.docker.getVolume(volume).inspect()) as { Mountpoint?: string }
         if (!v.Mountpoint?.startsWith(`${root_dir}/volumes/`))
             throw new Error(`volume ${volume} is not under ${root_dir}`)
-        const script = buildQuotaScript(
-            root_dir,
-            v.Mountpoint,
-            quotaProjectId(agent_id),
-            SHARED_DEFAULT_DISK_GB
-        )
+        const script = buildQuotaScript(root_dir, v.Mountpoint, quotaProjectId(agent_id), gb)
         await this.ensureQuotaImage()
         const helper = await this.docker.createContainer({
             Image: QUOTA_IMAGE,
@@ -1319,12 +1454,20 @@ export class KJDocker {
               ]
             : undefined
 
+        const disk_gb = effectiveDiskGb(opts.resources.disk_gb, this.isShared())
+        // Already full: starting it would only get it stopped again.
+        await this.assertDiskRoom(
+            (mounts ?? []).map((m) => m.Source),
+            disk_gb
+        )
+        const hardDisk = await this.hardDiskQuota(disk_gb)
+
         const container = await this.createAgentContainer({
             Image: opts.image_tag,
             name: opts.name,
             Env: envArray,
             Cmd: opts.cmd,
-            Labels: opts.labels,
+            Labels: KJDocker.withDiskLabel(opts.labels, disk_gb),
             Tty: false,
             OpenStdin: true,
             StdinOnce: false,
@@ -1337,8 +1480,8 @@ export class KJDocker {
                 NanoCpus: Math.round(opts.resources.cpu * 1_000_000_000),
                 // Every machine: a fork bomb stops at its own container.
                 PidsLimit: AGENT_PIDS_LIMIT,
-                // Shared machine: its writable layer has a ceiling too.
-                ...this.sharedStorageOpt(),
+                // Its writable layer's hard ceiling, where the host has one.
+                ...(hardDisk ? { StorageOpt: { size: `${disk_gb}G` } } : {}),
                 // Security posture: drop everything, no privilege escalation,
                 // plus this agent's networking extras if it's entitled to them
                 // (KJ-156). Built by `agentHardening` so the recreate path gets
@@ -1359,17 +1502,14 @@ export class KJDocker {
             },
         })
 
-        // The volume exists now (create made it); on a shared machine it gets
-        // its ceiling before anything runs, or nothing runs.
-        if (this.isShared() && opts.home_volume_name) {
-            const agent_id = Number(opts.labels[KJ_LABEL_AGENT_ID])
-            try {
-                await this.applyVolumeQuota(agent_id, opts.home_volume_name)
-            } catch (err) {
-                await container.remove({ force: true }).catch(() => undefined)
-                throw new VolumeQuotaError(err instanceof Error ? err.message : String(err))
-            }
-        }
+        // The volume exists now (create made it): its hard ceiling, where the
+        // host has one. The soft one (disk-watch.ts) applies either way.
+        if (hardDisk && disk_gb && opts.home_volume_name)
+            await this.tryVolumeQuota(
+                Number(opts.labels[KJ_LABEL_AGENT_ID]),
+                opts.home_volume_name,
+                disk_gb
+            )
 
         await container.start()
         this.logger.info(
@@ -1714,7 +1854,7 @@ export class KJDocker {
         // this the recreate dropped Memory/NanoCpus and left the container
         // unbounded → a runaway tool (Playwright/Chromium) could OOM the host.
         // Falls back to whatever the source container had if absent.
-        resources?: { memory_mb: number; cpu: number }
+        resources?: { memory_mb: number; cpu: number; disk_gb?: number | null }
     }): Promise<string> {
         this.logger.info(
             {
@@ -1769,6 +1909,16 @@ export class KJDocker {
                 'dropping an ExtraHosts entry the source container carried — not set by Kujira'
             )
 
+        // The ceiling: the control's if it sent one, else the one the source
+        // carried, else the machine's default. Not checked against its usage
+        // here: a full agent is stopped by the next disk watch either way.
+        const carried = Number(config.Labels?.[KJ_LABEL_DISK_GB])
+        const disk_gb = effectiveDiskGb(
+            opts.resources?.disk_gb ? opts.resources.disk_gb : carried,
+            this.isShared()
+        )
+        const hardDisk = await this.hardDiskQuota(disk_gb)
+
         // Stop + remove old first; the name has to be free before we
         // can reuse it. Force is on by default — the operator already
         // accepted the downtime by clicking the button.
@@ -1783,7 +1933,7 @@ export class KJDocker {
             Env: env,
             Cmd: config.Cmd ?? undefined,
             Entrypoint: config.Entrypoint ?? undefined,
-            Labels: config.Labels,
+            Labels: KJDocker.withDiskLabel(config.Labels, disk_gb),
             // Mirror what runContainer sets when spawning fresh agents:
             // the wrapper reads operator messages from process.stdin
             // and writes claude's stream-json on stdout, so the new
@@ -1823,9 +1973,8 @@ export class KJDocker {
                     ? Math.round(opts.resources.cpu * 1_000_000_000)
                     : host.NanoCpus,
                 PidsLimit: AGENT_PIDS_LIMIT,
-                // Ours, never the source's: a dedicated machine turned shared
-                // gets the ceiling, and one turned dedicated loses it.
-                StorageOpt: this.sharedStorageOpt().StorageOpt,
+                // Ours, never the source's: decided again for this machine now.
+                StorageOpt: hardDisk ? { size: `${disk_gb}G` } : undefined,
                 // The SAME posture a fresh spawn gets — same builder, so the two
                 // can't drift apart again (they did once: a recreated agent came
                 // back with Docker's ~14 default caps and no `no-new-privileges`).
@@ -1845,14 +1994,12 @@ export class KJDocker {
 
         // Idempotent: the same project and limit again if it already had one.
         const home = (host.Mounts ?? []).find((m) => m.Target === '/home/agent')
-        if (this.isShared() && home?.Source) {
-            try {
-                await this.applyVolumeQuota(Number(config.Labels?.[KJ_LABEL_AGENT_ID]), home.Source)
-            } catch (err) {
-                await created.remove({ force: true }).catch(() => undefined)
-                throw new VolumeQuotaError(err instanceof Error ? err.message : String(err))
-            }
-        }
+        if (hardDisk && disk_gb && home?.Source)
+            await this.tryVolumeQuota(
+                Number(config.Labels?.[KJ_LABEL_AGENT_ID]),
+                home.Source,
+                disk_gb
+            )
 
         await created.start()
         this.logger.info({ new_container_id: created.id }, 'recreate started')

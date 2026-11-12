@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import {
     buildQuotaScript,
+    diskLevel,
+    effectiveDiskGb,
     normalizeTenancy,
     quotaProjectId,
     sharedReadiness,
@@ -12,7 +14,6 @@ const ok = {
     memory_mb: 2048,
     cpu: 1,
     isolation_mode: 'exec' as const,
-    disk_quota: true,
 }
 
 describe('tenancy', () => {
@@ -36,16 +37,32 @@ describe('tenancy', () => {
         expect(sharedSpawnRefusal({ ...ok, image_tag: 'ghcr.io/calltek.evil/x:1' })).toBe(
             'shared_foreign_image'
         )
-        expect(sharedSpawnRefusal({ ...ok, disk_quota: false })).toBe('shared_no_disk_quota')
     })
 
-    it('readiness lists what is missing', () => {
+    it('readiness only waits for what is ours: remap and XFS are optional', () => {
         expect(
             sharedReadiness({ userns_remap: true, disk_quota: true, network_rules: true })
-        ).toEqual({ ready: true, missing: [] })
+        ).toEqual({ ready: true, missing: [], optional: [] })
         expect(
-            sharedReadiness({ userns_remap: false, disk_quota: true, network_rules: false })
-        ).toEqual({ ready: false, missing: ['userns_remap', 'network_rules'] })
+            sharedReadiness({ userns_remap: false, disk_quota: false, network_rules: true })
+        ).toEqual({ ready: true, missing: [], optional: ['userns_remap', 'disk_quota'] })
+        expect(
+            sharedReadiness({ userns_remap: true, disk_quota: true, network_rules: false })
+        ).toEqual({ ready: false, missing: ['network_rules'], optional: [] })
+    })
+
+    it('the disk ceiling: the control, else the shared default, else none', () => {
+        expect(effectiveDiskGb(50, false)).toBe(50)
+        expect(effectiveDiskGb(0, true)).toBe(20)
+        expect(effectiveDiskGb(undefined, false)).toBeNull()
+        expect(effectiveDiskGb(Number.NaN, true)).toBe(20)
+    })
+
+    it('warns at 80 % and is full at 100 %', () => {
+        expect(diskLevel(79, 100)).toBe('ok')
+        expect(diskLevel(80, 100)).toBe('warn')
+        expect(diskLevel(100, 100)).toBe('full')
+        expect(diskLevel(10, 0)).toBe('ok')
     })
 
     it('the quota script only takes plain paths', () => {

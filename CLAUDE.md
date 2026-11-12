@@ -509,6 +509,20 @@ identifica, porque pierden `RepoTags` y `RepoDigests`. Las ajenas no se tocan:
 puede ser la máquina de un cliente. Nunca se fuerza: la que usa un contenedor
 da 409 y cae en una pasada posterior.
 
+### Tope de disco blando: se mide, no se impone al host (2026-11-12)
+Kujira no toca lo que no es suyo en la máquina del cliente: nada de mover el
+Docker entero a XFS ni de activar `userns-remap`, que afectan a sus otros
+servicios. El tope de cada agente lo pone `reporters/agent-disk/`: cada minuto
+mide sus volúmenes y su capa escribible (un ayudante sin red con
+`DAC_READ_SEARCH` y `du`, montando sólo volúmenes nuestros), manda
+`agent:disk` y, al 100 %, lo para como ERROR con `disk_limit_reached`. Lleno
+tampoco arranca (`assertDiskRoom`). El tope llega en `resources.disk_gb`
+(servidor → agente, como RAM y CPU) y viaja en la etiqueta `so.kujira.disk-gb`
+del contenedor; sin él, 20 GB en compartido y nada en dedicado. Donde el host
+YA tiene XFS con cuotas se aplica además el tope duro, sin exigirlo. En la
+preparación compartida sólo `network_rules` es requisito; `userns_remap` y
+`disk_quota` van en `optional`.
+
 ### Idempotencia de comandos — dedup por `request_id` (2026-06-10)
 Todo comando C→A lleva un `request_id` obligatorio. El supervisor
 **deduplica** sobre él en `src/client/control/command-dedup.ts`: un wrapper
