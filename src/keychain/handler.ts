@@ -4,10 +4,12 @@
  * The launcher forwards the conversation's request with its original method,
  * headers and body, plus `X-Kj-Token` (the agent), `X-Kj-Session` (the
  * conversation) and `X-Kj-Target` (the absolute https URL). kj-keychain puts
- * the credential values in its headers, sends the request to the
- * destination, and returns the answer with every value used hidden.
+ * the credential values in its headers (and in a login body, body.ts), sends
+ * the request to the destination, and returns the answer with every value
+ * used hidden.
  */
 
+import { bodyReferences, fillBody } from './body'
 import type { KeychainSite } from './control-protocol'
 import { lookupField } from './credential-fields'
 import { KeychainError, errorResponse } from './errors'
@@ -178,19 +180,19 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
         // 3. The body, capped, so it can be searched for references.
         const body = await readRequestBody(request)
 
-        // 4. References: in any header except those that steer the request.
+        // 4. References: in any header except those that steer the request, and
+        // in the body only as a login or token field (body.ts).
         const outside = (where: string) =>
             new KeychainError(
                 'KEYCHAIN_REF_OUTSIDE_HEADER',
                 `Hay una referencia a una credencial en ${where}. Las credenciales se usan ` +
-                    'en una cabecera (Authorization, X-API-Key o la que pida el servicio), ' +
-                    'nunca en la URL, en el cuerpo ni en cabeceras como Host o Content-Type. ' +
+                    'en una cabecera (Authorization, X-API-Key o la que pida el servicio) o como ' +
+                    'contraseña o token de un login en el cuerpo, nunca en la URL ni en ' +
+                    'cabeceras como Host o Content-Type. ' +
                     'La petición no ha salido.'
             )
         if (mentionsReference(rawTarget)) throw outside('la URL')
-        if (body && mentionsReference(Buffer.from(body).toString('latin1'))) {
-            throw outside('el cuerpo de la petición')
-        }
+        const inBody = bodyReferences(request.headers.get('content-type'), body)
 
         const forward = new Headers()
         const refs = new Map<string, CredentialReference>()
@@ -224,11 +226,13 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             if (HOP_BY_HOP.has(lower) || connectionTokens.has(lower)) continue
             forward.append(name, forwardableHeader(received, value))
         }
+        for (const ref of inBody?.refs ?? []) refs.set(ref.raw, ref)
         if (refs.size === 0) {
             throw new KeychainError(
                 'KEYCHAIN_NO_REFERENCE',
                 'La petición no usa ninguna credencial. Por aquí sólo pasan peticiones con ' +
-                    'una referencia {{kj:<credencial>.<campo>}} en una cabecera.'
+                    'una referencia {{kj:<credencial>.<campo>}} en una cabecera o en el ' +
+                    'campo de contraseña o token de un login.'
             )
         }
 
@@ -331,6 +335,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                     'petición no ha salido. Si no, díselo al operador.'
             )
         }
+        const outgoing = inBody ? fillBody(inBody, values) : body
         const variants = collectVariants([...values.values(), ...basicPairs, ...hidden])
 
         let upstream: Response
@@ -338,7 +343,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             upstream = await doFetch(pinned.url(target), {
                 method: request.method,
                 headers: pinned.headers(forward, target),
-                body: body ?? undefined,
+                body: outgoing ?? undefined,
                 redirect: 'manual',
                 decompress: true,
                 ...(pinned.serverName ? { tls: { serverName: pinned.serverName } } : {}),

@@ -762,6 +762,14 @@ es `src/keychain/`.
   kj-keychain, así que la IP es la nueva). Un supervisor viejo de vuelta
   (marcha atrás del blue/green) recrea kj-keychain sin la red, y los agentes
   nuevos no lo alcanzan hasta reiniciar el bueno.
+- **En el cuerpo, sólo un login o un token** (`body.ts`, 2026-11-12): un
+  formulario o un JSON, con la referencia como valor COMPLETO de un campo de
+  PRIMER nivel cuyo nombre es de secreto (`passwd`, `client_secret`,
+  `refresh_token`, `api_key`…). Lo pidieron un login por formulario y
+  los refresh de OAuth. Lo de un cuerpo suele guardarse en el destino, y
+  por eso nada anidado (`{"metadata":{"token":…}}`, `metadata[token]`): ahí el
+  nombre lo elige el agente. El resto de bytes sale como lo escribió. Fuera de
+  eso, `KEYCHAIN_REF_IN_BODY` sin resolver nada.
 - **Un token por contenedor de agente**, en `KJ_KEYCHAIN_TOKEN`. Tras un
   reinicio no hay estado: se relee del `Config.Env` de cada agente vivo al
   arrancar y en cada `attach` (spawn, `agent:sync`, recreate por imagen, que
