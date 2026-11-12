@@ -26,6 +26,8 @@ import {
     REFERENCE_HEADERS,
     authHeaderValue,
     extractReferences,
+    forwardableHeader,
+    headerText,
     mentionsReference,
 } from './references'
 import { collectVariants, redactBytes, redactText } from './redact'
@@ -199,7 +201,9 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                 .map((t) => t.trim().toLowerCase())
                 .filter(Boolean)
         )
-        for (const [name, value] of request.headers) {
+        for (const [name, received] of request.headers) {
+            // Twice: the agent's gateway is a Bun hop too (references.ts, headerText).
+            const value = headerText(received, 2)
             const lower = name.toLowerCase()
             if (lower.startsWith('x-kj-')) continue
             const allowed = REFERENCE_HEADERS.has(lower)
@@ -218,7 +222,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                 continue
             }
             if (HOP_BY_HOP.has(lower) || connectionTokens.has(lower)) continue
-            forward.append(name, value)
+            forward.append(name, forwardableHeader(received, value))
         }
         if (refs.size === 0) {
             throw new KeychainError(
@@ -479,7 +483,7 @@ async function buildResponse(
     for (const [name, value] of upstream.headers) {
         const lower = name.toLowerCase()
         if (RESPONSE_DROP.has(lower) || lower === 'set-cookie') continue
-        headers.append(name, redactText(value, variants))
+        headers.append(name, redactText(forwardableHeader(value, headerText(value)), variants))
     }
     for (const cookie of upstream.headers.getSetCookie()) {
         headers.append('set-cookie', redactText(cookie, variants))

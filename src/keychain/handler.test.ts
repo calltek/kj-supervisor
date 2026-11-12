@@ -127,6 +127,28 @@ describe('keychain handler', () => {
         expect(response.headers.get('content-length')).toBe(String(Buffer.byteLength(text)))
     })
 
+    test('a name with an accent resolves, as Bun hands it over (latin1) and doubled by the gateway', async () => {
+        // What Bun gives for the UTF-8 bytes curl sends: each byte as a char.
+        const asBun = (text: string) => Buffer.from(text, 'utf8').toString('latin1')
+        const written = 'Bearer {{kj:Kujira - Gestión de agentes.contraseña}}'
+        const variants = [asBun(written), asBun(asBun(written)), asBun(written.normalize('NFD'))]
+        for (const value of variants) {
+            const { handle, resolves, calls } = setup({
+                ack: { ok: true, value: SECRET, sites: [{ host: 'kujira.so', subdomains: true }] },
+            })
+            const response = await handle(
+                req('https://api.kujira.so/v1/agents', {
+                    headers: { Authorization: value, 'X-Note': asBun('año') },
+                })
+            )
+            expect(response.status).toBe(200)
+            expect(resolves[0]?.credential).toBe('Kujira - Gestión de agentes')
+            expect(resolves[0]?.field).toBe('contraseña')
+            // Decoded, so fetch writes the bytes the client sent, not doubled.
+            expect(new Headers(calls[0]?.init.headers).get('x-note')).toBe('año')
+        }
+    })
+
     test('unknown token: 401 and nothing resolved', async () => {
         const { handle, resolves, calls } = setup()
         const request = req('https://api.stripe.com/', { headers: { ...AUTH } })
