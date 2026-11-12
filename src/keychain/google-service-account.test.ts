@@ -172,3 +172,26 @@ describe('keychain handler with a service account', () => {
         expect(calls).toHaveLength(0)
     })
 })
+
+describe('GoogleTokenMinter limits', () => {
+    test('caps tokens per hour per account and the cache size', async () => {
+        const { MAX_MINTS_PER_HOUR } = await import('./google-service-account')
+        let n = 0
+        const minter = new GoogleTokenMinter(async () =>
+            Response.json({ access_token: `t${++n}`, expires_in: 3600 })
+        )
+        const key = parseServiceAccount(KEY_JSON)
+        if (!key) throw new Error('no key')
+        for (let i = 0; i < MAX_MINTS_PER_HOUR; i++) {
+            await minter.token(key, {
+                scopes: ['https://mail.google.com/'],
+                subject: `u${i}@x.com`,
+            })
+        }
+        const error = await minter
+            .token(key, { scopes: ['https://mail.google.com/'], subject: 'otro@x.com' })
+            .catch((e: { code?: string }) => e)
+        expect((error as { code?: string }).code).toBe('KEYCHAIN_RATE_LIMITED')
+        expect(minter.size).toBe(MAX_MINTS_PER_HOUR)
+    })
+})

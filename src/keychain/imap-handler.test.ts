@@ -198,3 +198,23 @@ describe('/mail/read', () => {
         expect(body.error.message).toContain('--host')
     })
 })
+
+describe('htmlToText', () => {
+    test('lineal: 2 MB de <script> sin cerrar no bloquea kj-keychain', async () => {
+        const { htmlToText } = await import('./imap-handler')
+        const evil = '<p>hola</p>' + '<script>'.repeat(250_000)
+        const started = performance.now()
+        expect(htmlToText(evil)).toBe('hola')
+        expect(htmlToText('<<<<'.repeat(500_000))).toBe('')
+        expect(performance.now() - started).toBeLessThan(1_000)
+    })
+
+    test('quita script y style, deja el texto', async () => {
+        const { htmlToText } = await import('./imap-handler')
+        expect(
+            htmlToText(
+                '<style>p{}</style><p>Hola&nbsp;Ana</p><script>x()</script><div>Reserva &amp; bono</div>'
+            )
+        ).toBe('Hola Ana\n\nReserva & bono')
+    })
+})

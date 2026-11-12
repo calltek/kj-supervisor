@@ -28,6 +28,10 @@ const SCOPE = /^https:\/\/(www\.googleapis\.com\/auth\/[a-z0-9._/-]+|mail\.googl
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 /** Renewed this long before Google says it expires. */
 const EARLY_MS = 5 * 60_000
+/** Tokens kept at once; past it the expired go first, then the oldest. */
+export const MAX_CACHED_TOKENS = 256
+/** New tokens per service account per hour (a loop over subjects would burn Google's quota). */
+export const MAX_MINTS_PER_HOUR = 60
 
 export interface ServiceAccountKey {
     client_email: string
@@ -129,6 +133,7 @@ export function signAssertion(key: ServiceAccountKey, grant: GoogleGrant, nowMs:
 export class GoogleTokenMinter {
     private readonly tokens = new Map<string, { token: string; expires: number }>()
     private readonly inflight = new Map<string, Promise<string>>()
+    private readonly mints = new Map<string, number[]>()
 
     constructor(
         private readonly fetch: Fetcher,
@@ -145,14 +150,49 @@ export class GoogleTokenMinter {
         if (hit && hit.expires > this.now()) return hit.token
         const running = this.inflight.get(id)
         if (running) return running
+        this.takeMint(key.client_email)
         const pending = this.mint(key, grant)
             .then((minted) => {
-                this.tokens.set(id, minted)
+                this.store(id, minted)
                 return minted.token
             })
             .finally(() => this.inflight.delete(id))
         this.inflight.set(id, pending)
         return pending
+    }
+
+    private takeMint(account: string): void {
+        const since = this.now() - 60 * 60_000
+        const recent = (this.mints.get(account) ?? []).filter((t) => t > since)
+        if (recent.length >= MAX_MINTS_PER_HOUR) {
+            this.mints.set(account, recent)
+            throw new KeychainError(
+                'KEYCHAIN_RATE_LIMITED',
+                `La cuenta de servicio ya ha pedido ${MAX_MINTS_PER_HOUR} tokens a Google en la última ` +
+                    'hora. Reutiliza los mismos scopes y la misma cuenta, o espera.'
+            )
+        }
+        recent.push(this.now())
+        this.mints.set(account, recent)
+    }
+
+    private store(id: string, minted: { token: string; expires: number }): void {
+        if (this.tokens.size >= MAX_CACHED_TOKENS) {
+            const now = this.now()
+            for (const [k, v] of this.tokens) if (v.expires <= now) this.tokens.delete(k)
+            while (this.tokens.size >= MAX_CACHED_TOKENS) {
+                const oldest = this.tokens.keys().next().value
+                if (oldest === undefined) break
+                this.tokens.delete(oldest)
+            }
+        }
+        this.tokens.delete(id)
+        this.tokens.set(id, minted)
+    }
+
+    /** How many tokens are kept (tests). */
+    get size(): number {
+        return this.tokens.size
     }
 
     private async mint(
