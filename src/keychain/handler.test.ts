@@ -105,6 +105,7 @@ describe('keychain handler', () => {
                 conversation_session_id: 'sess-1',
                 credential: 'Stripe live',
                 field: 'api_key',
+                host: 'api.stripe.com',
             },
         ])
 

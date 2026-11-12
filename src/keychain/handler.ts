@@ -249,6 +249,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                         conversation_session_id: session,
                         credential: ref.credential,
                         field: ref.field,
+                        host: hostname,
                     })
                 )
             }
