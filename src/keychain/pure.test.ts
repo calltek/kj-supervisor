@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
 import { isBlockedAddress } from './addresses'
-import { authHeaderValue, extractReferences, mentionsReference, parseReference } from './references'
+import {
+    authHeaderValue,
+    extractReferences,
+    headerText,
+    mentionsReference,
+    parseReference,
+} from './references'
 import { REDACTED, collectVariants, redactBytes, redactText } from './redact'
 import { hostMatchesSite } from './sites'
 
@@ -177,5 +183,29 @@ describe('escaped redaction', () => {
         const variants = collectVariants(['a&b<c>secret'])
         expect(redactText('x a&amp;b&lt;c&gt;secret y', variants)).not.toContain('secret')
         expect(redactText('{"v":"a\u0026b\u003cc\u003esecret"}', variants)).not.toContain('secret')
+    })
+})
+
+describe('header text', () => {
+    const asBun = (text: string) => Buffer.from(text, 'utf8').toString('latin1')
+
+    test('undoes what Bun does to UTF-8, as many hops as asked', () => {
+        expect(headerText(asBun('Gestión'))).toBe('Gestión')
+        expect(headerText(asBun(asBun('Gestión')), 2)).toBe('Gestión')
+        expect(headerText(asBun('Gestión'), 2)).toBe('Gestión')
+    })
+
+    test('leaves alone what is not mangled UTF-8', () => {
+        expect(headerText('Bearer abc')).toBe('Bearer abc')
+        // A real latin1 byte (not valid UTF-8) and text already decoded.
+        expect(headerText('café')).toBe('café')
+        expect(headerText('Gestión €')).toBe('Gestión €')
+    })
+
+    test('a reference composes a decomposed accent', () => {
+        expect(parseReference('Gestio\u0301n.contrasen\u0303a')).toEqual({
+            credential: 'Gestión',
+            field: 'contraseña',
+        })
     })
 })
