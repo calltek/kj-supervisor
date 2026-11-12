@@ -70,27 +70,77 @@ export interface GoogleGrant {
     subject: string | null
 }
 
-/** Reads and checks the two headers. */
-export function googleGrant(headers: Headers): GoogleGrant {
+/** Field labels of the credential that say what its key may be used for. */
+export const GOOGLE_GRANT_LABELS = {
+    scopes: ['scopes', 'google_scopes', 'scope'],
+    subjects: ['subject', 'subjects', 'google_subject', 'impersonate'],
+} as const
+
+/** What the credential allows; null = the field is not there. */
+export interface GoogleAllowed {
+    scopes: string[] | null
+    subjects: string[] | null
+}
+
+function list(value: string | null | undefined): string[] | null {
+    if (value === null || value === undefined) return null
+    const items = value.split(/[\s,;]+/).filter(Boolean)
+    return items.length ? items : null
+}
+
+export function googleAllowed(scopes: string | null, subjects: string | null): GoogleAllowed {
+    return {
+        scopes: list(scopes),
+        subjects: list(subjects)?.map((s) => s.toLowerCase()) ?? null,
+    }
+}
+
+/**
+ * The scopes and the account the token is minted for. The headers come from
+ * the agent, which reads mail and pages written by anyone (SOKI, #219), so
+ * they only ever NARROW what the credential lists: scopes in its `scopes`
+ * field, accounts in its `subject` field. Without the header, everything the
+ * credential lists (the first account). A credential that lists no scopes
+ * only gets cloud-platform, and one that lists no account acts as itself.
+ */
+export function googleGrant(headers: Headers, allowed: GoogleAllowed): GoogleGrant {
     const raw = headers.get(GOOGLE_SCOPES_HEADER)?.trim()
-    const scopes = raw ? raw.split(/[\s,]+/).filter(Boolean) : [DEFAULT_GOOGLE_SCOPE]
+    const permitted = allowed.scopes ?? [DEFAULT_GOOGLE_SCOPE]
+    const scopes = raw ? raw.split(/[\s,]+/).filter(Boolean) : permitted
     for (const scope of scopes) {
-        if (!SCOPE.test(scope)) {
+        if (!SCOPE.test(scope) || scope.length > 200) {
             throw new KeychainError(
                 'KEYCHAIN_BAD_REQUEST',
-                `«${scope}» no es un scope de Google. Pon en X-Kj-Google-Scopes las URL ` +
+                `«${scope.slice(0, 200)}» no es un scope de Google. Pon en X-Kj-Google-Scopes las URL ` +
                     'completas separadas por espacios, por ejemplo ' +
                     'https://www.googleapis.com/auth/spreadsheets.'
             )
         }
+        if (!permitted.includes(scope)) {
+            throw new KeychainError(
+                'KEYCHAIN_GOOGLE_NOT_ALLOWED',
+                `La credencial no permite el scope ${scope}; sólo ${permitted.join(', ')}. ` +
+                    'La petición no ha salido. Si hace falta, el operador lo añade al campo scopes de la credencial.'
+            )
+        }
     }
-    const subject = headers.get(GOOGLE_SUBJECT_HEADER)?.trim() || null
-    if (subject && !EMAIL.test(subject)) {
+    const asked = headers.get(GOOGLE_SUBJECT_HEADER)?.trim().toLowerCase() || null
+    if (asked && (asked.length > 320 || !EMAIL.test(asked))) {
         throw new KeychainError(
             'KEYCHAIN_BAD_REQUEST',
             'X-Kj-Google-Subject tiene que ser el correo de la cuenta en cuyo nombre se actúa.'
         )
     }
+    if (asked && !allowed.subjects?.includes(asked)) {
+        throw new KeychainError(
+            'KEYCHAIN_GOOGLE_NOT_ALLOWED',
+            allowed.subjects
+                ? `La credencial sólo puede actuar como ${allowed.subjects.join(', ')}, no como ${asked}. La petición no ha salido.`
+                : 'La credencial no permite actuar en nombre de nadie. La petición no ha salido. Si hace falta, el operador ' +
+                      'pone el correo en el campo subject de la credencial.'
+        )
+    }
+    const subject = asked ?? allowed.subjects?.[0] ?? null
     return { scopes: [...new Set(scopes)].sort(), subject }
 }
 

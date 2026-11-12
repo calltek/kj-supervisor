@@ -6,8 +6,9 @@
       "name": "kj-agent",
       "dependencies": {
         "dockerode": "^5.0.0",
-        "imapflow": "1.0.196",
-        "mailparser": "3.7.4",
+        "html-to-text": "^9.0.5",
+        "imapflow": "^1.0.196",
+        "mailparser": "^3.7.4",
         "mysql2": "^3.24.6",
         "nodemailer": "^10.4.0",
         "pg": "^8.23.1",
@@ -19,6 +20,7 @@
         "@biomejs/biome": "^2.4.14",
         "@types/bun": "^1.3.13",
         "@types/dockerode": "^4.0.1",
+        "@types/html-to-text": "^9.0.4",
         "@types/mailparser": "^3.9.0",
         "@types/nodemailer": "^8.0.2",
         "@types/pg": "^8.23.1",
@@ -86,6 +88,8 @@
     "@types/docker-modem": ["@types/docker-modem@3.0.6", "", { "dependencies": { "@types/node": "*", "@types/ssh2": "*" } }, "sha512-yKpAGEuKRSS8wwx0joknWxsmLha78wNMe9R2S3UNsVOkZded8UqOrV8KoeDXoXsjndxwyF3eIhyClGbO1SEhEg=="],
 
     "@types/dockerode": ["@types/dockerode@4.0.1", "", { "dependencies": { "@types/docker-modem": "*", "@types/node": "*", "@types/ssh2": "*" } }, "sha512-cmUpB+dPN955PxBEuXE3f6lKO1hHiIGYJA46IVF3BJpNsZGvtBDcRnlrHYHtOH/B6vtDOyl2kZ2ShAu3mgc27Q=="],
+
+    "@types/html-to-text": ["@types/html-to-text@9.0.4", "", {}, "sha512-pUY3cKH/Nm2yYrEmDlPR1mR7yszjGx4DrwPjQ702C4/D5CwHuZTgZdIdwPkRbcuhs7BAh2L5rg3CL5cbRiGTCQ=="],
 
     "@types/mailparser": ["@types/mailparser@3.9.0", "", { "dependencies": { "@types/node": "*", "iconv-lite": "^0.6.3" } }, "sha512-YnhrRiRVDiEAphFvd72hKa1n8y2b9Q3rgSQiONZQyhQz67h5g4MZHNApET3XWXVEFdInWtHqDHKEwnyjxU3QVw=="],
 

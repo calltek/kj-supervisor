@@ -9,9 +9,12 @@
  */
 
 import type { KeychainSite } from './control-protocol'
+import { lookupField } from './credential-fields'
 import { KeychainError, errorResponse } from './errors'
 import {
+    GOOGLE_GRANT_LABELS,
     GoogleTokenMinter,
+    googleAllowed,
     googleGrant,
     isGoogleApiHost,
     parseServiceAccount,
@@ -293,7 +296,17 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                         `(*.googleapis.com), no en ${hostname}. La petición no ha salido.`
                 )
             }
-            const token = await google.token(account, googleGrant(request.headers))
+            const credential = [...refs.values()].find((r) => r.raw === raw)?.credential ?? ''
+            const ref = { agent_id, conversation_session_id: session, credential }
+            const [scopes, subjects] = await Promise.all([
+                lookupField(deps.resolve, ref, GOOGLE_GRANT_LABELS.scopes),
+                lookupField(deps.resolve, ref, GOOGLE_GRANT_LABELS.subjects),
+            ])
+            const allowed = googleAllowed(
+                scopes.status === 'found' ? scopes.value : null,
+                subjects.status === 'found' ? subjects.value : null
+            )
+            const token = await google.token(account, googleGrant(request.headers, allowed))
             values.set(raw, token)
         }
         const basicPairs: string[] = []

@@ -4,6 +4,7 @@ import { createVerify, generateKeyPairSync } from 'node:crypto'
 import {
     GOOGLE_TOKEN_URL,
     GoogleTokenMinter,
+    googleAllowed,
     googleGrant,
     parseServiceAccount,
     signAssertion,
@@ -59,20 +60,49 @@ describe('service account key', () => {
     })
 
     test('scopes default to cloud-platform; anything not a Google scope is refused', () => {
-        expect(googleGrant(new Headers()).scopes).toEqual([
-            'https://www.googleapis.com/auth/cloud-platform',
-        ])
+        const none = googleAllowed(null, null)
+        expect(googleGrant(new Headers(), none)).toEqual({
+            scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+            subject: null,
+        })
+        const allowed = googleAllowed(
+            'https://www.googleapis.com/auth/spreadsheets, https://www.googleapis.com/auth/drive',
+            'Reservas@vcs.com'
+        )
+        // Without headers: everything the credential lists, as its first account.
+        expect(googleGrant(new Headers(), allowed)).toEqual({
+            scopes: [
+                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/spreadsheets',
+            ],
+            subject: 'reservas@vcs.com',
+        })
+        // The headers only narrow it.
         const grant = googleGrant(
             new Headers({
-                'X-Kj-Google-Scopes':
-                    'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive',
+                'X-Kj-Google-Scopes': 'https://www.googleapis.com/auth/spreadsheets',
                 'X-Kj-Google-Subject': 'reservas@vcs.com',
-            })
+            }),
+            allowed
         )
-        expect(grant.scopes).toHaveLength(2)
-        expect(grant.subject).toBe('reservas@vcs.com')
-        expect(() => googleGrant(new Headers({ 'X-Kj-Google-Scopes': 'https://evil/x' }))).toThrow()
-        expect(() => googleGrant(new Headers({ 'X-Kj-Google-Subject': 'nope' }))).toThrow()
+        expect(grant.scopes).toEqual(['https://www.googleapis.com/auth/spreadsheets'])
+        const code = (h: Record<string, string>, a = allowed) => {
+            try {
+                googleGrant(new Headers(h), a)
+                return null
+            } catch (e) {
+                return (e as { code?: string }).code
+            }
+        }
+        expect(code({ 'X-Kj-Google-Scopes': 'https://evil/x' })).toBe('KEYCHAIN_BAD_REQUEST')
+        expect(code({ 'X-Kj-Google-Scopes': 'https://mail.google.com/' })).toBe(
+            'KEYCHAIN_GOOGLE_NOT_ALLOWED'
+        )
+        expect(code({ 'X-Kj-Google-Subject': 'ceo@vcs.com' })).toBe('KEYCHAIN_GOOGLE_NOT_ALLOWED')
+        expect(code({ 'X-Kj-Google-Subject': 'ceo@vcs.com' }, none)).toBe(
+            'KEYCHAIN_GOOGLE_NOT_ALLOWED'
+        )
+        expect(code({ 'X-Kj-Google-Subject': 'nope' })).toBe('KEYCHAIN_BAD_REQUEST')
     })
 
     test('mints once and reuses the token until shortly before it expires', async () => {
@@ -127,7 +157,14 @@ describe('keychain handler with a service account', () => {
         }
         const handle = createKeychainHandler({
             registry,
-            resolve: async () => ({ ok: true, value: KEY_JSON, sites }),
+            resolve: async ({ field }) =>
+                field === 'clave'
+                    ? { ok: true, value: KEY_JSON, sites }
+                    : field === 'scopes'
+                      ? { ok: true, value: 'https://www.googleapis.com/auth/spreadsheets', sites }
+                      : field === 'subject'
+                        ? { ok: true, value: 'reservas@vcs.com', sites }
+                        : { ok: false, code: 'KEYCHAIN_NO_FIELD', message: 'no' },
             log: silentLog,
             fetch,
             lookup: async () => [{ address: '142.250.1.1', family: 4 }],

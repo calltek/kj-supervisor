@@ -22,6 +22,7 @@
  * the name.
  */
 
+import { convert } from 'html-to-text'
 import { ImapFlow } from 'imapflow'
 import { simpleParser } from 'mailparser'
 
@@ -278,50 +279,21 @@ function envelopeAddresses(list: { name?: string; address?: string }[] | undefin
 /** HTML read for the text of a message; past this it is cut, not converted. */
 export const MAX_HTML_CHARS = MAX_TEXT_CHARS * 4
 
-const BREAK_TAG = /^\/?(br|p|div|tr|li|h\d)\b/i
-
 /**
- * The text of an HTML body in ONE pass, with no backtracking regex: the mail is
- * written by anyone who can reach the mailbox, and kj-keychain is a single
- * process for the whole fleet (SOKI, #106: a lazy `<script>…</script>` regex
- * took hours on 30 MB of unclosed `<script>`). Script and style are skipped up
- * to their closing tag, or to the end if there is none; any other tag goes, and
- * a `<` with no `>` ends the text there.
+ * The text of an HTML body, with html-to-text (htmlparser2, a linear
+ * tokenizer) and a cap first: the mail is written by anyone who can reach the
+ * mailbox, and kj-keychain is one process for the whole fleet (SOKI, #106: a
+ * lazy `<script>…</script>` regex took hours on unclosed tags).
  */
 export function htmlToText(input: string): string {
     const html = input.length > MAX_HTML_CHARS ? input.slice(0, MAX_HTML_CHARS) : input
-    const lower = html.toLowerCase()
-    let out = ''
-    let i = 0
-    while (i < html.length) {
-        const open = html.indexOf('<', i)
-        if (open === -1) {
-            out += html.slice(i)
-            break
-        }
-        out += html.slice(i, open)
-        const close = html.indexOf('>', open + 1)
-        if (close === -1) break
-        const tag = lower.slice(open + 1, close).trim()
-        if (tag.startsWith('script') || tag.startsWith('style')) {
-            const name = tag.startsWith('script') ? 'script' : 'style'
-            const end = lower.indexOf(`</${name}`, close + 1)
-            if (end === -1) break
-            const endClose = html.indexOf('>', end)
-            if (endClose === -1) break
-            i = endClose + 1
-            continue
-        }
-        if (BREAK_TAG.test(tag)) out += '\n'
-        i = close + 1
-    }
-    return out
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
+    return convert(html, {
+        wordwrap: false,
+        selectors: [
+            { selector: 'a', options: { ignoreHref: true } },
+            { selector: 'img', format: 'skip' },
+        ],
+    })
         .replace(/\n{3,}/g, '\n\n')
         .trim()
 }
