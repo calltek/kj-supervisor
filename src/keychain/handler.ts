@@ -4,7 +4,7 @@
  * The launcher forwards the conversation's request with its original method,
  * headers and body, plus `X-Kj-Token` (the agent), `X-Kj-Session` (the
  * conversation) and `X-Kj-Target` (the absolute https URL). kj-keychain puts
- * the credential values in the allowed auth headers, sends the request to the
+ * the credential values in its headers, sends the request to the
  * destination, and returns the answer with every value used hidden.
  */
 
@@ -23,7 +23,7 @@ import type { KeychainLog } from './log'
 import { type LookupAll, defaultLookup, resolvePublicAddress } from './public-address'
 import {
     type CredentialReference,
-    REFERENCE_HEADERS,
+    NO_REFERENCE_HEADERS,
     authHeaderValue,
     extractReferences,
     forwardableHeader,
@@ -178,15 +178,14 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
         // 3. The body, capped, so it can be searched for references.
         const body = await readRequestBody(request)
 
-        // 4. References: only in the allowed auth headers.
+        // 4. References: in any header except those that steer the request.
         const outside = (where: string) =>
             new KeychainError(
                 'KEYCHAIN_REF_OUTSIDE_HEADER',
-                `Hay una referencia a una credencial en ${where}. Las credenciales sólo se ` +
-                    'pueden usar en las cabeceras Authorization, Proxy-Authorization, ' +
-                    'X-API-Key, Api-Key, apikey, xi-api-key, X-Auth-Token o X-Access-Token; ' +
-                    'nunca en la URL ni ' +
-                    'en el cuerpo. La petición no ha salido.'
+                `Hay una referencia a una credencial en ${where}. Las credenciales se usan ` +
+                    'en una cabecera (Authorization, X-API-Key o la que pida el servicio), ' +
+                    'nunca en la URL, en el cuerpo ni en cabeceras como Host o Content-Type. ' +
+                    'La petición no ha salido.'
             )
         if (mentionsReference(rawTarget)) throw outside('la URL')
         if (body && mentionsReference(Buffer.from(body).toString('latin1'))) {
@@ -207,7 +206,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             const value = headerText(received, 2)
             const lower = name.toLowerCase()
             if (lower.startsWith('x-kj-')) continue
-            const allowed = REFERENCE_HEADERS.has(lower)
+            const allowed = !NO_REFERENCE_HEADERS.has(lower) && !connectionTokens.has(lower)
             if (mentionsReference(value)) {
                 if (!allowed) throw outside(`la cabecera ${name}`)
                 const found = extractReferences(value)
@@ -229,7 +228,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             throw new KeychainError(
                 'KEYCHAIN_NO_REFERENCE',
                 'La petición no usa ninguna credencial. Por aquí sólo pasan peticiones con ' +
-                    'una referencia {{kj:<credencial>.<campo>}} en una cabecera de autenticación.'
+                    'una referencia {{kj:<credencial>.<campo>}} en una cabecera.'
             )
         }
 

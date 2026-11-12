@@ -150,6 +150,22 @@ describe('keychain handler', () => {
         }
     })
 
+    test('any header the service names carries a reference (apikey, X-Shopify-Access-Token)', async () => {
+        const { handle, calls } = setup()
+        const response = await handle(
+            req('https://api.stripe.com/v1/x', {
+                headers: {
+                    apikey: '{{kj:Stripe live.api_key}}',
+                    'X-Shopify-Access-Token': '{{kj:Stripe live.api_key}}',
+                },
+            })
+        )
+        expect(response.status).toBe(200)
+        const sent = new Headers(calls[0]?.init.headers)
+        expect(sent.get('apikey')).toBe(SECRET)
+        expect(sent.get('x-shopify-access-token')).toBe(SECRET)
+    })
+
     test('unknown token: 401 and nothing resolved', async () => {
         const { handle, resolves, calls } = setup()
         const request = req('https://api.stripe.com/', { headers: { ...AUTH } })
@@ -171,9 +187,9 @@ describe('keychain handler', () => {
         ],
         ['the body', 'https://api.github.com/gists', {}, '{"c":"{{kj:Stripe live.api_key}}"}'],
         [
-            'another header',
+            'a header that steers the request',
             'https://api.github.com/',
-            { 'X-Note': '{{kj:Stripe live.api_key}}' },
+            { Referer: '{{kj:Stripe live.api_key}}' },
             undefined,
         ],
     ])('a reference in %s is refused without going out', async (_, target, headers, body) => {

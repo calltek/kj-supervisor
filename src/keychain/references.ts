@@ -10,17 +10,35 @@ export interface CredentialReference {
     field: string
 }
 
-/** The only headers where a reference may be substituted (lower case). */
-export const REFERENCE_HEADERS: ReadonlySet<string> = new Set([
-    'authorization',
-    'proxy-authorization',
-    'x-api-key',
-    'api-key',
-    'x-auth-token',
-    'x-access-token',
-    // Supabase and ElevenLabs authenticate with these two, nothing else.
-    'apikey',
-    'xi-api-key',
+/**
+ * Headers that never carry a reference (lower case): the ones that steer the
+ * request itself. A value there would break it or route it somewhere else;
+ * every other header may carry one, since what protects the value is the
+ * destination, not the header's name (each API names its own: `apikey`,
+ * `xi-api-key`, `X-Shopify-Access-Token`…).
+ */
+export const NO_REFERENCE_HEADERS: ReadonlySet<string> = new Set([
+    'host',
+    'connection',
+    'keep-alive',
+    'proxy-connection',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'content-length',
+    'content-type',
+    'content-encoding',
+    'accept-encoding',
+    'expect',
+    'origin',
+    'referer',
+    'forwarded',
+    'via',
+    'x-forwarded-for',
+    'x-forwarded-host',
+    'x-forwarded-proto',
+    'x-real-ip',
 ])
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true })
