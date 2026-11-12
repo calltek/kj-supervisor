@@ -91,6 +91,11 @@ export interface MailAttachment {
     filename: string
     content: Buffer
     content_type: string
+    /**
+     * Content-ID of an image shown inside the HTML (`<img src="cid:logo">`),
+     * so Outlook and Gmail show it without «show images». Only a name.
+     */
+    cid?: string
 }
 
 export interface SmtpSendResult {
@@ -259,6 +264,7 @@ export function parseMailRequest(body: Record<string, unknown>): MailRequest {
 }
 
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
+const CID = /^[A-Za-z0-9._@-]{1,100}$/
 const CONTENT_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i
 
 /**
@@ -302,7 +308,16 @@ export function parseAttachments(value: unknown): MailAttachment[] {
             typeof a.content_type === 'string' && CONTENT_TYPE.test(a.content_type)
                 ? a.content_type.toLowerCase()
                 : 'application/octet-stream'
-        return { filename, content, content_type }
+        let cid: string | undefined
+        if (a.cid !== undefined && a.cid !== null) {
+            if (typeof a.cid !== 'string' || !CID.test(a.cid)) {
+                throw bad(
+                    `${what} (${filename}) tiene un cid no válido: letras, números, punto, guion, guion bajo o @, hasta 100.`
+                )
+            }
+            cid = a.cid
+        }
+        return { filename, content, content_type, ...(cid ? { cid } : {}) }
     })
 }
 
@@ -345,6 +360,7 @@ export const sendWithNodemailer: SendMail = async (o) => {
                       filename: a.filename,
                       content: a.content,
                       contentType: a.content_type,
+                      ...(a.cid ? { cid: a.cid, contentDisposition: 'inline' as const } : {}),
                   }))
                 : undefined,
             disableFileAccess: true,
