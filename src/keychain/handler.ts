@@ -184,7 +184,8 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                 'KEYCHAIN_REF_OUTSIDE_HEADER',
                 `Hay una referencia a una credencial en ${where}. Las credenciales sólo se ` +
                     'pueden usar en las cabeceras Authorization, Proxy-Authorization, ' +
-                    'X-API-Key, Api-Key, X-Auth-Token o X-Access-Token; nunca en la URL ni ' +
+                    'X-API-Key, Api-Key, apikey, xi-api-key, X-Auth-Token o X-Access-Token; ' +
+                    'nunca en la URL ni ' +
                     'en el cuerpo. La petición no ha salido.'
             )
         if (mentionsReference(rawTarget)) throw outside('la URL')

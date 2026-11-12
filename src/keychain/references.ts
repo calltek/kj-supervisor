@@ -18,6 +18,9 @@ export const REFERENCE_HEADERS: ReadonlySet<string> = new Set([
     'api-key',
     'x-auth-token',
     'x-access-token',
+    // Supabase and ElevenLabs authenticate with these two, nothing else.
+    'apikey',
+    'xi-api-key',
 ])
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true })
