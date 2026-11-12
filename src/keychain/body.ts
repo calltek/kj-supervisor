@@ -69,10 +69,19 @@ export function bodyKind(contentType: string | null): BodyKind | null {
     return null
 }
 
+/** Where a checked reference sits in the text: `[start, end)` is replaced. */
+interface Slot {
+    start: number
+    end: number
+    ref: CredentialReference
+}
+
 export interface BodyReferences {
     kind: BodyKind
     text: string
     refs: CredentialReference[]
+    /** Exactly the positions that were checked: the only ones filled. */
+    slots: Slot[]
 }
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true })
@@ -109,14 +118,15 @@ export function bodyReferences(
     // JSON may escape the braces (a backslash-u escape): looked for once parsed.
     if (!mentioned) {
         if (kind !== 'json' || !raw.includes('\\u')) return null
-        let parsed: unknown
+        let text: string
         try {
-            parsed = JSON.parse(UTF8.decode(body))
+            text = UTF8.decode(body)
+            JSON.parse(text)
         } catch {
             return null
         }
-        // Re-serialised, the braces come out as braces.
-        if (!mentionsReference(JSON.stringify(parsed))) return null
+        // Throws where an escaped reference is not allowed, like a plain one.
+        if (!jsonSlots(text).length) return null
     }
     if (!kind) {
         throw refused(
@@ -130,8 +140,8 @@ export function bodyReferences(
     } catch {
         throw refused('El cuerpo con la referencia no es texto UTF-8.')
     }
-    const refs = kind === 'json' ? jsonReferences(text) : formReferences(text)
-    return { kind, text, refs }
+    const slots = kind === 'json' ? jsonSlots(text) : formSlots(text)
+    return { kind, text, refs: slots.map((s) => s.ref), slots }
 }
 
 function nested(): KeychainError {
@@ -157,32 +167,54 @@ function checkField(name: string | null, value: string): CredentialReference {
     return ref
 }
 
-function jsonReferences(text: string): CredentialReference[] {
-    let parsed: unknown
+interface Frame {
+    array: boolean
+    expectKey: boolean
+    key: string | null
+}
+
+/**
+ * Walks the JSON text itself, string literal by string literal, so what is
+ * checked is what gets filled: `JSON.parse` keeps only the LAST of two equal
+ * keys, and a check on the parsed object would let an earlier one (nested, or
+ * under a name that is not a secret) through to the filling.
+ */
+function jsonSlots(text: string): Slot[] {
     try {
-        parsed = JSON.parse(text)
+        JSON.parse(text)
     } catch {
         throw refused('El cuerpo dice ser JSON pero no lo es.')
     }
-    const refs: CredentialReference[] = []
-    // Anything below the top level is refused: there the agent picks the
-    // name (`{"metadata": {"token": …}}`) and the service stores it.
-    const deep = (value: unknown) => {
-        if (mentionsReference(JSON.stringify(value) ?? '')) throw nested()
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        deep(parsed)
-        return refs
-    }
-    for (const [key, value] of Object.entries(parsed)) {
-        if (mentionsReference(key)) throw refused('Hay una referencia en el nombre de un campo.')
-        if (typeof value === 'string') {
-            if (mentionsReference(value)) refs.push(checkField(key, value))
-        } else {
-            deep(value)
+    const slots: Slot[] = []
+    const stack: Frame[] = []
+    let i = 0
+    while (i < text.length) {
+        const ch = text[i]
+        const top = stack[stack.length - 1]
+        if (ch === '"') {
+            let end = i + 1
+            while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1
+            const decoded = JSON.parse(text.slice(i, end + 1)) as string
+            const isKey = !!top && !top.array && top.expectKey
+            if (isKey && top) top.key = decoded
+            if (mentionsReference(decoded)) {
+                if (isKey) throw refused('Hay una referencia en el nombre de un campo.')
+                // Below the top level the agent picks the name
+                // (`{"metadata": {"token": …}}`) and the service stores it.
+                if (stack.length !== 1 || !top || top.array) throw nested()
+                slots.push({ start: i, end: end + 1, ref: checkField(top.key, decoded) })
+            }
+            i = end + 1
+            continue
         }
+        if (ch === '{') stack.push({ array: false, expectKey: true, key: null })
+        else if (ch === '[') stack.push({ array: true, expectKey: false, key: null })
+        else if (ch === '}' || ch === ']') stack.pop()
+        else if (ch === ':' && top) top.expectKey = false
+        else if (ch === ',' && top && !top.array) top.expectKey = true
+        i++
     }
-    return refs
+    return slots
 }
 
 function formDecode(text: string): string | null {
@@ -193,9 +225,12 @@ function formDecode(text: string): string | null {
     }
 }
 
-function formReferences(text: string): CredentialReference[] {
-    const refs: CredentialReference[] = []
+function formSlots(text: string): Slot[] {
+    const slots: Slot[] = []
+    let offset = 0
     for (const pair of text.split('&')) {
+        const start = offset
+        offset += pair.length + 1
         if (!mentionsReference(pair)) continue
         const eq = pair.indexOf('=')
         const rawName = eq < 0 ? pair : pair.slice(0, eq)
@@ -207,55 +242,32 @@ function formReferences(text: string): CredentialReference[] {
         if (/[[\].]/.test(name)) throw nested()
         const value = eq < 0 ? null : formDecode(pair.slice(eq + 1))
         if (value === null) throw refused(`El valor del campo «${name}» no se entiende.`)
-        refs.push(checkField(name, value))
+        slots.push({
+            start: start + eq + 1,
+            end: start + pair.length,
+            ref: checkField(name, value),
+        })
     }
-    return refs
+    return slots
 }
 
 /**
- * The body with every reference replaced by its value. Only the references'
- * own tokens change: every other byte goes out as the agent wrote it (a JSON
- * number is not re-serialised, a form field is not re-encoded).
+ * The body with each checked reference replaced by its value, at the position
+ * where it was checked and nowhere else: every other byte goes out as the
+ * agent wrote it (a JSON number is not re-serialised, a form field is not
+ * re-encoded).
  */
 export function fillBody(found: BodyReferences, values: Map<string, string>): Uint8Array {
-    // A reference without its value would go out as text: never.
-    if (found.refs.some((ref) => !values.has(ref.raw))) {
-        throw refused('No se ha podido poner la credencial en el cuerpo.')
-    }
-    const out = found.kind === 'json' ? fillJson(found.text, values) : fillForm(found.text, values)
-    return new TextEncoder().encode(out)
-}
-
-function fillJson(text: string, values: Map<string, string>): string {
     let out = ''
-    let i = 0
-    while (i < text.length) {
-        const ch = text[i]
-        if (ch !== '"') {
-            out += ch
-            i++
-            continue
-        }
-        let end = i + 1
-        while (end < text.length && text[end] !== '"') end += text[end] === '\\' ? 2 : 1
-        const literal = text.slice(i, end + 1)
-        const decoded = JSON.parse(literal) as string
-        const value = EXACT.test(decoded) ? values.get(decoded) : undefined
-        out += value === undefined ? literal : JSON.stringify(value)
-        i = end + 1
+    let at = 0
+    for (const slot of [...found.slots].sort((a, b) => a.start - b.start)) {
+        const value = values.get(slot.ref.raw)
+        // A reference without its value would go out as text: never.
+        if (value === undefined) throw refused('No se ha podido poner la credencial en el cuerpo.')
+        out += found.text.slice(at, slot.start)
+        out += found.kind === 'json' ? JSON.stringify(value) : encodeURIComponent(value)
+        at = slot.end
     }
-    return out
-}
-
-function fillForm(text: string, values: Map<string, string>): string {
-    return text
-        .split('&')
-        .map((pair) => {
-            const eq = pair.indexOf('=')
-            if (eq < 0) return pair
-            const decoded = formDecode(pair.slice(eq + 1))
-            const value = decoded !== null && EXACT.test(decoded) ? values.get(decoded) : undefined
-            return value === undefined ? pair : `${pair.slice(0, eq)}=${encodeURIComponent(value)}`
-        })
-        .join('&')
+    out += found.text.slice(at)
+    return new TextEncoder().encode(out)
 }

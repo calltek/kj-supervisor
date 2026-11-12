@@ -768,8 +768,15 @@ es `src/keychain/`.
   `refresh_token`, `api_key`…). Lo pidieron un login por formulario y
   los refresh de OAuth. Lo de un cuerpo suele guardarse en el destino, y
   por eso nada anidado (`{"metadata":{"token":…}}`, `metadata[token]`): ahí el
-  nombre lo elige el agente. El resto de bytes sale como lo escribió. Fuera de
-  eso, `KEYCHAIN_REF_IN_BODY` sin resolver nada.
+  nombre lo elige el agente. **Se valida y se rellena por posición en el texto**,
+  no sobre el objeto parseado: `JSON.parse` se queda con la última de dos claves
+  iguales, y una anterior (anidada o con nombre que no es de secreto) se
+  colaba al relleno (SOKI, #113). El resto de bytes sale como lo escribió. Fuera
+  de eso, `KEYCHAIN_REF_IN_BODY` sin resolver nada. **El nombre es una barrera
+  débil** (lo elige el agente, y `key` o `token` son genéricos): en un servicio
+  que guarda campos de primer nivel con nombre libre (PostgREST, CouchDB…) el
+  valor puede quedar en claro. El límite de verdad es la lista de destinos de la
+  credencial.
 - **Un token por contenedor de agente**, en `KJ_KEYCHAIN_TOKEN`. Tras un
   reinicio no hay estado: se relee del `Config.Env` de cada agente vivo al
   arrancar y en cada `attach` (spawn, `agent:sync`, recreate por imagen, que

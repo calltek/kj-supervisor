@@ -70,6 +70,34 @@ describe('bodyReferences / fillBody', () => {
         expect(() => bodyReferences('application/x-www-form-urlencoded', enc(body))).toThrow()
     })
 
+    test.each([
+        [
+            'an earlier duplicate nested under the same key',
+            `{"password":"${REF}","metadata":{"t":"${REF}"},"metadata":1}`,
+        ],
+        ['an earlier duplicate in a field that is not a secret', `{"note":"${REF}","note":"x"}`],
+        [
+            'an escaped earlier duplicate',
+            '{"note":"\\u007b\\u007bkj:Shop Ruben.passwd}}","note":"x"}',
+        ],
+    ])('a reference in %s is refused (what is checked is what is filled)', (_, body) => {
+        expect(() => bodyReferences('application/json', enc(body))).toThrow()
+    })
+
+    test('only the checked positions are filled, even with the value at hand', () => {
+        const body = `{"password":"${REF}","password":"${REF}","n":"{{kj"}`
+        const found = must(bodyReferences('application/json', enc(body)))
+        expect(found.slots).toHaveLength(2)
+        expect(dec(fillBody(found, new Map([[REF, 's']])))).toBe(
+            '{"password":"s","password":"s","n":"{{kj"}'
+        )
+    })
+
+    test('a form with ; as separator is not split there', () => {
+        const body = `a=x;passwd=${encodeURIComponent(REF)}`
+        expect(() => bodyReferences('application/x-www-form-urlencoded', enc(body))).toThrow()
+    })
+
     test('an escaped reference in JSON is found and replaced', () => {
         const body = '{"password":"\\u007b\\u007bkj:Shop Ruben.passwd}}"}'
         const found = bodyReferences('application/json', enc(body))
