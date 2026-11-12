@@ -10,6 +10,12 @@
 
 import type { KeychainSite } from './control-protocol'
 import { KeychainError, errorResponse } from './errors'
+import {
+    GoogleTokenMinter,
+    googleGrant,
+    isGoogleApiHost,
+    parseServiceAccount,
+} from './google-service-account'
 import type { KeychainLog } from './log'
 import { type LookupAll, defaultLookup, resolvePublicAddress } from './public-address'
 import {
@@ -68,11 +74,13 @@ export interface KeychainHandlerDeps {
     log: KeychainLog
     fetch?: Fetcher
     lookup?: LookupAll
+    google?: GoogleTokenMinter
 }
 
 export function createKeychainHandler(deps: KeychainHandlerDeps) {
     const doFetch: Fetcher = deps.fetch ?? ((url, init) => fetch(url, init))
     const lookup = deps.lookup ?? defaultLookup
+    const google = deps.google ?? new GoogleTokenMinter(doFetch)
 
     return async function handle(request: Request): Promise<Response> {
         const started = Date.now()
@@ -267,9 +275,27 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             }
         }
 
-        // 8. Substitute and call, without following redirects.
+        // 8. Substitute and call, without following redirects. A Google service
+        // account key is never sent: it becomes an access token here.
         const values = new Map<string, string>()
-        for (const [raw, entry] of resolved) values.set(raw, entry.value)
+        const hidden: string[] = []
+        for (const [raw, entry] of resolved) {
+            const account = parseServiceAccount(entry.value)
+            if (!account) {
+                values.set(raw, entry.value)
+                continue
+            }
+            hidden.push(entry.value, account.private_key)
+            if (!isGoogleApiHost(hostname)) {
+                throw new KeychainError(
+                    'KEYCHAIN_WRONG_SITE',
+                    'Una cuenta de servicio de Google sólo se usa contra las API de Google ' +
+                        `(*.googleapis.com), no en ${hostname}. La petición no ha salido.`
+                )
+            }
+            const token = await google.token(account, googleGrant(request.headers))
+            values.set(raw, token)
+        }
         const basicPairs: string[] = []
         try {
             for (const [name, value] of withRefs) {
@@ -287,7 +313,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                     'petición no ha salido. Si no, díselo al operador.'
             )
         }
-        const variants = collectVariants([...values.values(), ...basicPairs])
+        const variants = collectVariants([...values.values(), ...basicPairs, ...hidden])
 
         let upstream: Response
         try {

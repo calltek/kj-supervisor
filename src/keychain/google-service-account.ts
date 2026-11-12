@@ -1,0 +1,207 @@
+/**
+ * A Google service account key (the JSON Google hands out as a file) used by
+ * reference: the agent writes `Authorization: Bearer {{kj:Google.key}}` and
+ * kj-keychain signs the JWT, trades it for an access token and puts THAT in
+ * the header. The private key never leaves kj-keychain, and the token only
+ * goes to Google APIs.
+ *
+ * Scopes and the account to act as (domain-wide delegation) come in
+ * `X-Kj-Google-Scopes` and `X-Kj-Google-Subject`, which are never forwarded.
+ */
+
+import { createHash, createSign } from 'node:crypto'
+
+import { KeychainError } from './errors'
+import type { Fetcher } from './handler'
+
+export const GOOGLE_SCOPES_HEADER = 'x-kj-google-scopes'
+export const GOOGLE_SUBJECT_HEADER = 'x-kj-google-subject'
+
+/** Always this one: never the `token_uri` of the JSON, which whoever wrote it chose. */
+export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+export const DEFAULT_GOOGLE_SCOPE = 'https://www.googleapis.com/auth/cloud-platform'
+
+/** Where a token minted here may go. Each one still has to be a destination of the credential. */
+const GOOGLE_API_SUFFIXES = ['googleapis.com']
+
+const SCOPE = /^https:\/\/(www\.googleapis\.com\/auth\/[a-z0-9._/-]+|mail\.google\.com\/)$/i
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+/** Renewed this long before Google says it expires. */
+const EARLY_MS = 5 * 60_000
+
+export interface ServiceAccountKey {
+    client_email: string
+    private_key: string
+    private_key_id?: string
+}
+
+/** The key if `value` is a service account JSON; null if it is anything else. */
+export function parseServiceAccount(value: string): ServiceAccountKey | null {
+    const trimmed = value.trim()
+    if (!trimmed.startsWith('{')) return null
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(trimmed)
+    } catch {
+        return null
+    }
+    if (!parsed || typeof parsed !== 'object') return null
+    const p = parsed as Record<string, unknown>
+    if (p.type !== 'service_account') return null
+    if (typeof p.client_email !== 'string' || typeof p.private_key !== 'string') return null
+    if (!p.private_key.includes('PRIVATE KEY')) return null
+    return {
+        client_email: p.client_email,
+        private_key: p.private_key,
+        private_key_id: typeof p.private_key_id === 'string' ? p.private_key_id : undefined,
+    }
+}
+
+export function isGoogleApiHost(host: string): boolean {
+    return GOOGLE_API_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`))
+}
+
+export interface GoogleGrant {
+    scopes: string[]
+    subject: string | null
+}
+
+/** Reads and checks the two headers. */
+export function googleGrant(headers: Headers): GoogleGrant {
+    const raw = headers.get(GOOGLE_SCOPES_HEADER)?.trim()
+    const scopes = raw ? raw.split(/[\s,]+/).filter(Boolean) : [DEFAULT_GOOGLE_SCOPE]
+    for (const scope of scopes) {
+        if (!SCOPE.test(scope)) {
+            throw new KeychainError(
+                'KEYCHAIN_BAD_REQUEST',
+                `«${scope}» no es un scope de Google. Pon en X-Kj-Google-Scopes las URL ` +
+                    'completas separadas por espacios, por ejemplo ' +
+                    'https://www.googleapis.com/auth/spreadsheets.'
+            )
+        }
+    }
+    const subject = headers.get(GOOGLE_SUBJECT_HEADER)?.trim() || null
+    if (subject && !EMAIL.test(subject)) {
+        throw new KeychainError(
+            'KEYCHAIN_BAD_REQUEST',
+            'X-Kj-Google-Subject tiene que ser el correo de la cuenta en cuyo nombre se actúa.'
+        )
+    }
+    return { scopes: [...new Set(scopes)].sort(), subject }
+}
+
+function base64url(input: Buffer | string): string {
+    return Buffer.from(input).toString('base64url')
+}
+
+export function signAssertion(key: ServiceAccountKey, grant: GoogleGrant, nowMs: number): string {
+    const iat = Math.floor(nowMs / 1000)
+    const header = {
+        alg: 'RS256',
+        typ: 'JWT',
+        ...(key.private_key_id ? { kid: key.private_key_id } : {}),
+    }
+    const claims = {
+        iss: key.client_email,
+        scope: grant.scopes.join(' '),
+        aud: GOOGLE_TOKEN_URL,
+        iat,
+        exp: iat + 3600,
+        ...(grant.subject ? { sub: grant.subject } : {}),
+    }
+    const unsigned = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(claims))}`
+    const signer = createSign('RSA-SHA256')
+    signer.update(unsigned)
+    let signature: Buffer
+    try {
+        signature = signer.sign(key.private_key)
+    } catch {
+        throw new KeychainError(
+            'KEYCHAIN_BAD_REFERENCE',
+            'La clave privada de la cuenta de servicio no se puede leer. Revisa que la ' +
+                'credencial tenga el JSON tal como lo descargó Google.'
+        )
+    }
+    return `${unsigned}.${base64url(signature)}`
+}
+
+/** Access tokens per (key, scopes, subject), in memory, until shortly before they expire. */
+export class GoogleTokenMinter {
+    private readonly tokens = new Map<string, { token: string; expires: number }>()
+    private readonly inflight = new Map<string, Promise<string>>()
+
+    constructor(
+        private readonly fetch: Fetcher,
+        private readonly now: () => number = Date.now
+    ) {}
+
+    async token(key: ServiceAccountKey, grant: GoogleGrant): Promise<string> {
+        const id = createHash('sha256')
+            .update(
+                JSON.stringify([key.client_email, key.private_key, grant.scopes, grant.subject])
+            )
+            .digest('hex')
+        const hit = this.tokens.get(id)
+        if (hit && hit.expires > this.now()) return hit.token
+        const running = this.inflight.get(id)
+        if (running) return running
+        const pending = this.mint(key, grant)
+            .then((minted) => {
+                this.tokens.set(id, minted)
+                return minted.token
+            })
+            .finally(() => this.inflight.delete(id))
+        this.inflight.set(id, pending)
+        return pending
+    }
+
+    private async mint(
+        key: ServiceAccountKey,
+        grant: GoogleGrant
+    ): Promise<{ token: string; expires: number }> {
+        const assertion = signAssertion(key, grant, this.now())
+        let response: Response
+        try {
+            response = await this.fetch(GOOGLE_TOKEN_URL, {
+                method: 'POST',
+                headers: { 'content-type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                    assertion,
+                }).toString(),
+                redirect: 'manual',
+            })
+        } catch {
+            throw new KeychainError(
+                'KEYCHAIN_UPSTREAM_FAILED',
+                'No se ha podido pedir el token a Google (oauth2.googleapis.com).'
+            )
+        }
+        const text = await response.text().catch(() => '')
+        let body: Record<string, unknown> = {}
+        try {
+            body = JSON.parse(text) as Record<string, unknown>
+        } catch {}
+        if (!response.ok || typeof body.access_token !== 'string') {
+            // Google's error is about the request (bad scope, delegation not
+            // granted, key revoked); it never echoes the key or the assertion.
+            const reason = [body.error, body.error_description]
+                .filter((s): s is string => typeof s === 'string')
+                .join(': ')
+                .slice(0, 300)
+            throw new KeychainError(
+                'KEYCHAIN_GOOGLE_TOKEN_FAILED',
+                `Google no ha dado el token de la cuenta de servicio${reason ? ` (${reason})` : ''}. ` +
+                    (grant.subject
+                        ? 'Si actúas en nombre de una cuenta, la delegación de dominio tiene que ' +
+                          'estar autorizada en Google Workspace para estos scopes.'
+                        : 'Revisa los scopes y que la cuenta de servicio siga activa.')
+            )
+        }
+        const seconds = typeof body.expires_in === 'number' ? body.expires_in : 3600
+        return {
+            token: body.access_token,
+            expires: this.now() + Math.max(0, seconds * 1000 - EARLY_MS),
+        }
+    }
+}
