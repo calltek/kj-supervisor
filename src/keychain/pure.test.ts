@@ -9,7 +9,7 @@ import {
     parseReference,
 } from './references'
 import { REDACTED, collectVariants, redactBytes, redactText } from './redact'
-import { hostMatchesSite } from './sites'
+import { describeSites, hostMatchesAnySite, hostMatchesSite } from './sites'
 
 describe('references', () => {
     test('splits on the LAST dot: the credential may have spaces and dots', () => {
@@ -64,6 +64,26 @@ describe('sites', () => {
         expect(hostMatchesSite('api.stripe.com', exact)).toBe(true)
         expect(hostMatchesSite('x.api.stripe.com', exact)).toBe(false)
         expect(hostMatchesSite('stripe.com', exact)).toBe(false)
+    })
+
+    // What the backend sends since a destination is its exact host and
+    // `*.dominio` is the only way to open a whole domain (Austral: the shops'
+    // login was used on the CRM).
+    test('a shop destination does not open the CRM next door; *.dominio does', () => {
+        const shops = [
+            { host: 'tienda.austral.es', subdomains: false },
+            { host: 'tienda2.austral.es', subdomains: false },
+        ]
+        expect(hostMatchesAnySite('tienda.austral.es', shops)).toBe(true)
+        expect(hostMatchesAnySite('crm.austral.es', shops)).toBe(false)
+        expect(hostMatchesAnySite('www.tienda.austral.es', shops)).toBe(false)
+
+        const whole = [{ host: 'austral.es', subdomains: true }]
+        expect(hostMatchesAnySite('crm.austral.es', whole)).toBe(true)
+        expect(hostMatchesAnySite('www.tienda.austral.es', whole)).toBe(true)
+        expect(describeSites([...shops, ...whole])).toBe(
+            'tienda.austral.es, tienda2.austral.es, *.austral.es'
+        )
     })
 })
 
