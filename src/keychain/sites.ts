@@ -21,9 +21,11 @@ export function hostMatchesAnySite(host: string, sites: KeychainSite[]): boolean
     return sites.some((site) => hostMatchesSite(host, site))
 }
 
-/** «wallapop.com (y subdominios), api.stripe.com» — for error messages. */
+/**
+ * «*.wallapop.com, api.stripe.com» — for error messages, spelled the way the
+ * destination is written in the credential (the backend only sends
+ * `subdomains` for a `*.dominio` destination).
+ */
 export function describeSites(sites: KeychainSite[]): string {
-    return sites
-        .map((site) => (site.subdomains ? `${site.host} (y subdominios)` : site.host))
-        .join(', ')
+    return sites.map((site) => (site.subdomains ? `*.${site.host}` : site.host)).join(', ')
 }
