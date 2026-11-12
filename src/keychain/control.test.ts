@@ -127,4 +127,24 @@ describe('control channel', () => {
         await resolve(REQUEST)
         expect(calls).toBe(6)
     })
+
+    test('a cached value that does not open the host is asked again', async () => {
+        // «Solo esta vez» approved a second ago: the cached sites are older.
+        const cache = new ResolveCache(60_000, () => 0)
+        let sites = [{ host: 'gmail.googleapis.com', subdomains: false }]
+        const seen: unknown[] = []
+        const resolve = cache.wrap(async (request) => {
+            seen.push(request)
+            return { ok: true, value: 'v', sites }
+        })
+        await resolve({ ...REQUEST, host: 'gmail.googleapis.com' })
+        await resolve({ ...REQUEST, host: 'gmail.googleapis.com' })
+        expect(seen.length).toBe(1)
+        sites = [...sites, { host: 'sheets.googleapis.com', subdomains: false }]
+        const ack = await resolve({ ...REQUEST, host: 'sheets.googleapis.com' })
+        expect(seen.length).toBe(2)
+        expect(ack.ok && ack.sites.length).toBe(2)
+        // The host never reaches the supervisor.
+        expect(seen.every((r) => !('host' in (r as object)))).toBe(true)
+    })
 })

@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { KeychainControlUp, KeychainResolveAck } from './control-protocol'
+import { hostMatchesAnySite } from './sites'
 
 export const RESOLVE_TIMEOUT_MS = 10_000
 export const CACHE_TTL_MS = 60_000
@@ -16,6 +17,13 @@ export interface ResolveRequest {
     conversation_session_id: string
     credential: string
     field: string
+    /**
+     * Where the value is about to go. A cached value whose destinations do not
+     * include it is asked again: a destination added since (a «Solo esta vez»,
+     * a «Siempre», the credential edited) has to count on the very next try.
+     * Never sent to the supervisor.
+     */
+    host?: string
 }
 
 export type Resolve = (request: ResolveRequest) => Promise<KeychainResolveAck>
@@ -103,6 +111,11 @@ function isAck(ack: unknown): ack is KeychainResolveAck {
     return a.ok === false && typeof a.code === 'string' && typeof a.message === 'string'
 }
 
+/** A success that does not open `host`: maybe it does by now. */
+function stale(ack: KeychainResolveAck, host: string | undefined): boolean {
+    return host !== undefined && ack.ok && !hostMatchesAnySite(host, ack.sites)
+}
+
 /** Successful resolutions, 60 s, keyed by (agent, session, credential, field). */
 export class ResolveCache {
     private readonly entries = new Map<string, { ack: KeychainResolveAck; expires: number }>()
@@ -113,7 +126,7 @@ export class ResolveCache {
     ) {}
 
     wrap(resolve: Resolve): Resolve {
-        return async (request) => {
+        return async ({ host, ...request }) => {
             const key = JSON.stringify([
                 request.agent_id,
                 request.conversation_session_id,
@@ -121,7 +134,7 @@ export class ResolveCache {
                 request.field,
             ])
             const hit = this.entries.get(key)
-            if (hit && hit.expires > this.now()) return hit.ack
+            if (hit && hit.expires > this.now() && !stale(hit.ack, host)) return hit.ack
             if (hit) this.entries.delete(key)
             const ack = await resolve(request)
             if (ack.ok) this.entries.set(key, { ack, expires: this.now() + this.ttlMs })
