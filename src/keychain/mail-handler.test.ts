@@ -272,3 +272,18 @@ describe('/mail attachments', () => {
         expect(odd.sent[0]?.message.attachments[0]?.content_type).toBe('application/octet-stream')
     })
 })
+
+describe('imágenes incrustadas', () => {
+    test('un adjunto con cid va incrustado; un cid raro no pasa', async () => {
+        const { parseAttachments } = await import('./mail-handler')
+        const content_base64 = Buffer.from('png').toString('base64')
+        expect(
+            parseAttachments([
+                { filename: 'logo.png', content_base64, content_type: 'image/png', cid: 'logo' },
+            ])[0]?.cid
+        ).toBe('logo')
+        expect(() =>
+            parseAttachments([{ filename: 'logo.png', content_base64, cid: 'a b>' }])
+        ).toThrow()
+    })
+})
