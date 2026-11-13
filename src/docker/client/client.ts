@@ -805,6 +805,49 @@ export class KJDocker {
      * Every running agent with a disk ceiling: its ceiling, its named volumes
      * and its writable layer's size. What disk-watch.ts measures.
      */
+    /**
+     * One reading of CPU and memory of every RUNNING agent container, from
+     * Docker's own counters (`stats`, one-shot: no second sample, no wait).
+     * The CPU is the cumulative counter; the caller turns two readings into
+     * cores in use. Memory leaves out the page cache the kernel can drop
+     * (inactive files), as `docker stats` does.
+     */
+    async sampleAgentResources(): Promise<
+        Array<{ agent_id: number; cpu_total_ns: number; read_ms: number; memory_bytes: number }>
+    > {
+        const list = await this.docker.listContainers({ filters: { label: [KJ_LABEL] } })
+        const out: Array<{
+            agent_id: number
+            cpu_total_ns: number
+            read_ms: number
+            memory_bytes: number
+        }> = []
+        await Promise.all(
+            list.map(async (c) => {
+                const agent_id = Number(c.Labels?.[KJ_LABEL_AGENT_ID])
+                if (!Number.isInteger(agent_id) || agent_id <= 0) return
+                const s = await this.docker
+                    .getContainer(c.Id)
+                    .stats({ stream: false, 'one-shot': true })
+                    .catch(() => null)
+                if (!s) return
+                const mem = s.memory_stats as {
+                    usage?: number
+                    stats?: Record<string, number>
+                }
+                const inactive = mem.stats?.inactive_file ?? mem.stats?.total_inactive_file ?? 0
+                const read_ms = Date.parse(s.read)
+                out.push({
+                    agent_id,
+                    cpu_total_ns: s.cpu_stats?.cpu_usage?.total_usage ?? 0,
+                    read_ms: Number.isFinite(read_ms) ? read_ms : Date.now(),
+                    memory_bytes: Math.max(0, (mem.usage ?? 0) - inactive),
+                })
+            })
+        )
+        return out
+    }
+
     async listDiskLimitedAgents(): Promise<
         Array<{
             agent_id: number

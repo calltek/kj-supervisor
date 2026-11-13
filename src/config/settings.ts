@@ -23,6 +23,8 @@ export const SERVER_METRICS_INTERVAL_MS = 15_000
 export const AGENT_METRICS_INTERVAL_MS = 60_000
 /** How often each agent's disk is measured against its ceiling (agent-disk.reporter.ts). */
 export const AGENT_DISK_INTERVAL_MS = 60_000
+/** How often each running agent's CPU and memory go to the panel (agent-resources.reporter.ts). */
+export const AGENT_RESOURCES_INTERVAL_MS = 10_000
 
 export type KJLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
