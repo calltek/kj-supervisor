@@ -6,6 +6,7 @@ import {
     ImapFailure,
     type ImapSession,
     createImapHandler,
+    imapPort,
     parseImapRequest,
 } from './imap-handler'
 import { silentLog } from './log'
@@ -217,5 +218,25 @@ describe('htmlToText', () => {
         expect(text).toContain('Reserva & bono')
         expect(text).not.toContain('x()')
         expect(text).not.toContain('p{}')
+    })
+})
+
+describe('the port it reads on', () => {
+    test('a sending port in the credential is for sending: it reads on 993', async () => {
+        expect(imapPort(null, null)).toBe(993)
+        for (const sending of [25, 465, 587]) expect(imapPort(null, sending)).toBe(993)
+        expect(imapPort(null, 143)).toBe(143)
+        expect(imapPort(143, 465)).toBe(143)
+
+        const { call, connects } = setup({ host: 'imap.gmail.com', port: '465' })
+        expect((await call({ op: 'folders' })).status).toBe(200)
+        expect(connects[0]).toMatchObject({ port: 993, secure: true })
+    })
+
+    test('--port is honoured, with STARTTLS off 993', async () => {
+        const { call, connects } = setup({ host: 'imap.gmail.com', port: '465' })
+        expect((await call({ op: 'folders', port: 143 })).status).toBe(200)
+        expect(connects[0]).toMatchObject({ port: 143, secure: false })
+        expect(() => parseImapRequest({ credential: 'x', op: 'folders', port: 'abc' })).toThrow()
     })
 })

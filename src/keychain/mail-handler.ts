@@ -17,7 +17,9 @@
  * would drop the attachments and send the rest.
  *
  * Host, port, user, password and `from` come from the credential; the body
- * may only pick another `from` (the server decides whether it lets it). Port
+ * may only pick another `from` (the server decides whether it lets it). A
+ * reading port (110/143/993/995: a credential that also reads may keep its
+ * IMAP port in `port`) is not for sending, and 587 goes instead. Port
  * 465 is TLS from the start; any other must offer STARTTLS, which is
  * required before authenticating: the password never goes in clear. The host
  * must be one of the credential's destinations and a public address, and the
@@ -53,6 +55,15 @@ export const MAX_RECIPIENTS = 50
 export const MAX_MESSAGE_BYTES = 1024 * 1024
 export const MAX_SUBJECT = 998
 export const DEFAULT_SMTP_PORT = 587
+/** IMAP and POP3 ports: in a credential that reads and sends, they are for reading. */
+export const READING_PORTS: readonly number[] = [110, 143, 993, 995]
+
+/** The port to send on: the credential's unless it is for reading, or 587. */
+export function smtpPort(configured: number | null): number {
+    return configured !== null && !READING_PORTS.includes(configured)
+        ? configured
+        : DEFAULT_SMTP_PORT
+}
 /** What most mail servers take whole (they refuse past 20–25 MB, base64 included). */
 export const MAX_ATTACHMENTS = 10
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
@@ -432,7 +443,7 @@ export function createMailHandler(deps: MailHandlerDeps) {
                 credential: req.credential,
             }
             const label = `«${req.credential}»`
-            const [smtpHost, smtpPort, smtpUser, smtpPassword, credFrom] = await Promise.all([
+            const [smtpHost, credentialPort, smtpUser, smtpPassword, credFrom] = await Promise.all([
                 lookupField(deps.resolve, ref, FIELD_LABELS.smtp_host),
                 lookupField(deps.resolve, ref, FIELD_LABELS.smtp_port),
                 lookupField(deps.resolve, ref, FIELD_LABELS.smtp_user),
@@ -495,9 +506,9 @@ export function createMailHandler(deps: MailHandlerDeps) {
                     `La credencial ${label} no dice desde qué dirección se envía. Pásala en from.`
                 )
             }
-            const port =
-                parsePort(smtpPort.status === 'found' ? smtpPort.value : null, label) ??
-                DEFAULT_SMTP_PORT
+            const port = smtpPort(
+                parsePort(credentialPort.status === 'found' ? credentialPort.value : null, label)
+            )
 
             // 2. A public address, and the connection goes to the one checked.
             const address = await resolvePublicAddress(host, lookup)

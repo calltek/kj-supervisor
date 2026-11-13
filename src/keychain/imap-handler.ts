@@ -16,7 +16,9 @@
  * Nothing is deleted: there is no op for it, and `move` is how a message
  * leaves a folder. Host, port, user and password come from the credential
  * (`imap_host` first, then `host`); a credential without a host may name it
- * in the body, and either way the password only goes to one of its
+ * in the body. The port is the body's, else the credential's unless it is a
+ * sending one (25/465/587: a credential that also sends keeps its SMTP port
+ * in `port`), else 993. Either way the password only goes to one of its
  * destinations, on a public address, over TLS (993 from the first byte, any
  * other port with STARTTLS required), with the certificate checked against
  * the name.
@@ -53,6 +55,15 @@ export const IMAP_LABELS = {
 } as const
 
 export const DEFAULT_IMAP_PORT = 993
+/** SMTP ports: in a credential that reads and sends, they are for sending. */
+export const SENDING_PORTS: readonly number[] = [25, 465, 587]
+
+/** The port to read on: the one asked for, the credential's unless it is for sending, or 993. */
+export function imapPort(requested: number | null, configured: number | null): number {
+    if (requested !== null) return requested
+    if (configured !== null && !SENDING_PORTS.includes(configured)) return configured
+    return DEFAULT_IMAP_PORT
+}
 export const DEFAULT_LIMIT = 20
 export const MAX_LIMIT = 100
 export const MAX_UIDS = 500
@@ -80,6 +91,7 @@ export interface ImapRequest {
     credential: string
     op: ImapOp
     host: string | null
+    port: number | null
     folder: string
     query: ImapQuery
     limit: number
@@ -246,6 +258,7 @@ export function parseImapRequest(body: Record<string, unknown>): ImapRequest {
         credential,
         op,
         host,
+        port: parsePort(body.port, 'la petición'),
         folder: folderName(body.folder, 'folder', 'INBOX'),
         query,
         limit,
@@ -474,7 +487,7 @@ export function createImapHandler(deps: ImapHandlerDeps) {
                 credential: req.credential,
             }
             const label = `«${req.credential}»`
-            const [imapHost, imapPort, imapUser, imapPassword] = await Promise.all([
+            const [imapHost, credentialPort, imapUser, imapPassword] = await Promise.all([
                 lookupField(deps.resolve, ref, IMAP_LABELS.host),
                 lookupField(deps.resolve, ref, IMAP_LABELS.port),
                 lookupField(deps.resolve, ref, IMAP_LABELS.user),
@@ -520,9 +533,10 @@ export function createImapHandler(deps: ImapHandlerDeps) {
                     `La credencial ${label} no tiene usuario. Pide al operador que lo añada.`
                 )
             }
-            const port =
-                parsePort(imapPort.status === 'found' ? imapPort.value : null, label) ??
-                DEFAULT_IMAP_PORT
+            const port = imapPort(
+                req.port,
+                parsePort(credentialPort.status === 'found' ? credentialPort.value : null, label)
+            )
             const address = await resolvePublicAddress(host, lookup)
             try {
                 session = await connect({
@@ -657,6 +671,12 @@ function notFound(folder: string, uid: number): KeychainError {
     )
 }
 
+function otherPort(port: number): string {
+    return port === DEFAULT_IMAP_PORT
+        ? 'Si este servidor lee el correo en otro puerto, pásalo con --port (143 va con STARTTLS).'
+        : `Si no es su puerto IMAP, prueba con --port ${DEFAULT_IMAP_PORT}.`
+}
+
 function imapError(error: unknown, label: string, host: string, port: number): KeychainError {
     const failure = error instanceof ImapFailure ? error : imapFailure(error)
     switch (failure.kind) {
@@ -671,12 +691,13 @@ function imapError(error: unknown, label: string, host: string, port: number): K
             return new KeychainError(
                 'KEYCHAIN_IMAP_FAILED',
                 `No se ha podido cifrar la conexión con ${host}:${port} (${failure.message}). ` +
-                    'Sin cifrado no se envía la contraseña. Revisa el puerto (993).'
+                    `Sin cifrado no se envía la contraseña. ${otherPort(port)}`
             )
         case 'unreachable':
             return new KeychainError(
                 'KEYCHAIN_IMAP_FAILED',
-                `No se ha podido conectar con el servidor de correo ${host}:${port} (${failure.message}).`
+                `No se ha podido conectar con el servidor de correo ${host}:${port} ` +
+                    `(${failure.message}). ${otherPort(port)}`
             )
         case 'command':
             return new KeychainError('KEYCHAIN_IMAP_FAILED', `IMAP: ${failure.message}`)
