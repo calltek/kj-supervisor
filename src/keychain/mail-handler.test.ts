@@ -13,6 +13,7 @@ import {
     createMailHandler,
     parseMailRequest,
     smtpFailure,
+    smtpPort,
 } from './mail-handler'
 import { REDACTED } from './redact'
 import { AgentTokenRegistry } from './registry'
@@ -285,5 +286,13 @@ describe('imágenes incrustadas', () => {
         expect(() =>
             parseAttachments([{ filename: 'logo.png', content_base64, cid: 'a b>' }])
         ).toThrow()
+    })
+})
+
+describe('smtpPort', () => {
+    test('a reading port in the credential is for reading: it sends on 587', () => {
+        expect(smtpPort(null)).toBe(587)
+        for (const reading of [110, 143, 993, 995]) expect(smtpPort(reading)).toBe(587)
+        expect(smtpPort(465)).toBe(465)
     })
 })

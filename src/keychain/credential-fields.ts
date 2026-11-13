@@ -21,7 +21,7 @@ export const FIELD_LABELS = {
     password: ['password', 'database_password', 'db_password', 'pass'],
     database: ['database', 'dbname', 'database_name', 'db_name'],
     smtp_host: ['host', 'hostname', 'server', 'smtp_host', 'smtp_server'],
-    smtp_port: ['port', 'smtp_port'],
+    smtp_port: ['smtp_port', 'port'],
     smtp_user: ['user', 'username', 'smtp_user', 'email'],
     smtp_password: ['password', 'smtp_password', 'pass'],
     from: ['from', 'from_email', 'sender'],
