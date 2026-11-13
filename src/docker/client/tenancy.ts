@@ -58,6 +58,20 @@ export const AGENT_IMAGE_REGISTRY = 'ghcr.io/calltek/'
 /** Disk one agent may use on a shared machine when the control doesn't say. */
 export const SHARED_DEFAULT_DISK_GB = 20
 
+/** The agent's disk ceiling, on the container so a recreate or a restart keeps it. */
+export const KJ_LABEL_DISK_GB = 'so.kujira.disk-gb'
+
+/**
+ * The disk ceiling of an agent, in GB, or null for none: the control's value;
+ * without one, the shared default on a shared machine and nothing on a
+ * dedicated one.
+ */
+export function effectiveDiskGb(disk_gb: unknown, shared: boolean): number | null {
+    if (typeof disk_gb === 'number' && Number.isFinite(disk_gb) && disk_gb > 0)
+        return Math.ceil(disk_gb)
+    return shared ? SHARED_DEFAULT_DISK_GB : null
+}
+
 export interface SharedSpawnCheck {
     image_tag: string
     memory_mb: number
@@ -65,8 +79,6 @@ export interface SharedSpawnCheck {
     network_privileged?: boolean
     /** How the image isolates conversations (hardening.ts `isolationModeOf`). */
     isolation_mode: 'none' | 'root' | 'exec'
-    /** Whether this host enforces disk quotas (xfs + pquota under Docker). */
-    disk_quota: boolean
 }
 
 /** Why an agent can't start on a shared machine, as a machine code. */
@@ -75,7 +87,6 @@ export type SharedRefusal =
     | 'shared_network_privileged'
     | 'shared_root_isolation'
     | 'shared_foreign_image'
-    | 'shared_no_disk_quota'
 
 /**
  * Null when the agent may start on a shared machine; otherwise the first
@@ -86,7 +97,6 @@ export function sharedSpawnRefusal(c: SharedSpawnCheck): SharedRefusal | null {
     if (c.network_privileged) return 'shared_network_privileged'
     if (c.isolation_mode === 'root') return 'shared_root_isolation'
     if (!c.image_tag.startsWith(AGENT_IMAGE_REGISTRY)) return 'shared_foreign_image'
-    if (!c.disk_quota) return 'shared_no_disk_quota'
     return null
 }
 
@@ -96,7 +106,6 @@ export const SHARED_REFUSAL_TEXT: Record<SharedRefusal, string> = {
     shared_network_privileged: 'shared server: privileged networking (VPN) is not available',
     shared_root_isolation: 'shared server: images with a root launcher are not allowed',
     shared_foreign_image: `shared server: only images from ${AGENT_IMAGE_REGISTRY} run here`,
-    shared_no_disk_quota: 'shared server: this host does not enforce disk quotas',
 }
 
 export class SharedSpawnRefusedError extends Error {
@@ -106,22 +115,30 @@ export class SharedSpawnRefusedError extends Error {
     }
 }
 
-/** The disk ceiling of an agent's volume couldn't be set: it doesn't start. */
-export class VolumeQuotaError extends Error {
-    constructor(message: string) {
-        super(`volume quota: ${message}`)
-        this.name = 'VolumeQuotaError'
+/** The agent is already at its disk ceiling: it doesn't start until it has room. */
+export class DiskLimitError extends Error {
+    constructor(
+        readonly used_mb: number,
+        readonly limit_mb: number
+    ) {
+        super(`disk limit reached: ${used_mb} MB used of ${limit_mb} MB`)
+        this.name = 'DiskLimitError'
     }
 }
 
 /**
  * Whether this host can be shared, reported in `server:hello` so the panel
  * only offers «Compartir con mis clientes» where it holds. `missing` names
- * what's absent, in the order a person would fix it.
+ * what sharing can't do without; `optional` what would harden it further but
+ * means changing the whole Docker of the machine — which may run the
+ * client's own services, so Kujira never asks for it (decided 2026-11-12).
+ * The disk ceiling is this supervisor's job anyway (disk-watch.ts): XFS
+ * quotas only make it hard where they already exist.
  */
 export interface SharedReadiness {
     ready: boolean
-    missing: Array<'userns_remap' | 'disk_quota' | 'network_rules'>
+    missing: Array<'network_rules'>
+    optional: Array<'userns_remap' | 'disk_quota'>
 }
 
 export function sharedReadiness(h: {
@@ -130,10 +147,23 @@ export function sharedReadiness(h: {
     network_rules: boolean
 }): SharedReadiness {
     const missing: SharedReadiness['missing'] = []
-    if (!h.userns_remap) missing.push('userns_remap')
-    if (!h.disk_quota) missing.push('disk_quota')
     if (!h.network_rules) missing.push('network_rules')
-    return { ready: missing.length === 0, missing }
+    const optional: SharedReadiness['optional'] = []
+    if (!h.userns_remap) optional.push('userns_remap')
+    if (!h.disk_quota) optional.push('disk_quota')
+    return { ready: missing.length === 0, missing, optional }
+}
+
+/** Above this share of its ceiling an agent's disk gets a warning. */
+export const DISK_WARN_RATIO = 0.8
+
+export type DiskLevel = 'ok' | 'warn' | 'full'
+
+/** Where an agent's disk stands against its ceiling. Pure. */
+export function diskLevel(used_bytes: number, limit_bytes: number): DiskLevel {
+    if (!(limit_bytes > 0)) return 'ok'
+    if (used_bytes >= limit_bytes) return 'full'
+    return used_bytes >= limit_bytes * DISK_WARN_RATIO ? 'warn' : 'ok'
 }
 
 /** XFS project id of an agent's home volume (one project per agent). */
