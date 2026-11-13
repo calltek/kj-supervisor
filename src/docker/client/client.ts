@@ -762,7 +762,10 @@ export class KJDocker {
      * The helper has no network and only DAC_READ_SEARCH (the files belong to
      * the agent's and the conversations' uids).
      */
-    async measureVolumes(groups: Map<number, string[]>): Promise<Map<number, number>> {
+    async measureVolumes(
+        groups: Map<number, string[]>,
+        timeout_ms = DISK_MEASURE_TIMEOUT_MS
+    ): Promise<Map<number, number>> {
         const binds: string[] = []
         for (const [key, volumes] of groups)
             volumes.forEach((v, i) => {
@@ -787,7 +790,7 @@ export class KJDocker {
         })
         try {
             await c.start()
-            await withTimeout(c.wait(), DISK_MEASURE_TIMEOUT_MS, 'disk measure')
+            await withTimeout(c.wait(), timeout_ms, 'disk measure')
             const text = stripDockerFrames(await c.logs({ stdout: true, follow: false }))
             for (const line of text.split('\n')) {
                 const [kb, key] = line.trim().split(/\s+/)
@@ -1957,7 +1960,9 @@ export class KJDocker {
         // here: a full agent is stopped by the next disk watch either way.
         const carried = Number(config.Labels?.[KJ_LABEL_DISK_GB])
         const disk_gb = effectiveDiskGb(
-            opts.resources?.disk_gb ? opts.resources.disk_gb : carried,
+            // A control that sends the field decides, 0 included (no ceiling):
+            // only an older one, without it, leaves the label in charge.
+            typeof opts.resources?.disk_gb === 'number' ? opts.resources.disk_gb : carried,
             this.isShared()
         )
         const hardDisk = await this.hardDiskQuota(disk_gb)

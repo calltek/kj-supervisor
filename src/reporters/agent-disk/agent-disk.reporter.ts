@@ -38,7 +38,11 @@ export interface AgentDiskClient {
 export interface AgentDiskReporterOptions {
     docker: Pick<
         KJDocker,
-        'listDiskLimitedAgents' | 'measureVolumes' | 'stopContainer' | 'removeContainer'
+        | 'listDiskLimitedAgents'
+        | 'measureVolumes'
+        | 'stopContainer'
+        | 'removeContainer'
+        | 'isShared'
     >
     client: AgentDiskClient
     status: Pick<AgentStatusReporter, 'push'>
@@ -55,13 +59,34 @@ export interface AgentDiskHandle {
 
 const MB = 1024 * 1024
 
+/**
+ * Each agent is measured on its own (its own helper, its own deadline), a few
+ * at a time: one with millions of files, or a volume we can't mount, must not
+ * leave the others unmeasured (SOKI, #114).
+ */
+const MEASURE_TIMEOUT_MS = 45_000
+const MEASURE_CONCURRENCY = 3
+/**
+ * A failed measure is NOT an empty disk. On a shared machine, after this many
+ * in a row the agent is stopped as if full: an agent that can't be measured
+ * can't be held to its ceiling, and its neighbours pay for it.
+ */
+export const MAX_FAILED_MEASURES = 3
+
 export function startAgentDiskLoop(opts: AgentDiskReporterOptions): AgentDiskHandle {
     const log = opts.logger.child({ component: 'agent-disk' })
     let stopped = false
     let running = false
+    /** Consecutive failed measures per agent; gone with the agent. */
+    const failures = new Map<number, number>()
 
-    const stopFull = async (agent_id: number, container_id: string, report: AgentDiskReport) => {
-        log.warn(report, 'agent at its disk ceiling — stopping it')
+    const stopFull = async (
+        agent_id: number,
+        container_id: string,
+        report: AgentDiskReport,
+        last_action = `disk limit reached: ${report.used_mb} MB used of ${report.limit_mb} MB`
+    ) => {
+        log.warn({ ...report, last_action }, 'stopping an agent for its disk')
         opts.tracker.track(container_id)
         try {
             await opts.docker.stopContainer(container_id)
@@ -76,7 +101,7 @@ export function startAgentDiskLoop(opts: AgentDiskReporterOptions): AgentDiskHan
             agent_id,
             status: 'ERROR',
             container_id: null,
-            last_action: `disk limit reached: ${report.used_mb} MB used of ${report.limit_mb} MB`,
+            last_action,
             last_action_code: 'disk_limit_reached',
             last_action_at: Date.now(),
         })
@@ -88,22 +113,53 @@ export function startAgentDiskLoop(opts: AgentDiskReporterOptions): AgentDiskHan
         running = true
         try {
             const agents = await opts.docker.listDiskLimitedAgents()
-            if (agents.length === 0) return
-            const used = await opts.docker.measureVolumes(
-                new Map(agents.map((a) => [a.agent_id, a.volumes]))
-            )
-            for (const a of agents) {
-                const used_bytes = (used.get(a.agent_id) ?? 0) + a.writable_bytes
-                const limit_bytes = a.disk_gb * 1024 * MB
+            for (const id of failures.keys())
+                if (!agents.some((a) => a.agent_id === id)) failures.delete(id)
+            const shared = opts.docker.isShared()
+            const measureOne = async (a: (typeof agents)[number]) => {
+                const limit_mb = a.disk_gb * 1024
+                let volume_bytes: number | undefined
+                try {
+                    const m = await opts.docker.measureVolumes(
+                        new Map([[a.agent_id, a.volumes]]),
+                        MEASURE_TIMEOUT_MS
+                    )
+                    volume_bytes = a.volumes.length === 0 ? 0 : m.get(a.agent_id)
+                } catch (err) {
+                    log.warn({ agent_id: a.agent_id, err: errMessage(err) }, 'disk measure failed')
+                }
+                if (volume_bytes === undefined) {
+                    const n = (failures.get(a.agent_id) ?? 0) + 1
+                    failures.set(a.agent_id, n)
+                    if (shared && n >= MAX_FAILED_MEASURES) {
+                        failures.delete(a.agent_id)
+                        await stopFull(
+                            a.agent_id,
+                            a.container_id,
+                            { agent_id: a.agent_id, used_mb: limit_mb, limit_mb, level: 'full' },
+                            `disk limit reached: its disk could not be measured ${n} times in a row`
+                        )
+                    }
+                    return
+                }
+                failures.delete(a.agent_id)
+                const used_bytes = volume_bytes + a.writable_bytes
                 const report: AgentDiskReport = {
                     agent_id: a.agent_id,
                     used_mb: Math.round(used_bytes / MB),
-                    limit_mb: a.disk_gb * 1024,
-                    level: diskLevel(used_bytes, limit_bytes),
+                    limit_mb,
+                    level: diskLevel(used_bytes, limit_mb * MB),
                 }
                 opts.client.push('agent:disk', report)
                 if (report.level === 'full') await stopFull(a.agent_id, a.container_id, report)
             }
+            // A few at a time; each one's failure stays its own.
+            const queue = [...agents]
+            await Promise.all(
+                Array.from({ length: Math.min(MEASURE_CONCURRENCY, queue.length) }, async () => {
+                    for (let a = queue.shift(); a; a = queue.shift()) await measureOne(a)
+                })
+            )
         } catch (err) {
             log.warn({ err: errMessage(err) }, 'disk measure failed; skipping this tick')
         } finally {

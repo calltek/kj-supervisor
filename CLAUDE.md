@@ -523,6 +523,18 @@ YA tiene XFS con cuotas se aplica además el tope duro, sin exigirlo. En la
 preparación compartida sólo `network_rules` es requisito; `userns_remap` y
 `disk_quota` van en `optional`.
 
+Cada agente se mide aparte (su ayudante, 45 s de plazo, tres a la vez): uno con
+millones de ficheros no deja sin medir a los demás. Una medida fallida **no**
+cuenta como disco vacío; en compartido, tres fallos seguidos lo paran como lleno
+(SOKI, #114).
+
+**Riesgos aceptados** (decisión del usuario, 2026-11-12, para no tocar el Docker
+del cliente): entre dos medidas (60 s) un inquilino puede escribir de más; un
+guardia de host que no arranque agentes con poco disco libre queda pendiente.
+Y sin `userns-remap` el root de un contenedor es root del host: lo frenan
+`CapDrop ALL`, `no-new-privileges`, agentes sin root y el rechazo de lanzadores
+root en compartido, no el remapeo.
+
 ### Idempotencia de comandos — dedup por `request_id` (2026-06-10)
 Todo comando C→A lleva un `request_id` obligatorio. El supervisor
 **deduplica** sobre él en `src/client/control/command-dedup.ts`: un wrapper
