@@ -61,6 +61,8 @@ export interface ConnectData {
     port: number
     tcp?: Socket<unknown>
     lease?: TailnetLease
+    /** Refused before opening: sent as the first frame, then closed. */
+    refused?: KeychainError
     open: boolean
     closed: boolean
     early: Buffer[]
@@ -79,78 +81,94 @@ export interface ConnectDeps {
 export function createConnectHandler(deps: ConnectDeps) {
     const tunnels = new Map<number, number>()
 
-    /** Checks what can be checked before upgrading; a Response = refused. */
+    /**
+     * Checks what can be checked before upgrading; a Response = refused. Past
+     * the token, a refusal still upgrades and goes as the first frame: a
+     * WebSocket client never sees the status or headers of a refused upgrade,
+     * and the agent's relay turned every one of them into «kj-keychain
+     * unreachable» (Soki, Austral, 15-nov).
+     */
     function upgrade(request: Request, server: Server<ConnectData>): Response | undefined {
+        const agent_id = deps.registry.agentFor(request.headers.get('x-kj-token'))
+        if (agent_id === null) {
+            const e = new KeychainError(
+                'KEYCHAIN_UNAUTHORIZED',
+                'Petición sin un token de agente válido.'
+            )
+            deps.log('warn', 'connect refused', { code: e.code })
+            return errorResponse(e)
+        }
+        const q = new URL(request.url).searchParams
+        const data: ConnectData = {
+            agent_id,
+            session: request.headers.get('x-kj-session')?.trim() ?? '',
+            credential: (q.get('credential') ?? '').trim().slice(0, MAX_NAME),
+            field: (q.get('field') ?? 'auth_key').trim().slice(0, MAX_NAME),
+            host: (q.get('host') ?? '').trim().slice(0, MAX_HOST),
+            port: 0,
+            open: false,
+            closed: false,
+            early: [],
+            early_bytes: 0,
+            pending: [],
+            pending_bytes: 0,
+        }
         try {
-            const agent_id = deps.registry.agentFor(request.headers.get('x-kj-token'))
-            if (agent_id === null) {
-                throw new KeychainError(
-                    'KEYCHAIN_UNAUTHORIZED',
-                    'Petición sin un token de agente válido.'
-                )
-            }
-            const session = request.headers.get('x-kj-session')?.trim()
-            if (!session) {
-                throw new KeychainError(
-                    'KEYCHAIN_BAD_REQUEST',
-                    'Falta la sesión de la conversación.'
-                )
-            }
-            const q = new URL(request.url).searchParams
-            const credential = (q.get('credential') ?? '').trim()
-            const field = (q.get('field') ?? 'auth_key').trim()
-            const host = (q.get('host') ?? '').trim()
-            const port = parsePort(q.get('port'))
-            if (!credential || credential.length > MAX_NAME || !field || field.length > MAX_NAME) {
-                throw new KeychainError(
-                    'KEYCHAIN_BAD_REQUEST',
-                    'Falta el nombre de la credencial de la VPN.'
-                )
-            }
-            if (port === null) {
-                throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'El puerto no es válido.')
-            }
-            if (host.length > MAX_HOST || !isTailnetHost(host)) {
-                throw new KeychainError(
-                    'KEYCHAIN_NOT_TAILNET',
-                    `«${host.slice(0, 80)}» no es una dirección de la VPN. Usa la IP de Tailscale ` +
-                        '(100.x.y.z) o el nombre de la máquina en la tailnet.'
-                )
-            }
-            if ((tunnels.get(agent_id) ?? 0) >= MAX_TUNNELS_PER_AGENT) {
-                throw new KeychainError(
-                    'KEYCHAIN_TUNNEL_FAILED',
-                    `Ya hay ${MAX_TUNNELS_PER_AGENT} conexiones abiertas por la VPN. Cierra alguna y repite.`,
-                    429
-                )
-            }
-            const data: ConnectData = {
-                agent_id,
-                session,
-                credential,
-                field,
-                host,
-                port,
-                open: false,
-                closed: false,
-                early: [],
-                early_bytes: 0,
-                pending: [],
-                pending_bytes: 0,
-            }
-            if (server.upgrade(request, { data })) {
-                tunnels.set(agent_id, (tunnels.get(agent_id) ?? 0) + 1)
-                return undefined
-            }
-            throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'Hace falta una conexión WebSocket.')
+            check(request, agent_id, data)
         } catch (error) {
             const e =
                 error instanceof KeychainError
                     ? error
                     : new KeychainError('KEYCHAIN_BAD_REQUEST', 'Petición no válida.')
-            deps.log('warn', 'connect refused', { code: e.code })
-            return errorResponse(e)
+            deps.log('warn', 'connect refused', { agent_id, host: data.host, code: e.code })
+            data.refused = e
         }
+        if (server.upgrade(request, { data })) {
+            tunnels.set(agent_id, (tunnels.get(agent_id) ?? 0) + 1)
+            return undefined
+        }
+        return errorResponse(
+            data.refused ??
+                new KeychainError('KEYCHAIN_BAD_REQUEST', 'Hace falta una conexión WebSocket.')
+        )
+    }
+
+    /** What is wrong with the request, thrown; fills `data.port` when it is fine. */
+    function check(request: Request, agent_id: number, data: ConnectData): void {
+        if (!data.session) {
+            throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'Falta la sesión de la conversación.')
+        }
+        const q = new URL(request.url).searchParams
+        const credential = (q.get('credential') ?? '').trim()
+        const field = (q.get('field') ?? 'auth_key').trim()
+        const host = (q.get('host') ?? '').trim()
+        const port = parsePort(q.get('port'))
+        if (!credential || credential.length > MAX_NAME || !field || field.length > MAX_NAME) {
+            throw new KeychainError(
+                'KEYCHAIN_BAD_REQUEST',
+                'Falta el nombre de la credencial de la VPN.'
+            )
+        }
+        if (port === null) {
+            throw new KeychainError('KEYCHAIN_BAD_REQUEST', 'El puerto no es válido.')
+        }
+        if (host.length > MAX_HOST || !isTailnetHost(host)) {
+            throw new KeychainError(
+                'KEYCHAIN_NOT_TAILNET',
+                `«${host.slice(0, 80)}» no es una dirección de la VPN. Usa la IP de Tailscale ` +
+                    '(100.x.y.z) o el nombre de la máquina en la tailnet. Una red que hay detrás ' +
+                    '(una LAN tras un subnet router) no se alcanza directamente: entra en esa ' +
+                    'máquina y salta desde ella.'
+            )
+        }
+        if ((tunnels.get(agent_id) ?? 0) >= MAX_TUNNELS_PER_AGENT) {
+            throw new KeychainError(
+                'KEYCHAIN_TUNNEL_FAILED',
+                `Ya hay ${MAX_TUNNELS_PER_AGENT} conexiones abiertas por la VPN. Cierra alguna y repite.`,
+                429
+            )
+        }
+        data.port = port
     }
 
     function fail(ws: ServerWebSocket<ConnectData>, error: KeychainError): void {
@@ -164,6 +182,14 @@ export function createConnectHandler(deps: ConnectDeps) {
         try {
             ws.send(JSON.stringify({ error: { code: error.code, message: error.message } }))
             ws.close(1011, error.code)
+        } catch {}
+    }
+
+    /** Like `fail`, without logging again: `upgrade` already did. */
+    function refuse(ws: ServerWebSocket<ConnectData>, error: KeychainError): void {
+        try {
+            ws.send(JSON.stringify({ error: { code: error.code, message: error.message } }))
+            ws.close(1008, error.code)
         } catch {}
     }
 
@@ -376,6 +402,7 @@ export function createConnectHandler(deps: ConnectDeps) {
 
     const websocket = {
         open(ws: ServerWebSocket<ConnectData>) {
+            if (ws.data.refused) return refuse(ws, ws.data.refused)
             open(ws).catch(() =>
                 fail(
                     ws,

@@ -228,6 +228,20 @@ describe('/connect, the hard edges', () => {
         server.stop(true)
     })
 
+    test('over a WebSocket, a refusal before opening arrives as the error frame', async () => {
+        connects.length = 0
+        const server = serve({ ok: true, value: KEY, sites: [] }, socks.port)
+        const out = await tunnel(server.port as number, '192.168.10.1', 'x')
+        expect(out.errors.join()).toContain('KEYCHAIN_NOT_TAILNET')
+        expect(out.errors.join()).toContain('192.168.10.1')
+        expect(out.binary).toBe('')
+        expect(connects).toHaveLength(0)
+        // The slot taken by the refused socket is given back.
+        const again = await tunnel(server.port as number, '192.168.10.1', 'x')
+        expect(again.errors.join()).toContain('KEYCHAIN_NOT_TAILNET')
+        server.stop(true)
+    })
+
     test('a name the tailnet does not know is refused, before any CONNECT', async () => {
         connects.length = 0
         const server = serve(
