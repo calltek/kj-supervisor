@@ -27,7 +27,8 @@
  *     this LAN must keep answering;
  *  3. the FLOOR, no list opens it: link-local (the cloud's metadata), the
  *     container's Docker network (gateway, this supervisor, the host, every
- *     other agent) and the host's own addresses;
+ *     other agent) and the host's own addresses (on a dedicated machine,
+ *     all but its web, 80/443 over TCP, which then goes through the list);
  *  4. the list: an allow list ACCEPTs what it names, a deny list REJECTs it;
  *  5. the browser only, with a deny list: the private ranges, REJECTed — it
  *     opens pages of third parties, and those must not reach the client's
@@ -81,6 +82,9 @@ export const PRIVATE_V4 = [
     '198.18.0.0/15',
     '224.0.0.0/3',
 ]
+
+/** The host's own ports a dedicated machine leaves open: its public web. */
+const HOST_WEB_PORTS = [80, 443]
 
 const FLOOR_V4 = ['169.254.0.0/16']
 const FLOOR_V6 = ['fe80::/10', '::ffff:0:0/96', 'fd00:ec2::254/128']
@@ -295,8 +299,22 @@ export function chainRules(
     const floor = !floored
         ? []
         : family === 4
-          ? [...FLOOR_V4, ...only(t.docker_nets, 4), ...only(t.host_ips, 4)]
-          : [...FLOOR_V6, ...only(t.docker_nets, 6), ...only(t.host_ips, 6)]
+          ? [...FLOOR_V4, ...only(t.docker_nets, 4)]
+          : [...FLOOR_V6, ...only(t.docker_nets, 6)]
+    // The host's own addresses. On a dedicated machine its web (80/443) stays
+    // reachable: it's what the internet sees, and a client serving its shop on
+    // the same machine as the agent must be able to log in there (Austral,
+    // 2026-11-16). It still goes through the list below. Shared: all closed.
+    const hostFloor = !floored
+        ? []
+        : only(t.host_ips, family).flatMap((ip) =>
+              t.shared
+                  ? [`${a} -d ${ip} -j REJECT`]
+                  : [
+                        `${a} -d ${ip} ! -p tcp -j REJECT`,
+                        `${a} -d ${ip} -p tcp -m multiport ! --dports ${HOST_WEB_PORTS.join(',')} -j REJECT`,
+                    ]
+          )
     // Shared: the metadata goes BEFORE `always`, and `always` drops what
     // would cross to another tenant, so a model endpoint can't open either.
     // The floor itself then comes before the list, as on a dedicated machine.
@@ -309,6 +327,7 @@ export function chainRules(
         if (cidrFamily(e.ip) === family)
             out.push(...portRules(`${a} -d ${e.ip}`, e.port ? [e.port] : undefined, 'ACCEPT'))
     for (const n of floor) out.push(`${a} -d ${n} -j REJECT`)
+    out.push(...hostFloor)
     const hit = scope.mode === 'allow' ? 'ACCEPT' : 'REJECT'
     for (const e of scope.entries)
         if (cidrFamily(e.cidr) === family) out.push(...portRules(`${a} -d ${e.cidr}`, e.ports, hit))
