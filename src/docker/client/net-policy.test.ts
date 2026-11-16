@@ -41,7 +41,36 @@ describe('the floor', () => {
         expect(floor).toBeGreaterThan(-1)
         expect(opened).toBeGreaterThan(floor)
         expect(conv).toContain(`-A ${CONV_CHAIN} -d 169.254.0.0/16 -j REJECT`)
-        expect(conv).toContain(`-A ${CONV_CHAIN} -d 203.0.113.7 -j REJECT`)
+        expect(conv).toContain(`-A ${CONV_CHAIN} -d 203.0.113.7 ! -p tcp -j REJECT`)
+    })
+
+    test("on a dedicated machine the host's own web stays open, the rest of its ports closed", () => {
+        const web = rules(
+            buildNetPolicyScript(defaultNetPolicy(), T, 200500),
+            'iptables',
+            WEB_CHAIN
+        )
+        expect(web).toContain(`-A ${WEB_CHAIN} -d 203.0.113.7 ! -p tcp -j REJECT`)
+        expect(web).toContain(
+            `-A ${WEB_CHAIN} -d 203.0.113.7 -p tcp -m multiport ! --dports 80,443 -j REJECT`
+        )
+        expect(web).not.toContain(`-A ${WEB_CHAIN} -d 203.0.113.7 -j REJECT`)
+        // An allow list still decides: the host's web is not opened past it.
+        const allow = rules(
+            buildNetPolicyScript(policy({ mode: 'allow', entries: [] }), T, 200500),
+            'iptables',
+            WEB_CHAIN
+        )
+        expect(allow.at(-1)).toBe(`-A ${WEB_CHAIN} -j REJECT`)
+        expect(allow.some((r) => r.includes('203.0.113.7') && r.endsWith('ACCEPT'))).toBe(false)
+        // Shared: the host stays closed whole.
+        const shared = rules(
+            buildNetPolicyScript(defaultNetPolicy(), { ...T, shared: true }, 200500),
+            'iptables',
+            WEB_CHAIN
+        )
+        expect(shared).toContain(`-A ${WEB_CHAIN} -d 203.0.113.7 -j REJECT`)
+        expect(shared.some((r) => r.includes('--dports'))).toBe(false)
     })
 
     test('a dedicated machine without lists leaves the conversations open', () => {
