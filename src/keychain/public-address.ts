@@ -9,7 +9,7 @@
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 
-import { isBlockedAddress } from './addresses'
+import { isBlockedAddress, isPrivateLan } from './addresses'
 import { KeychainError } from './errors'
 
 export type LookupAll = (host: string) => Promise<{ address: string; family: number }[]>
@@ -21,6 +21,8 @@ export interface PublicAddress {
     family: number
     /** True when the host was already an IP. */
     literal: boolean
+    /** On the customer's own network: http and a self-signed certificate are accepted. */
+    lan: boolean
 }
 
 export async function resolvePublicAddress(
@@ -36,7 +38,7 @@ export async function resolvePublicAddress(
     const family = isIP(hostname)
     if (family) {
         if (isBlockedAddress(hostname)) throw blocked()
-        return { address: hostname, family, literal: true }
+        return { address: hostname, family, literal: true, lan: isPrivateLan(hostname) }
     }
     let addresses: { address: string; family: number }[]
     try {
@@ -55,5 +57,10 @@ export async function resolvePublicAddress(
     // fail even with a good A record behind it.
     const first = addresses.find((a) => a.family === 4) ?? addresses[0]
     if (!first) throw blocked()
-    return { address: first.address, family: first.family, literal: false }
+    return {
+        address: first.address,
+        family: first.family,
+        literal: false,
+        lan: isPrivateLan(first.address),
+    }
 }

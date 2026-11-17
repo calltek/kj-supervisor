@@ -164,11 +164,9 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
             )
         }
         report.onHost(target.hostname)
-        if (target.protocol !== 'https:') {
-            throw new KeychainError(
-                'KEYCHAIN_NOT_HTTPS',
-                'Las credenciales sólo se usan por https. Cambia la dirección a https://.'
-            )
+        // http is decided below, once the address is known: only a private one.
+        if (target.protocol !== 'https:' && target.protocol !== 'http:') {
+            throw notHttps()
         }
         if (target.username || target.password) {
             throw new KeychainError(
@@ -239,6 +237,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
         // 5. The destination must be public.
         const hostname = normalizeHost(target.hostname)
         const pinned = await checkDestination(hostname)
+        if (target.protocol === 'http:' && !pinned.lan) throw notHttps()
 
         // 6. Resolve every reference used.
         const resolved = new Map<string, { value: string; sites: KeychainSite[] }>()
@@ -346,7 +345,7 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
                 body: outgoing ?? undefined,
                 redirect: 'manual',
                 decompress: true,
-                ...(pinned.serverName ? { tls: { serverName: pinned.serverName } } : {}),
+                ...tlsOptions(pinned, target),
             })
         } catch (error) {
             const detail = error instanceof Error ? redactText(error.message, variants) : ''
@@ -362,8 +361,8 @@ export function createKeychainHandler(deps: KeychainHandlerDeps) {
 
     async function checkDestination(hostname: string): Promise<PinnedDestination> {
         const checked = await resolvePublicAddress(hostname, lookup)
-        if (checked.literal) return literalDestination()
-        return pinnedDestination(hostname, checked.address, checked.family)
+        if (checked.literal) return literalDestination(checked.lan)
+        return pinnedDestination(hostname, checked.address, checked.family, checked.lan)
     }
 }
 
@@ -371,13 +370,43 @@ interface PinnedDestination {
     url(target: URL): string
     headers(forward: Headers, target: URL): Headers
     serverName: string | null
+    /** On the customer's own network: http and an unverified certificate are accepted. */
+    lan: boolean
 }
 
-function literalDestination(): PinnedDestination {
+function notHttps(): KeychainError {
+    return new KeychainError(
+        'KEYCHAIN_NOT_HTTPS',
+        'Las credenciales sólo se usan por https, salvo hacia un equipo de tu red privada. ' +
+            'Cambia la dirección a https://.'
+    )
+}
+
+/**
+ * TLS for the call. Towards the internet the certificate is always verified
+ * against the name. On the customer's own network it is not: a router, a NAS or
+ * a dev server rarely has one a CA signed, and what the credential is protected
+ * from there is the destination list, not the certificate.
+ */
+function tlsOptions(pinned: PinnedDestination, target: URL) {
+    if (target.protocol !== 'https:') return {}
+    if (pinned.lan) {
+        return {
+            tls: {
+                ...(pinned.serverName ? { serverName: pinned.serverName } : {}),
+                rejectUnauthorized: false,
+            },
+        }
+    }
+    return pinned.serverName ? { tls: { serverName: pinned.serverName } } : {}
+}
+
+function literalDestination(lan: boolean): PinnedDestination {
     return {
         url: (target) => target.toString(),
         headers: (forward) => forward,
         serverName: null,
+        lan,
     }
 }
 
@@ -396,7 +425,12 @@ function literalDestination(): PinnedDestination {
  * `serverName` is honoured, the failure mode is a TLS error, not a silent
  * downgrade.
  */
-function pinnedDestination(hostname: string, address: string, family: number): PinnedDestination {
+function pinnedDestination(
+    hostname: string,
+    address: string,
+    family: number,
+    lan: boolean
+): PinnedDestination {
     const ipHost = family === 6 ? `[${address}]` : address
     return {
         url: (target) => {
@@ -410,6 +444,7 @@ function pinnedDestination(hostname: string, address: string, family: number): P
             return headers
         },
         serverName: hostname,
+        lan,
     }
 }
 
