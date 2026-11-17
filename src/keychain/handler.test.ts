@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
+
+import { setClosedNets } from './addresses'
 
 import type { KeychainResolveAck } from './control-protocol'
 import { type Fetcher, type LookupAll, MAX_BODY_BYTES, createKeychainHandler } from './handler'
@@ -305,6 +307,68 @@ describe('keychain handler', () => {
         }
         expect(lookups).toHaveLength(0)
         expect(calls).toHaveLength(0)
+    })
+
+    describe("the customer's own network", () => {
+        const LAN = ['192.168.10.1']
+        const open = () => setClosedNets([])
+        const ack: KeychainResolveAck = {
+            ok: true,
+            value: SECRET,
+            sites: [
+                { host: 'router.lan', subdomains: false },
+                { host: '192.168.10.1', subdomains: false },
+                { host: 'mixed.example', subdomains: false },
+            ],
+        }
+        afterEach(() => setClosedNets(null))
+
+        test('https with an unverified certificate is accepted, and the IP is kept', async () => {
+            open()
+            const { handle, calls } = setup({ ack, addresses: LAN })
+            const response = await handle(req('https://router.lan/api', { headers: AUTH }))
+            expect(response.status).toBe(200)
+            expect(calls[0]?.init.tls).toEqual({
+                serverName: 'router.lan',
+                rejectUnauthorized: false,
+            })
+        })
+
+        test('a private IP literal as well', async () => {
+            open()
+            const { handle, calls } = setup({ ack })
+            const response = await handle(req('https://192.168.10.1/api', { headers: AUTH }))
+            expect(response.status).toBe(200)
+            expect(calls[0]?.init.tls).toEqual({ rejectUnauthorized: false })
+        })
+
+        test('plain http is accepted', async () => {
+            open()
+            const { handle, calls } = setup({ ack, addresses: LAN })
+            const response = await handle(req('http://router.lan:8080/api', { headers: AUTH }))
+            expect(response.status).toBe(200)
+            expect(calls[0]?.url).toBe('http://192.168.10.1:8080/api')
+            expect(calls[0]?.init.tls).toBeUndefined()
+        })
+
+        test('towards the internet the certificate is verified and http is refused', async () => {
+            open()
+            const { handle, calls } = setup()
+            const ok = await handle(req('https://api.stripe.com/', { headers: AUTH }))
+            expect(ok.status).toBe(200)
+            expect(calls[0]?.init.tls).toEqual({ serverName: 'api.stripe.com' })
+            const plain = await handle(req('http://api.stripe.com/', { headers: AUTH }))
+            expect((await errorCode(plain)).code).toBe('KEYCHAIN_NOT_HTTPS')
+            expect(calls).toHaveLength(1)
+        })
+
+        test('http to a name that resolves to the internet and to the LAN is refused', async () => {
+            open()
+            const { handle, calls } = setup({ ack, addresses: ['93.184.216.34', '192.168.10.1'] })
+            const plain = await handle(req('http://mixed.example/', { headers: AUTH }))
+            expect((await errorCode(plain)).code).toBe('KEYCHAIN_NOT_HTTPS')
+            expect(calls).toHaveLength(0)
+        })
     })
 
     test('wrong site: 403 naming the sites the credential is bound to', async () => {

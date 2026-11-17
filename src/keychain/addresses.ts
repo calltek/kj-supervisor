@@ -186,6 +186,20 @@ function bareAddress(address: string): string {
     return unbracket(address).split('%')[0] ?? ''
 }
 
+/**
+ * An address on the customer's own network (RFC 1918, CGNAT, unique-local), as
+ * opposed to the public internet. Only meaningful for an address that is not
+ * blocked. There a service often has a self-signed certificate or no TLS at
+ * all (a router, a NAS, a dev server), and the handler lets both through:
+ * plain http and an unverified certificate are accepted only here, never
+ * towards the internet.
+ */
+export function isPrivateLan(address: string): boolean {
+    const text = bareAddress(address)
+    const candidates = [text, embeddedV4(text)].filter((a): a is string => a !== null)
+    return candidates.some((a) => STRICT_PRIVATE.some((n) => inCidr(a, n)))
+}
+
 /** True when kj-keychain must not connect to `address`. Unparseable counts as blocked. */
 export function isBlockedAddress(address: string): boolean {
     return isBaseBlocked(address) || inClosedNets(bareAddress(address))
