@@ -56,6 +56,7 @@ import {
     KEYCHAIN_NETWORK_LABEL,
     withKeychainEndpoint,
 } from '../../keychain-host/keychain-network'
+import { singleFileTar, vpnContainerName } from '../../vpn/vpn-spec'
 import { buildSeedScript } from './seed-script'
 import {
     AGENT_PIDS_LIMIT,
@@ -1239,6 +1240,7 @@ export class KJDocker {
                 keychain_ip: await this.keychainNetworkIp(),
                 always: await this.resolveAlways(policy, gateway),
                 shared: this.isShared(),
+                vpn_uids: [...(this.vpnUids.get(agent_id) ?? [])],
             },
             browserUid
         )
@@ -2399,6 +2401,105 @@ export class KJDocker {
      * named volume behind. Silent on "no such volume" / "in use" so
      * the caller doesn't have to special-case.
      */
+    // ── The agent's VPN sidecar (src/vpn) ───────────────────────────────
+
+    /** The VPN sidecar of an agent, if it exists: running, and whose network it shares. */
+    async vpnSidecar(
+        agent_id: number
+    ): Promise<{ running: boolean; network_mode?: string } | null> {
+        try {
+            const info = await this.docker.getContainer(vpnContainerName(agent_id)).inspect()
+            return { running: !!info.State?.Running, network_mode: info.HostConfig?.NetworkMode }
+        } catch {
+            return null
+        }
+    }
+
+    /** Create and start a VPN sidecar from its spec (vpn-spec.ts). */
+    async startVpnSidecar(spec: Docker.ContainerCreateOptions): Promise<void> {
+        const c = await this.docker.createContainer(spec)
+        await c.start()
+    }
+
+    async removeVpnSidecar(agent_id: number): Promise<void> {
+        await this.removeContainer(vpnContainerName(agent_id))
+    }
+
+    /**
+     * Run a fixed command in the VPN sidecar (its own user, root, with only
+     * NET_ADMIN). `detach`: start it and return (`tailscale up` waits for the
+     * login). Otherwise its output, capped, and exit code.
+     */
+    async execInVpnSidecar(
+        agent_id: number,
+        cmd: string[],
+        opts: { detach?: boolean; timeout_ms?: number } = {}
+    ): Promise<{ code: number; output: string }> {
+        const exec = await this.docker.getContainer(vpnContainerName(agent_id)).exec({
+            Cmd: cmd,
+            AttachStdout: !opts.detach,
+            AttachStderr: !opts.detach,
+            Tty: true,
+        })
+        if (opts.detach) {
+            await exec.start({ Detach: true, Tty: true })
+            return { code: 0, output: '' }
+        }
+        const stream = (await exec.start({ Tty: true })) as NodeJS.ReadableStream
+        const output = await withTimeout(
+            new Promise<string>((resolve, reject) => {
+                const chunks: Buffer[] = []
+                let size = 0
+                stream.on('data', (c: Buffer) => {
+                    if (size < 256 * 1024) chunks.push(c)
+                    size += c.length
+                })
+                stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+                stream.on('error', reject)
+            }),
+            opts.timeout_ms ?? 15_000,
+            'vpn exec'
+        ).catch((err) => {
+            ;(stream as unknown as { destroy?: () => void }).destroy?.()
+            throw err
+        })
+        const info = await exec.inspect()
+        return { code: info.ExitCode ?? -1, output }
+    }
+
+    /** The agent's resolv.conf, through the daemon. */
+    async readResolvConf(container_id: string): Promise<string> {
+        return this.readContainerFile(container_id, RESOLV_CONF)
+    }
+
+    /**
+     * Replace the agent's resolv.conf through the daemon (`PUT …/archive`):
+     * the agent has no root to do it, and nothing runs in its container.
+     */
+    async writeResolvConf(container_id: string, content: string): Promise<void> {
+        await this.docker
+            .getContainer(container_id)
+            .putArchive(singleFileTar('resolv.conf', content), { path: '/etc' })
+    }
+
+    /**
+     * The isolated uids allowed through an agent's VPN (net-policy.ts
+     * `vpn_uids`). True when the uid is new, so the caller rewrites the rules.
+     */
+    allowVpnUid(agent_id: number, uid: number): boolean {
+        const set = this.vpnUids.get(agent_id) ?? new Set<number>()
+        if (set.has(uid)) return false
+        set.add(uid)
+        this.vpnUids.set(agent_id, set)
+        return true
+    }
+
+    forgetVpnUids(agent_id: number): void {
+        this.vpnUids.delete(agent_id)
+    }
+
+    private readonly vpnUids = new Map<number, Set<number>>()
+
     async removeVolume(name: string): Promise<void> {
         await this.docker
             .getVolume(name)

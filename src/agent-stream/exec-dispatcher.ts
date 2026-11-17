@@ -210,6 +210,17 @@ export class ExecDispatcher {
             /** Answer on the container's stdin (a control envelope). */
             reply: (agent_id: number, envelope: { type: string; [k: string]: unknown }) => boolean
             logger: KJLogger
+            /**
+             * A conversation (or a person's browser) got its uid: the VPN
+             * decides whether that uid may use the tunnel (vpn-manager.ts).
+             */
+            onUid?: (
+                agent_id: number,
+                container_id: string,
+                session_id: string,
+                uid: number,
+                browser: boolean
+            ) => Promise<void>
         }
     ) {}
 
@@ -252,6 +263,8 @@ export class ExecDispatcher {
             }
             // A person's browser never starts on the server's network: the fence
             // goes in first, and if it can't, there is no browser.
+            if (op !== 'binaries' && op !== 'purge')
+                await this.deps.onUid?.(agent_id, container_id, session_id, uid, op === 'browser')
             if (op === 'browser') await this.deps.docker.fenceBrowserNetwork(container_id, uid)
             await this.deps.docker.execDetached({
                 container_id,

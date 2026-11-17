@@ -9,6 +9,9 @@ import {
     type NetPolicy,
     type NetTargets,
     normalizeNetPolicy,
+    VPN_CHAIN,
+    VPN_IF,
+    vpnRules,
     WEB_CHAIN,
 } from './net-policy'
 
@@ -279,5 +282,38 @@ describe('kj-keychain on its own network', () => {
             // Only that port: the rest of kj-keychain stays behind the floor.
             expect(r.filter((l) => l.includes('172.20.0.2'))).toHaveLength(1)
         }
+    })
+})
+
+describe('the VPN chain', () => {
+    test('the team and the allowed uids go through the tunnel; any other uid is rejected', () => {
+        const script = buildNetPolicyScript(defaultNetPolicy(), { ...T, vpn_uids: [200007] })
+        for (const table of ['iptables', 'ip6tables'] as const) {
+            const vpn = rules(script, table, VPN_CHAIN)
+            expect(vpn).toEqual([
+                `-A ${VPN_CHAIN} -m owner --uid-owner 0 -j ACCEPT`,
+                `-A ${VPN_CHAIN} -m owner --uid-owner 1000 -j ACCEPT`,
+                `-A ${VPN_CHAIN} -m owner --uid-owner 200007 -j ACCEPT`,
+                `-A ${VPN_CHAIN} -j REJECT`,
+            ])
+        }
+    })
+
+    test('a client uid is never let through, not even with a range in the list', () => {
+        const vpn = vpnRules({ vpn_uids: [Number.NaN, -1, 0, 200007, 200007] })
+        expect(vpn.filter((r) => r.includes('200007'))).toHaveLength(1)
+        expect(vpn.some((r) => r.includes('200000-299999'))).toBe(false)
+        expect(vpn.at(-1)).toBe(`-A ${VPN_CHAIN} -j REJECT`)
+    })
+
+    test('its jump is matched on the tunnel and put first, above a browser', () => {
+        const script = buildNetPolicyScript(defaultNetPolicy(), T, 200050)
+        const jump = `-o ${VPN_IF} -j ${VPN_CHAIN}`
+        expect(script).toContain(`$T -w -I OUTPUT 1 ${jump}`)
+        // Inserted after the browser's own insert, so it ends up above it.
+        expect(script.indexOf(`$T -w -I OUTPUT 1 ${jump}`)).toBeGreaterThan(
+            script.indexOf('--uid-owner 200050 -j KJNET1-WEB')
+        )
+        expect(script).toContain(`$T -w -C OUTPUT ${jump}`)
     })
 })

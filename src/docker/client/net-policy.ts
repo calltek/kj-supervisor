@@ -63,6 +63,17 @@ export interface NetPolicy {
 /** The chains. The name carries a version: change the rules, bump it. */
 export const CONV_CHAIN = 'KJNET1-CONV'
 export const WEB_CHAIN = 'KJNET1-WEB'
+/**
+ * Who may use the agent's VPN (kj-app docs/red-por-agente.md §1): everything
+ * the team does, whatever the channel; never a client's conversation. Matched
+ * on the tunnel's interface and placed FIRST in OUTPUT, so what goes out by the
+ * tunnel is decided here and the chains below (which close 100.64/10 on a
+ * shared machine and private ranges for a browser) keep deciding the rest.
+ * Without a tunnel the interface doesn't exist and nothing matches.
+ */
+export const VPN_CHAIN = 'KJVPN1'
+export const VPN_IF = 'tailscale0'
+
 /** Chains of earlier versions, whose jumps are removed when ours go in. */
 export const OLD_CHAINS = ['KJBROWSER2']
 
@@ -197,6 +208,13 @@ export interface NetTargets {
      * existed: open, until someone writes a list for them.
      */
     shared?: boolean
+    /**
+     * The isolated uids that may use the agent's VPN (vpn-manager.ts): the
+     * team's conversations that run as their own user (a person's device
+     * channel) and the people's browsers. Root and uid 1000 always may; every
+     * other uid — a client's conversation, or one not yet known — may not.
+     */
+    vpn_uids?: number[]
 }
 
 /**
@@ -337,13 +355,27 @@ export function chainRules(
     return out
 }
 
+/** The VPN chain: root (the supervisor's own work), the agent user, the uids allowed; nothing else. */
+export function vpnRules(t: Pick<NetTargets, 'vpn_uids'>): string[] {
+    const a = `-A ${VPN_CHAIN}`
+    const uids = [...new Set((t.vpn_uids ?? []).filter((u) => Number.isInteger(u) && u > 0))]
+    return [
+        `${a} -m owner --uid-owner 0 -j ACCEPT`,
+        `${a} -m owner --uid-owner ${AGENT_UID} -j ACCEPT`,
+        ...uids.sort((x, y) => x - y).map((u) => `${a} -m owner --uid-owner ${u} -j ACCEPT`),
+        `${a} -j REJECT`,
+    ]
+}
+
 function table(policy: NetPolicy, t: NetTargets, family: 4 | 6): string {
     return [
         '*filter',
         `:${CONV_CHAIN} - [0:0]`,
         `:${WEB_CHAIN} - [0:0]`,
+        `:${VPN_CHAIN} - [0:0]`,
         ...chainRules(CONV_CHAIN, policy, t, family),
         ...chainRules(WEB_CHAIN, policy, t, family, true),
+        ...vpnRules(t),
         'COMMIT',
     ].join('\n')
 }
@@ -368,6 +400,7 @@ export function buildNetPolicyScript(
     ]
     const web = browserUid ? `OUTPUT -m owner --uid-owner ${browserUid} -j ${WEB_CHAIN}` : null
     const old = OLD_CHAINS.join('|')
+    const vpnJump = `OUTPUT -o ${VPN_IF} -j ${VPN_CHAIN}`
     return [
         'set -eu',
         'TABLES=iptables',
@@ -382,8 +415,15 @@ export function buildNetPolicyScript(
         ...(web
             ? [`    $T -w -C ${web} 2>/dev/null || $T -w -I ${web.replace('OUTPUT', 'OUTPUT 1')}`]
             : []),
+        // The VPN's jump goes first of all, above a browser's: insert it on
+        // top unless it already is, then drop any copy further down.
+        `    if [ "$($T -w -S OUTPUT | sed -n 2p)" != "-A ${vpnJump}" ]; then`,
+        `        $T -w -I ${vpnJump.replace('OUTPUT', 'OUTPUT 1')}`,
+        `        $T -w -L OUTPUT -n --line-numbers | awk 'NR>3 && $2=="${VPN_CHAIN}" {print $1}' | sort -rn | while read -r N; do $T -w -D OUTPUT "$N"; done`,
+        '    fi',
         ...jumps.map((j) => `    $T -w -C ${j}`),
         ...(web ? [`    $T -w -C ${web}`] : []),
+        `    $T -w -C ${vpnJump}`,
         `    $T -w -S OUTPUT | sed -n -E 's/^-A (.* -j (${old}))$/\\1/p' | while read -r R; do $T -w -D $R; done`,
         'done',
         'echo netpolicy',

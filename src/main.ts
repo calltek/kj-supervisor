@@ -112,6 +112,23 @@ import {
     startServerMetricsLoop,
 } from './reporters/server-metrics/server-metrics.reporter'
 import { type UpdateCheckHandle, startUpdateCheckLoop } from './update-check/update-check'
+import { VpnManager } from './vpn/vpn-manager'
+import { validHostname } from './vpn/vpn-spec'
+
+/** The VPN commands and the `vpn` on spawn/sync. Local until they come with protocol.ts. */
+interface VpnConnectPayload {
+    agent_id: number
+    request_id: string
+    hostname: string
+}
+interface VpnDisconnectPayload {
+    agent_id: number
+    request_id: string
+}
+function vpnHostnameOf(p: unknown): string | null {
+    const h = (p as { vpn?: { hostname?: unknown } } | null)?.vpn?.hostname
+    return validHostname(h) ? h : null
+}
 
 /** Stand-in for the turn fields of `McpRequestPayload`, until the control's `protocol.ts` ships them. */
 type McpRequestWithTurn = McpRequestPayload & { turn_id?: string; turn_request_ids?: string[] }
@@ -312,10 +329,18 @@ async function main(): Promise<void> {
             streams.resolveTarget(agent_id, conversation_session_id, session_verified),
         logger,
     })
+    // The agent's Tailscale VPN (kj-app docs/red-por-agente.md §1).
+    const vpn = new VpnManager({
+        docker,
+        push: (status) => client.push('agent:vpn:status' as never, status as never),
+        logger,
+    })
     const exec = new ExecDispatcher({
         docker,
         reply: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
         logger,
+        onUid: (agent_id, container_id, session_id, uid, browser) =>
+            vpn.onUid(agent_id, container_id, session_id, uid, browser),
     })
     const browser = new BrowserRelay({
         write: (agent_id, envelope) => streams.writeControl(agent_id, envelope),
@@ -338,6 +363,7 @@ async function main(): Promise<void> {
         streams,
         logger,
         netPolicy,
+        vpn,
     })
     const spawnHandler = new AgentSpawnHandler({
         docker,
@@ -394,13 +420,18 @@ async function main(): Promise<void> {
     // is up. A failure is logged and the supervisor carries on without it.
     await keychain.start()
 
-    client.onCommand<AgentSpawnPayload, ControlCommandAck>('agent:spawn', (payload) =>
-        spawnHandler.handle(payload)
-    )
+    client.onCommand<AgentSpawnPayload, ControlCommandAck>('agent:spawn', (payload) => {
+        // Before the container starts: its docker `start` brings the VPN up.
+        const hostname = vpnHostnameOf(payload)
+        if (hostname) vpn.want(payload.agent_id, hostname)
+        else vpn.notWanted(payload.agent_id)
+        return spawnHandler.handle(payload)
+    })
     client.onCommand<AgentStopPayload, ControlCommandAck>('agent:stop', async (payload) => {
         const ack = await lifecycleHandler.handleStop(payload)
         // Stop removes the container; the next spawn brings a new token.
         if (ack.ok) keychain.forget(payload.agent_id)
+        if (ack.ok) vpn.onAgentStopped(payload.agent_id)
         return ack
     })
     client.onCommand<AgentPausePayload, ControlCommandAck>('agent:pause', (payload) =>
@@ -412,14 +443,21 @@ async function main(): Promise<void> {
     client.onCommand<AgentDeletePayload, ControlCommandAck>('agent:delete', async (payload) => {
         const ack = await lifecycleHandler.handleDelete(payload)
         if (ack.ok) keychain.forget(payload.agent_id)
+        if (ack.ok) void vpn.onAgentDeleted(payload.agent_id)
         return ack
     })
     client.onCommand<AgentImageUpdatePayload, ControlCommandAck>('agent:image:update', (payload) =>
         imageUpdateHandler.handle(payload)
     )
-    client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) =>
-        inputHandler.handle(payload)
-    )
+    client.onCommand<AgentInputPayload, ControlCommandAck>('agent:input', (payload) => {
+        // Whether this conversation is a client's: only the team's use the VPN.
+        vpn.markSession(
+            payload.agent_id,
+            payload.conversation_session_id ?? undefined,
+            (payload as { client?: unknown }).client === true
+        )
+        return inputHandler.handle(payload)
+    })
     // KJ-3: cut the turn in flight. Best-effort: a busy session gets a claude
     // control_request/interrupt on its own stdin; idle/no-stream → a soft error.
     client.onCommand<AgentInterruptPayload, ControlCommandAck>('agent:interrupt', (payload) => {
@@ -455,8 +493,58 @@ async function main(): Promise<void> {
     client.onCommand<AgentExecPayload, AgentExecAck>('agent:exec', (payload) =>
         execHandler.handle(payload)
     )
-    client.onCommand<AgentSyncPayload, ControlCommandAck>('agent:sync', (payload) =>
-        syncHandler.handle(payload)
+    client.onCommand<AgentSyncPayload, ControlCommandAck>('agent:sync', async (payload) => {
+        const ack = await syncHandler.handle(payload)
+        // After a reconnect or a restart of this supervisor: each running
+        // agent's VPN, its sidecar checked or made again.
+        for (const entry of payload.entries ?? []) {
+            const a = entry as { agent_id?: unknown; container_id?: unknown }
+            if (typeof a.agent_id !== 'number') continue
+            const hostname = vpnHostnameOf(entry)
+            if (!hostname) vpn.notWanted(a.agent_id)
+            else if (typeof a.container_id === 'string')
+                void vpn
+                    .ensure(a.agent_id, a.container_id, hostname)
+                    .catch((err) =>
+                        logger.warn(
+                            { agent_id: a.agent_id, err: err instanceof Error ? err.message : err },
+                            'vpn: could not bring the sidecar back'
+                        )
+                    )
+        }
+        return ack
+    })
+    // A person pressed «Conectar con Tailscale» (or connect again): the login
+    // URL goes up in `agent:vpn:status`.
+    client.onCommand<VpnConnectPayload, ControlCommandAck>(
+        'agent:vpn:connect' as never,
+        async (payload) => {
+            try {
+                await vpn.connect(payload.agent_id, payload.hostname)
+                return { ok: true, accepted: true }
+            } catch (err) {
+                const notRunning = err instanceof Error && err.message === 'not_running'
+                return {
+                    ok: false,
+                    error: {
+                        code: notRunning
+                            ? WS_ERROR_CODES.AGENT_NOT_RUNNING
+                            : WS_ERROR_CODES.INTERNAL_ERROR,
+                        message: notRunning
+                            ? `agent ${payload.agent_id} has no container here`
+                            : `vpn connect failed: ${err instanceof Error ? err.message : String(err)}`,
+                        retryable: false,
+                    },
+                }
+            }
+        }
+    )
+    client.onCommand<VpnDisconnectPayload, ControlCommandAck>(
+        'agent:vpn:disconnect' as never,
+        async (payload) => {
+            await vpn.disconnect(payload.agent_id)
+            return { ok: true, accepted: true }
+        }
     )
     client.onCommand<AgentBackupPayload, AgentBackupAck>('agent:backup', (payload) =>
         backupHandler.handleBackup(payload)
@@ -556,6 +644,11 @@ async function main(): Promise<void> {
         void keychain.refreshClosedNets()
     })
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
+        vpn.markSession(
+            payload.agent_id,
+            payload.conversation_session_id ?? undefined,
+            (payload as { client?: unknown }).client === true
+        )
         const delivered = streams.warmup(payload)
         logger
             .child({ agent_id: payload.agent_id, component: 'warmup' })
