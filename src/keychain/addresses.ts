@@ -159,8 +159,7 @@ function embeddedV4(address: string): string | null {
     const words = parseIPv6(address)
     if (!words) return null
     const [w0 = 0, w1 = 0, w2 = 0, w3 = 0, w4 = 0, w5 = 0, w6 = 0, w7 = 0] = words
-    const dotted = (hi: number, lo: number) =>
-        [hi >>> 8, hi & 0xff, lo >>> 8, lo & 0xff].join('.')
+    const dotted = (hi: number, lo: number) => [hi >>> 8, hi & 0xff, lo >>> 8, lo & 0xff].join('.')
     if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0xffff) {
         return dotted(w6, w7)
     }
@@ -177,13 +176,23 @@ function inClosedNets(address: string): boolean {
     return candidates.some((a) => nets.some((n) => inCidr(a, n)))
 }
 
+/** `[::1]` → `::1`: how an IP literal arrives from a URL. */
+function unbracket(address: string): string {
+    return address.trim().replace(/^\[|\]$/g, '')
+}
+
+/** The address with no brackets and no zone id (`fe80::1%eth0`): what is compared. */
+function bareAddress(address: string): string {
+    return unbracket(address).split('%')[0] ?? ''
+}
+
 /** True when kj-keychain must not connect to `address`. Unparseable counts as blocked. */
 export function isBlockedAddress(address: string): boolean {
-    return isBaseBlocked(address) || inClosedNets(address.trim().replace(/^[|]$/g, '').split('%')[0] ?? '')
+    return isBaseBlocked(address) || inClosedNets(bareAddress(address))
 }
 
 function isBaseBlocked(address: string): boolean {
-    const text = address.trim().replace(/^\[|\]$/g, '')
+    const text = unbracket(address)
     const family = isIP(text.split('%')[0] ?? '')
     if (family === 4) return isBlockedV4Number(ip4(text))
     if (family === 6) {
