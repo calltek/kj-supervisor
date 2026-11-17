@@ -1,6 +1,12 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
-import { ControlSessions, REPLACED_CLOSE_CODE, isAuthorizedControl } from './control'
+import { isBlockedAddress, setClosedNets } from './addresses'
+import {
+    ControlSessions,
+    REPLACED_CLOSE_CODE,
+    applyControlMessage,
+    isAuthorizedControl,
+} from './control'
 import type { KeychainControlUp } from './control-protocol'
 import { silentLog } from './log'
 import { AgentTokenRegistry } from './registry'
@@ -146,5 +152,28 @@ describe('control channel', () => {
         expect(ack.ok && ack.sites.length).toBe(2)
         // The host never reaches the supervisor.
         expect(seen.every((r) => !('host' in (r as object)))).toBe(true)
+    })
+})
+
+describe('closed_nets', () => {
+    afterEach(() => setClosedNets(null))
+    const deps = () => {
+        const { registry, link, cache } = setup()
+        return { secret: 's', registry, link, cache, log: silentLog }
+    }
+
+    test('sets the closed networks', () => {
+        expect(isBlockedAddress('192.168.10.1')).toBe(true)
+        applyControlMessage(JSON.stringify({ type: 'closed_nets', cidrs: ['172.17.0.0/16'] }), deps())
+        expect(isBlockedAddress('192.168.10.1')).toBe(false)
+        expect(isBlockedAddress('172.17.0.9')).toBe(true)
+    })
+
+    test('a list that does not parse changes nothing', () => {
+        applyControlMessage(JSON.stringify({ type: 'closed_nets', cidrs: ['172.17.0.0/16'] }), deps())
+        for (const cidrs of [['not-a-cidr'], 'x', [1], null, ['10.0.0.0/99']])
+            applyControlMessage(JSON.stringify({ type: 'closed_nets', cidrs }), deps())
+        expect(isBlockedAddress('172.17.0.9')).toBe(true)
+        expect(isBlockedAddress('192.168.10.1')).toBe(false)
     })
 })

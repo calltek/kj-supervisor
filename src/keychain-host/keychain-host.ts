@@ -26,6 +26,7 @@ import {
     type KeychainResolveErrorCode,
 } from '../keychain/control-protocol'
 import { type ControlSocketFactory, KeychainControlChannel } from './keychain-control-channel'
+import { buildClosedNets, type ClosedNetFacts } from './closed-nets'
 import { buildKeychainContainerSpec, keychainControlUrl, LOOPBACK } from './keychain-container'
 import {
     KEYCHAIN_ENDPOINT_ENV,
@@ -36,6 +37,8 @@ import type Docker from 'dockerode'
 
 export const KEYCHAIN_TOKEN_ENV = 'KJ_KEYCHAIN_TOKEN'
 export { KEYCHAIN_ENDPOINT_ENV }
+/** How often the closed networks are sent again (new Docker networks). */
+export const CLOSED_NETS_REFRESH_MS = 60_000
 /** How long the control gets to answer a `keychain:resolve`. */
 export const KEYCHAIN_RESOLVE_TIMEOUT_MS = 8_000
 
@@ -58,6 +61,8 @@ export interface KeychainDocker {
     inspectOwnContainer(): Promise<{ image: string; network_mode?: string } | null>
     bridgeGateway(): Promise<string | null>
     isDockerDesktop(): Promise<boolean>
+    /** Docker networks and tenancy, to tell kj-keychain what to keep closed; null if unreadable. */
+    closedNetFacts(): Promise<ClosedNetFacts | null>
     /** Our network for agents ↔ kj-keychain (keychain-network.ts), or null. */
     ensureKeychainNetwork(): Promise<string | null>
     /** kj-keychain is not on it after all: agents go back to the host's address. */
@@ -175,11 +180,17 @@ export class KeychainHost {
                 onDisconnect: () => void refreshUrl(),
                 secret,
                 logger: this.logger,
-                onOpen: () => this.sendReset(),
+                onOpen: () => {
+                    this.sendReset()
+                    void this.refreshClosedNets()
+                },
                 onMessage: (msg) => void this.onMessage(msg),
                 socketFactory: this.socketFactory,
             })
             this.channel.start()
+            // New Docker networks appear after boot; the tenancy can change too.
+            this.closedNetsTimer = setInterval(() => void this.refreshClosedNets(), CLOSED_NETS_REFRESH_MS)
+            this.closedNetsTimer.unref?.()
         } catch (err) {
             this.docker.dropKeychainNetwork()
             this.endpoint = KEYCHAIN_HOST_ENDPOINT
@@ -191,8 +202,36 @@ export class KeychainHost {
     }
 
     stop(): void {
+        if (this.closedNetsTimer) clearInterval(this.closedNetsTimer)
+        this.closedNetsTimer = null
         this.channel?.stop()
         this.channel = null
+    }
+
+    private closedNetsTimer: ReturnType<typeof setInterval> | null = null
+
+    /**
+     * Tell kj-keychain which networks to keep closed (closed-nets.ts). Called on
+     * every connection, when the tenancy changes and periodically. If the
+     * daemon can't be read nothing is sent: kj-keychain keeps the last list, or
+     * every private range closed if it never had one.
+     */
+    async refreshClosedNets(): Promise<void> {
+        if (!this.channel) return
+        try {
+            const facts = await this.docker.closedNetFacts()
+            if (!facts) {
+                this.logger.warn('keychain: Docker networks unreadable — closed networks not updated')
+                return
+            }
+            const gateway = await this.docker.bridgeGateway().catch(() => null)
+            this.channel?.send({ type: 'closed_nets', cidrs: buildClosedNets(facts, gateway) })
+        } catch (err) {
+            this.logger.warn(
+                { err: err instanceof Error ? err.message : String(err) },
+                'keychain: could not send the closed networks'
+            )
+        }
     }
 
     /**

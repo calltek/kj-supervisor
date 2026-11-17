@@ -553,6 +553,7 @@ async function main(): Promise<void> {
     // next and the rules written from here on. Typed locally until protocol.ts.
     client.onPush<{ tenancy?: unknown }>('server:tenancy', (payload) => {
         docker.setTenancy(payload?.tenancy)
+        void keychain.refreshClosedNets()
     })
     client.onPush<AgentWarmupPayload>('agent:warmup', (payload) => {
         const delivered = streams.warmup(payload)
@@ -755,6 +756,7 @@ async function main(): Promise<void> {
 
         // Who this machine serves. Absent (an older control) = dedicated.
         docker.setTenancy((ack as { tenancy?: unknown }).tenancy)
+        void keychain.refreshClosedNets()
 
         // Blue/green self-upgrade completion: if we're the fresh clone (our
         // container name differs from the canonical KJ_SUPERVISOR_CONTAINER),
