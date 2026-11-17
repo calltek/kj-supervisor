@@ -189,7 +189,10 @@ export class KeychainHost {
             })
             this.channel.start()
             // New Docker networks appear after boot; the tenancy can change too.
-            this.closedNetsTimer = setInterval(() => void this.refreshClosedNets(), CLOSED_NETS_REFRESH_MS)
+            this.closedNetsTimer = setInterval(
+                () => void this.refreshClosedNets(),
+                CLOSED_NETS_REFRESH_MS
+            )
             this.closedNetsTimer.unref?.()
         } catch (err) {
             this.docker.dropKeychainNetwork()
@@ -221,7 +224,9 @@ export class KeychainHost {
         try {
             const facts = await this.docker.closedNetFacts()
             if (!facts) {
-                this.logger.warn('keychain: Docker networks unreadable — closed networks not updated')
+                this.logger.warn(
+                    'keychain: Docker networks unreadable — closed networks not updated'
+                )
                 return
             }
             const gateway = await this.docker.bridgeGateway().catch(() => null)

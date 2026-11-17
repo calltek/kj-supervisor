@@ -328,7 +328,10 @@ describe('keychain handler', () => {
             const { handle, calls } = setup({ ack, addresses: LAN })
             const response = await handle(req('https://router.lan/api', { headers: AUTH }))
             expect(response.status).toBe(200)
-            expect(calls[0]?.init.tls).toEqual({ serverName: 'router.lan', rejectUnauthorized: false })
+            expect(calls[0]?.init.tls).toEqual({
+                serverName: 'router.lan',
+                rejectUnauthorized: false,
+            })
         })
 
         test('a private IP literal as well', async () => {
