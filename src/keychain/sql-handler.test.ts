@@ -51,7 +51,7 @@ function fakeResolve(credentials: Record<string, FakeCredential>) {
 const DNS: Record<string, string> = {
     'db.example.com': '203.0.114.10',
     'bastion.example.com': '198.51.101.20',
-    'internal.example.com': '10.0.0.5',
+    'internal.example.com': '169.254.0.5',
 }
 
 function setup(
@@ -224,7 +224,7 @@ describe('/sql: direct connection', () => {
         })
     })
 
-    test('a private address is refused before connecting', async () => {
+    test('a blocked address is refused before connecting', async () => {
         const { handle, runs } = setup({
             DB: { ...DIRECT_DB, fields: { ...DIRECT_DB.fields, host: 'internal.example.com' } },
         })
@@ -332,7 +332,7 @@ describe('/sql: through an SSH tunnel', () => {
         expect(runs).toEqual([])
     })
 
-    test('the SSH server itself must be public', async () => {
+    test('the SSH server itself must not be blocked', async () => {
         const { handle, tunnels } = setup({
             'DB prod': { ...PROD_DB, sites: [{ host: 'internal.example.com', subdomains: false }] },
             Bastion: BASTION,

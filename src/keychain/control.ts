@@ -4,12 +4,16 @@
  * One supervisor at a time: a new connection replaces the previous one.
  */
 
+import { cidrFamily } from '../docker/client/net-policy'
+import { setClosedNets } from './addresses'
 import type { KeychainControlDown, KeychainControlUp } from './control-protocol'
 import type { KeychainLog } from './log'
 import { type AgentTokenRegistry, safeEqual } from './registry'
 import type { ControlLink, ResolveCache } from './resolver'
 
 export const CONTROL_PATH = '/control'
+/** More than this is not a host's Docker networks. */
+const MAX_CLOSED_NETS = 512
 
 /** Close code sent to a connection that a newer one replaced. */
 export const REPLACED_CLOSE_CODE = 4000
@@ -57,6 +61,22 @@ export function applyControlMessage(raw: string, deps: ControlDeps): void {
             deps.cache.forgetAgent(message.agent_id)
             deps.log('info', 'agent forgotten', { agent_id: message.agent_id })
             return
+        case 'closed_nets': {
+            const { cidrs } = message
+            // A list that doesn't parse changes nothing: the last one (or the
+            // strict default) stands.
+            if (
+                !Array.isArray(cidrs) ||
+                cidrs.length > MAX_CLOSED_NETS ||
+                !cidrs.every((c) => typeof c === 'string' && cidrFamily(c) !== 0)
+            ) {
+                deps.log('warn', 'closed_nets is not a list of CIDRs')
+                return
+            }
+            setClosedNets(cidrs)
+            deps.log('info', 'closed networks set', { nets: cidrs.length })
+            return
+        }
         case 'resolve:result':
             if (typeof message.id === 'string') deps.link.settle(message.id, message.ack)
             return

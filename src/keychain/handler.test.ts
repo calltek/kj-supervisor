@@ -288,7 +288,7 @@ describe('keychain handler', () => {
         expect(calls).toHaveLength(0)
     })
 
-    test('a name that resolves to ANY private address is refused before resolving', async () => {
+    test('a name that resolves to ANY blocked address is refused before resolving', async () => {
         const { handle, resolves, calls } = setup({ addresses: ['8.8.8.8', '169.254.169.254'] })
         const response = await handle(req('https://api.stripe.com/', { headers: AUTH }))
         expect(response.status).toBe(403)
@@ -297,9 +297,9 @@ describe('keychain handler', () => {
         expect(calls).toHaveLength(0)
     })
 
-    test('a private IP literal is refused without DNS', async () => {
+    test('a loopback or link-local IP literal is refused without DNS', async () => {
         const { handle, lookups, calls } = setup()
-        for (const target of ['https://127.0.0.1/', 'https://[::ffff:10.0.0.1]/']) {
+        for (const target of ['https://127.0.0.1/', 'https://[::ffff:169.254.169.254]/']) {
             const response = await handle(req(target, { headers: AUTH }))
             expect((await errorCode(response)).code).toBe('KEYCHAIN_PRIVATE_ADDRESS')
         }

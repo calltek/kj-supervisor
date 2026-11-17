@@ -51,7 +51,7 @@ function setup(
             host === 'smtp.example.com'
                 ? [{ address: '203.0.114.25', family: 4 }]
                 : host === 'smtp.internal.example.com'
-                  ? [{ address: '192.168.1.5', family: 4 }]
+                  ? [{ address: '169.254.1.5', family: 4 }]
                   : [],
         send: async (o) => {
             sent.push(o)
@@ -149,7 +149,7 @@ describe('/mail', () => {
         expect(no.sent).toEqual([])
     })
 
-    test('a private SMTP server is refused', async () => {
+    test('a link-local SMTP server is refused', async () => {
         const { handle, sent } = setup({ ...SMTP, host: 'smtp.internal.example.com' })
         expect((await error(await handle(post(MESSAGE)))).code).toBe('KEYCHAIN_PRIVATE_ADDRESS')
         expect(sent).toEqual([])

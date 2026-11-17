@@ -72,6 +72,14 @@ class FakeDocker implements KeychainDocker {
     async isDockerDesktop() {
         return this.desktop
     }
+    facts: { subnets: string[]; host_ips: string[]; shared: boolean } | null = {
+        subnets: ['172.17.0.0/16', '172.30.0.0/16'],
+        host_ips: ['203.0.113.7'],
+        shared: false,
+    }
+    async closedNetFacts() {
+        return this.facts
+    }
     network: string | null = 'kj-keychain-net'
     networkError: Error | null = null
     dropped = false
@@ -239,9 +247,52 @@ describe('KeychainHost.start', () => {
         docker.envs.set('a', ['FOO=1', `${KEYCHAIN_TOKEN_ENV}=tok7`])
         await host.start()
         sockets[0]!.open()
-        expect(sockets[0]!.sent).toEqual([
+        expect(sockets[0]!.sent.filter((m) => m.type === 'agents:reset')).toEqual([
             { type: 'agents:reset', agents: [{ agent_id: 7, token: 'tok7' }] },
         ])
+        host.stop()
+    })
+})
+
+describe('redes cerradas', () => {
+    const closed = (sent: any[]) => sent.filter((m) => m.type === 'closed_nets')
+    const tick = () => new Promise((r) => setTimeout(r, 0))
+
+    test('al conectar manda las redes de Docker y la gateway', async () => {
+        const { host, sockets } = setup()
+        await host.start()
+        sockets[0]!.open()
+        await tick()
+        expect(closed(sockets[0]!.sent)).toEqual([
+            { type: 'closed_nets', cidrs: ['172.17.0.0/16', '172.30.0.0/16', '172.17.0.1/32'] },
+        ])
+        host.stop()
+    })
+
+    test('en una máquina compartida cierra también la tailnet y la propia máquina', async () => {
+        const { docker, host, sockets } = setup()
+        docker.facts = { ...docker.facts!, shared: true }
+        await host.start()
+        sockets[0]!.open()
+        await tick()
+        const [msg] = closed(sockets[0]!.sent)
+        expect(msg.cidrs).toEqual(
+            expect.arrayContaining(['100.64.0.0/10', 'fd7a:115c:a1e0::/48', '203.0.113.7/32'])
+        )
+        host.stop()
+    })
+
+    test('refreshClosedNets reenvía al cambiar el modo, y sin Docker legible no manda nada', async () => {
+        const { docker, host, sockets } = setup()
+        await host.start()
+        sockets[0]!.open()
+        await tick()
+        docker.facts = { ...docker.facts!, shared: true }
+        await host.refreshClosedNets()
+        expect(closed(sockets[0]!.sent)).toHaveLength(2)
+        docker.facts = null
+        await host.refreshClosedNets()
+        expect(closed(sockets[0]!.sent)).toHaveLength(2)
         host.stop()
     })
 })
@@ -292,7 +343,7 @@ describe('tokens por agente', () => {
         await host.adopt(5, 'c')
         await host.adopt(5, 'c')
         host.forget(5)
-        expect(sockets[0]!.sent.slice(1)).toEqual([
+        expect(sockets[0]!.sent.filter((m) => m.type !== 'closed_nets').slice(1)).toEqual([
             { type: 'agent:token', agent_id: 5, token: 'tokC' },
             { type: 'agent:forget', agent_id: 5 },
         ])

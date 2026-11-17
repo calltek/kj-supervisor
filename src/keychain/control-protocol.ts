@@ -55,6 +55,14 @@ export type KeychainControlDown =
     | { type: 'agents:reset'; agents: { agent_id: number; token: string }[] }
     | { type: 'agent:token'; agent_id: number; token: string }
     | { type: 'agent:forget'; agent_id: number }
+    /**
+     * The networks kj-keychain must not reach besides the base blocklist
+     * (`addresses.ts`): this host's Docker networks, its gateway and, on a shared
+     * machine, the tailnet and the host itself. Sent on every (re)connection and
+     * whenever they change. Until the first one arrives every private range is
+     * closed.
+     */
+    | { type: 'closed_nets'; cidrs: string[] }
     | { type: 'resolve:result'; id: string; ack: KeychainResolveAck }
 
 /** kj-keychain → supervisor. */

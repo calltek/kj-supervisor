@@ -2312,6 +2312,30 @@ export class KJDocker {
         }
     }
 
+    /**
+     * What kj-keychain must be kept out of (keychain-host/closed-nets.ts): the
+     * subnet of every Docker network on this host, read off the daemon. Null
+     * when it can't be read — the caller then sends nothing, and kj-keychain
+     * keeps every private range closed rather than being told a shorter list.
+     */
+    async closedNetFacts(): Promise<{
+        subnets: string[]
+        host_ips: string[]
+        shared: boolean
+    } | null> {
+        try {
+            const networks = (await this.docker.listNetworks()) as Array<{
+                IPAM?: { Config?: Array<{ Subnet?: string }> | null } | null
+            }>
+            const subnets = networks.flatMap((n) =>
+                (n.IPAM?.Config ?? []).map((c) => c.Subnet).filter((x): x is string => !!x)
+            )
+            return { subnets, host_ips: hostAddresses(), shared: this.isShared() }
+        } catch {
+            return null
+        }
+    }
+
     /** Docker Desktop (macOS/Windows): `host.docker.internal` is the host's loopback. */
     async isDockerDesktop(): Promise<boolean> {
         try {

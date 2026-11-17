@@ -95,8 +95,8 @@ const FLOOR_V6 = ['fe80::/10', '::ffff:0:0/96', 'fd00:ec2::254/128']
  * inside CGNAT; Azure's WireServer) and the host's tailnet (CGNAT and
  * Tailscale's IPv6 range). The rest of the LAN stays the partner's.
  */
-const SHARED_CLOSED_V4 = ['100.64.0.0/10', '168.63.129.16/32']
-const SHARED_CLOSED_V6 = ['fd7a:115c:a1e0::/48']
+export const SHARED_CLOSED_V4 = ['100.64.0.0/10', '168.63.129.16/32']
+export const SHARED_CLOSED_V6 = ['fd7a:115c:a1e0::/48']
 
 /** As things were before lists existed: conversations open, the browser off the private ranges. */
 export function defaultNetPolicy(): NetPolicy {

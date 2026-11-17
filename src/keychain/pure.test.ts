@@ -1,6 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
-import { isBlockedAddress } from './addresses'
+import { isBlockedAddress, setClosedNets } from './addresses'
 import {
     authHeaderValue,
     extractReferences,
@@ -90,12 +90,7 @@ describe('sites', () => {
 describe('blocked addresses', () => {
     test.each([
         '127.0.0.1',
-        '10.1.2.3',
-        '172.16.0.1',
-        '172.31.255.255',
-        '192.168.1.1',
         '169.254.169.254',
-        '100.64.0.1',
         '0.0.0.0',
         '224.0.0.1',
         '255.255.255.255',
@@ -103,15 +98,14 @@ describe('blocked addresses', () => {
         '::1',
         'fe80::1',
         'fe80::1%eth0',
-        'fc00::1',
         'fd00:ec2::254',
         'ff02::1',
         '::ffff:127.0.0.1',
         '::ffff:7f00:1',
         '::ffff:169.254.169.254',
-        '[::ffff:10.0.0.1]',
-        '64:ff9b::a00:1',
-        '2002:c0a8:0101::1',
+        '[::ffff:169.254.169.254]',
+        '64:ff9b::a9fe:a9fe',
+        '2002:a9fe:a9fe::1',
         '2001:0:4136:e378::1',
         'not-an-ip',
     ])('%s is blocked', (address) => {
@@ -128,6 +122,72 @@ describe('blocked addresses', () => {
         '64:ff9b::808:808',
     ])('%s is allowed', (address) => {
         expect(isBlockedAddress(address)).toBe(false)
+    })
+})
+
+describe('closed networks', () => {
+    afterEach(() => setClosedNets(null))
+
+    test.each([
+        '10.1.2.3',
+        '172.16.0.1',
+        '192.168.10.1',
+        '100.64.0.1',
+        'fc00::1',
+        '[::ffff:10.0.0.1]',
+    ])('%s is closed until the supervisor says otherwise', (address) => {
+        expect(isBlockedAddress(address)).toBe(true)
+    })
+
+    test('with an empty list the private LAN is open, the base blocklist is not', () => {
+        setClosedNets([])
+        for (const ok of [
+            '10.1.2.3',
+            '192.168.10.1',
+            '172.31.255.255',
+            '100.64.0.1',
+            'fc00::1',
+            '[::ffff:10.0.0.1]',
+        ])
+            expect(isBlockedAddress(ok)).toBe(false)
+        for (const no of [
+            '127.0.0.1',
+            '169.254.169.254',
+            '::1',
+            'fd00:ec2::254',
+            '::ffff:169.254.169.254',
+        ])
+            expect(isBlockedAddress(no)).toBe(true)
+    })
+
+    test('an address inside a closed Docker network is blocked, however it is written', () => {
+        setClosedNets(['172.17.0.0/16', '172.18.0.2/32', 'fd00:dead::/64'])
+        for (const no of [
+            '172.17.0.5',
+            '172.18.0.2',
+            '::ffff:172.17.0.5',
+            '::ffff:ac11:5',
+            '64:ff9b::ac11:5',
+            '2002:ac11:5::1',
+            'fd00:dead::7',
+        ])
+            expect(isBlockedAddress(no)).toBe(true)
+        for (const ok of ['172.18.0.3', '172.19.0.1', '192.168.10.1', 'fd00:beef::1'])
+            expect(isBlockedAddress(ok)).toBe(false)
+    })
+
+    test('shared machine: the tailnet is closed, a dedicated one leaves it open', () => {
+        setClosedNets(['100.64.0.0/10', 'fd7a:115c:a1e0::/48'])
+        expect(isBlockedAddress('100.101.102.103')).toBe(true)
+        expect(isBlockedAddress('fd7a:115c:a1e0::1')).toBe(true)
+        setClosedNets([])
+        expect(isBlockedAddress('100.101.102.103')).toBe(false)
+        expect(isBlockedAddress('fd7a:115c:a1e0::1')).toBe(false)
+    })
+
+    test("Alibaba's metadata address is closed whatever the list says", () => {
+        setClosedNets([])
+        expect(isBlockedAddress('100.100.100.200')).toBe(true)
     })
 })
 
