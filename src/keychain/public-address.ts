@@ -1,7 +1,8 @@
 /**
- * The public address kj-keychain connects to for a host: an IP literal must be
- * public itself; a name must resolve, and to public addresses only (any
- * private one among them refuses the lot). The caller connects to the address
+ * The address kj-keychain connects to for a host: an IP literal must not be a
+ * blocked one (loopback, link-local, metadata…); a name must resolve, and to
+ * allowed addresses only (any blocked one among them refuses the lot). Private
+ * networks are allowed (see `addresses.ts`). The caller connects to the address
  * returned, never re-resolving the name (DNS rebinding).
  */
 
@@ -29,8 +30,8 @@ export async function resolvePublicAddress(
     const blocked = () =>
         new KeychainError(
             'KEYCHAIN_PRIVATE_ADDRESS',
-            `${hostname} apunta a una dirección privada o local. Las credenciales sólo se ` +
-                'usan contra servicios públicos en internet.'
+            `${hostname} apunta a una dirección local, de enlace o reservada (loopback, ` +
+                'metadatos de la nube…) y no se puede usar con credenciales.'
         )
     const family = isIP(hostname)
     if (family) {

@@ -1,9 +1,14 @@
 /**
- * Which IP addresses kj-keychain refuses to talk to: anything that is not a
- * plain public unicast address. Private, loopback, link-local (and so the
- * 169.254.169.254 metadata service), CGNAT, multicast, reserved and
+ * Which IP addresses kj-keychain refuses to talk to: loopback, link-local (and
+ * so the 169.254.169.254 metadata service), multicast, reserved and
  * documentation ranges, plus IPv6 forms that embed an IPv4 (mapped, NAT64,
  * 6to4, Teredo, compatible), judged by the embedded address or refused.
+ *
+ * Private networks (10/8, 172.16/12, 192.168/16, CGNAT, fc00::/7) are NOT
+ * blocked: a credential only goes to the destinations its owner declared, and
+ * a router, a NAS or a database on the customer's own network is a legitimate
+ * one. Loopback stays closed because it is kj-keychain itself (its control
+ * port), and the cloud metadata services stay closed in both families.
  */
 
 import { isIP } from 'node:net'
@@ -12,15 +17,11 @@ type Range4 = [base: number, bits: number]
 
 const BLOCKED_V4: Range4[] = [
     [ip4('0.0.0.0'), 8], // "this network"
-    [ip4('10.0.0.0'), 8],
-    [ip4('100.64.0.0'), 10], // CGNAT
     [ip4('127.0.0.0'), 8],
     [ip4('169.254.0.0'), 16], // link-local, cloud metadata
-    [ip4('172.16.0.0'), 12],
     [ip4('192.0.0.0'), 24], // IETF protocol assignments
     [ip4('192.0.2.0'), 24], // TEST-NET-1
     [ip4('192.88.99.0'), 24], // 6to4 relay anycast
-    [ip4('192.168.0.0'), 16],
     [ip4('198.18.0.0'), 15], // benchmarking
     [ip4('198.51.100.0'), 24], // TEST-NET-2
     [ip4('203.0.113.0'), 24], // TEST-NET-3
@@ -114,8 +115,9 @@ function isBlockedV6(words: number[]): boolean {
     if ((w0 & 0xfff0) === 0x3ff0) return true
     // Discard-only 100::/64
     if (w0 === 0x100 && w1 === 0 && w2 === 0 && w3 === 0) return true
-    // Unique local fc00::/7 (includes AWS's fd00:ec2::254 metadata)
-    if ((w0 & 0xfe00) === 0xfc00) return true
+    // AWS metadata over IPv6 (fd00:ec2::/32). The rest of fc00::/7 is a private
+    // network and is allowed.
+    if (w0 === 0xfd00 && w1 === 0x0ec2) return true
     // Link-local fe80::/10 and deprecated site-local fec0::/10
     if ((w0 & 0xffc0) === 0xfe80 || (w0 & 0xffc0) === 0xfec0) return true
     // Multicast ff00::/8
