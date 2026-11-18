@@ -60,6 +60,9 @@ type AgentInputWithFork = AgentInputPayload & {
     fork_from?: { session_id: string; message_uuid: string }
 }
 
+/** Same stand-in for `reply_suggestions` on `AgentInputPayload`, until the control ships it. */
+type AgentInputWithReplySuggestions = AgentInputPayload & { reply_suggestions?: boolean }
+
 export interface AgentStreamClient {
     push(event: string, payload: unknown): void
 }
@@ -638,7 +641,12 @@ export class AgentStreamManager {
         // propio uid. El control lo pedía y se quedaba aquí: el agente nunca lo
         // veía y la arrancaba como el usuario del agente, con el HOME de todos.
         if (payload.isolated) envelope.isolated = true
-        const line = `${JSON.stringify(envelope)}\n`
+        // «Sugerencia de respuesta»: el control la pide sólo para el chat del
+        // panel de quien la tiene encendida. Pure passthrough; absent = none.
+        if ((payload as AgentInputWithReplySuggestions).reply_suggestions) {
+            envelope.reply_suggestions = true
+        }
+        const line =`${JSON.stringify(envelope)}\n`
 
         try {
             entry.stream.write(line)
