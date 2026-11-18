@@ -646,7 +646,7 @@ export class AgentStreamManager {
         if ((payload as AgentInputWithReplySuggestions).reply_suggestions) {
             envelope.reply_suggestions = true
         }
-        const line =`${JSON.stringify(envelope)}\n`
+        const line = `${JSON.stringify(envelope)}\n`
 
         try {
             entry.stream.write(line)
