@@ -21,12 +21,17 @@ import type Docker from 'dockerode'
 
 import type { KJLogger } from '../logger'
 import {
-    MAGIC_DNS,
     buildVpnContainerSpec,
+    listProfilesCommand,
+    loginCommand,
     logoutCommand,
+    parseProfiles,
     parseTailscaleStatus,
     statusCommand,
+    switchCommand,
     upCommand,
+    validProfileId,
+    type VpnProfile,
     validHostname,
     vpnVolumeName,
     withMagicDns,
@@ -65,7 +70,8 @@ interface Watch {
     timer: ReturnType<typeof setTimeout> | null
     fastUntil: number
     last: string
-    dns: boolean
+    /** The MagicDNS written into the agent's resolver, as `dns:<suffix>`; '' = none. */
+    dns: string
 }
 
 export class VpnManager {
@@ -179,26 +185,72 @@ export class VpnManager {
     // ── What a person does from the panel ───────────────────────────────
 
     /**
-     * Connect (or connect again): sidecar up, `tailscale up` without a key, and
-     * the login URL goes up in the next status. Throws `not_running` when the
-     * agent has no container here.
+     * Connect: sidecar up and a login without a key; the login URL goes up in
+     * the next status. `add` saves another account next to the ones there
+     * (Tailscale's profiles, one active at a time) and makes it the active one;
+     * `reauth` logs the active account in again (it expired). Throws
+     * `not_running` when the agent has no container here.
      */
-    connect(agent_id: number, hostname: string): Promise<void> {
+    connect(agent_id: number, hostname: string, mode: 'add' | 'reauth' = 'add'): Promise<void> {
         if (!validHostname(hostname)) return Promise.reject(new Error('bad hostname'))
         return this.serial(agent_id, async () => {
             const container_id = await this.containerOf(agent_id)
             if (!container_id) throw new Error('not_running')
             this.wanted.set(agent_id, hostname)
             await this.ensureSidecar(agent_id, container_id)
-            const before = await this.status(agent_id)
-            // A node already in a tailnet: a new login (another account, or
-            // the same one after it expired).
-            const reauth = before.state === 'connected' || before.state === 'expired'
-            await this.deps.docker.execInVpnSidecar(agent_id, upCommand(hostname, reauth), {
-                detach: true,
-            })
+            const profiles = await this.profiles(agent_id)
+            // The first account goes with `up`; the next ones, with `login`.
+            const cmd =
+                mode === 'reauth'
+                    ? upCommand(hostname, true)
+                    : profiles.length === 0
+                      ? upCommand(hostname)
+                      : loginCommand(hostname)
+            await this.deps.docker.execInVpnSidecar(agent_id, cmd, { detach: true })
             this.watch(agent_id, true)
         })
+    }
+
+    /** Make another saved account the active one (the panel, or the agent itself). */
+    switchTo(agent_id: number, profile_id: string): Promise<void> {
+        if (!validProfileId(profile_id)) return Promise.reject(new Error('bad profile'))
+        return this.serial(agent_id, async () => {
+            if (!this.wanted.has(agent_id)) throw new Error('not_connected')
+            const known = (await this.profiles(agent_id)).some((p) => p.id === profile_id)
+            if (!known) throw new Error('unknown_profile')
+            const r = await this.deps.docker.execInVpnSidecar(agent_id, switchCommand(profile_id), {
+                timeout_ms: 20_000,
+            })
+            if (r.code !== 0) throw new Error(`switch failed: ${r.output.trim().slice(0, 200)}`)
+            this.watch(agent_id, true)
+        })
+    }
+
+    /**
+     * Forget one saved account: logged out of its tailnet. The active one is
+     * replaced by another saved account; without any left, it's a disconnect.
+     */
+    removeProfile(agent_id: number, profile_id: string): Promise<void> {
+        if (!validProfileId(profile_id)) return Promise.reject(new Error('bad profile'))
+        const run = async (): Promise<'last' | 'done'> => {
+            const profiles = await this.profiles(agent_id)
+            const target = profiles.find((p) => p.id === profile_id)
+            if (!target) throw new Error('unknown_profile')
+            const others = profiles.filter((p) => p.id !== profile_id)
+            if (others.length === 0) return 'last'
+            const back = profiles.find((p) => p.active && p.id !== profile_id)
+            const exec = (cmd: string[]) =>
+                this.deps.docker.execInVpnSidecar(agent_id, cmd, { timeout_ms: 20_000 })
+            if (!target.active) await exec(switchCommand(profile_id))
+            await exec(logoutCommand())
+            const next = back ?? others[0]
+            if (next) await exec(switchCommand(next.id))
+            this.watch(agent_id, true)
+            return 'done'
+        }
+        return this.serial(agent_id, run).then((r) =>
+            r === 'last' ? this.disconnect(agent_id) : undefined
+        )
     }
 
     /** Disconnect: out of the tailnet, sidecar and state gone, resolver as it was. */
@@ -239,6 +291,13 @@ export class VpnManager {
         this.watch(agent_id, false)
     }
 
+    private async profiles(agent_id: number): Promise<VpnProfile[]> {
+        const r = await this.deps.docker
+            .execInVpnSidecar(agent_id, listProfilesCommand(), { timeout_ms: 10_000 })
+            .catch(() => ({ code: -1, output: '' }))
+        return parseProfiles(r.output)
+    }
+
     private async status(agent_id: number): Promise<VpnReport> {
         try {
             const r = await this.deps.docker.execInVpnSidecar(agent_id, statusCommand(), {
@@ -246,14 +305,15 @@ export class VpnManager {
             })
             // `status` exits non-zero when not logged in, but still prints JSON.
             const json = r.output.slice(r.output.indexOf('{'))
-            return parseTailscaleStatus(json)
+            const profiles = await this.profiles(agent_id)
+            return { ...parseTailscaleStatus(json), profiles }
         } catch (err) {
             return { state: 'error', error: err instanceof Error ? err.message : String(err) }
         }
     }
 
     private watch(agent_id: number, fast: boolean): void {
-        const w = this.watches.get(agent_id) ?? { timer: null, fastUntil: 0, last: '', dns: false }
+        const w = this.watches.get(agent_id) ?? { timer: null, fastUntil: 0, last: '', dns: '' }
         if (fast) w.fastUntil = Date.now() + FAST_POLL_FOR_MS
         if (w.timer) clearTimeout(w.timer)
         this.watches.set(agent_id, w)
@@ -274,16 +334,18 @@ export class VpnManager {
         const report = await this.status(agent_id)
         if (report.state === 'connected') w.fastUntil = 0
         const { magic_dns_suffix, ...wire } = report
-        if (report.state === 'connected' && !w.dns) {
+        // Each tailnet has its own MagicDNS suffix: switching accounts rewrites it.
+        const dnsKey = `dns:${magic_dns_suffix ?? ''}`
+        if (report.state === 'connected' && w.dns !== dnsKey) {
             const container_id = await this.containerOf(agent_id)
             if (container_id) {
                 await this.applyDns(container_id, magic_dns_suffix)
                 // The resolver changed: its DNS rule goes with the new one.
                 await this.deps.docker.applyNetPolicy(container_id).catch(() => undefined)
-                w.dns = true
+                w.dns = dnsKey
             }
         }
-        if (report.state !== 'connected') w.dns = false
+        if (report.state !== 'connected') w.dns = ''
         const key = JSON.stringify(wire)
         // On every change, and as a refresh on each slow tick.
         if (key !== w.last || Date.now() >= w.fastUntil) {
@@ -295,8 +357,8 @@ export class VpnManager {
     private async applyDns(container_id: string, suffix?: string): Promise<void> {
         try {
             const resolv = await this.deps.docker.readResolvConf(container_id)
-            if (resolv.includes(`nameserver ${MAGIC_DNS}`)) return
-            await this.deps.docker.writeResolvConf(container_id, withMagicDns(resolv, suffix))
+            const next = withMagicDns(resolv, suffix)
+            if (next !== resolv) await this.deps.docker.writeResolvConf(container_id, next)
         } catch (err) {
             // The tunnel still works by address; only the tailnet's names don't.
             this.deps.logger.warn(

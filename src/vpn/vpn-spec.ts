@@ -116,8 +116,64 @@ export function upCommand(hostname: string, reauth = false): string[] {
     )
 }
 
+/**
+ * Add an account (Tailscale's profiles, like its account switcher on Windows):
+ * a new login next to the ones already there, which becomes the active one.
+ * Same flags as `up`, so the node is configured the same in every tailnet.
+ */
+export function loginCommand(hostname: string): string[] {
+    if (!validHostname(hostname)) throw new Error(`bad vpn hostname: ${hostname}`)
+    return ts(
+        'login',
+        `--hostname=${hostname}`,
+        '--accept-routes',
+        '--accept-dns=false',
+        '--netfilter-mode=off'
+    )
+}
+
 export const statusCommand = () => ts('status', '--json')
 export const logoutCommand = () => ts('logout')
+export const listProfilesCommand = () => ts('switch', '--list')
+
+/** A profile id as `tailscale switch --list` prints it; nothing that reads as a flag. */
+export function validProfileId(id: unknown): id is string {
+    return typeof id === 'string' && /^[a-z0-9]{1,32}$/i.test(id)
+}
+
+export function switchCommand(id: string): string[] {
+    if (!validProfileId(id)) throw new Error(`bad vpn profile: ${id}`)
+    return ts('switch', id)
+}
+
+/** One saved Tailscale account of the agent. Only one is active at a time. */
+export interface VpnProfile {
+    id: string
+    tailnet?: string
+    account?: string
+    active: boolean
+}
+
+/**
+ * `tailscale switch --list`: a header (`ID Tailnet Account`) and one row per
+ * profile, the active one with `*` after its account. The tailnet of a profile
+ * that never finished its login is empty, so a row may have two columns.
+ */
+export function parseProfiles(raw: string): VpnProfile[] {
+    const out: VpnProfile[] = []
+    for (const line of raw.split(/\r?\n/).slice(1)) {
+        const cols = line.trim().split(/\s+/).filter(Boolean)
+        const id = cols[0]
+        const last = cols[cols.length - 1]
+        if (cols.length < 2 || !validProfileId(id) || !last) continue
+        const active = last.endsWith('*')
+        const account = (active ? last.slice(0, -1) : last).slice(0, 255) || undefined
+        const tailnet = cols.length >= 3 ? cols[1]?.slice(0, 255) : undefined
+        out.push({ id, ...(tailnet ? { tailnet } : {}), ...(account ? { account } : {}), active })
+        if (out.length >= 20) break
+    }
+    return out
+}
 
 export type VpnState = 'starting' | 'needs_login' | 'connected' | 'expired' | 'stopped' | 'error'
 
@@ -131,6 +187,8 @@ export interface VpnReport {
     login?: string
     key_expiry?: string
     error?: string
+    /** The saved accounts, the active one marked. */
+    profiles?: VpnProfile[]
     /** The tailnet's MagicDNS suffix, when MagicDNS is on (kept here, not sent). */
     magic_dns_suffix?: string
 }

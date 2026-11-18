@@ -120,6 +120,13 @@ interface VpnConnectPayload {
     agent_id: number
     request_id: string
     hostname: string
+    /** `add` (default): another account; `reauth`: log the active one in again. */
+    mode?: 'add' | 'reauth'
+}
+interface VpnProfilePayload {
+    agent_id: number
+    request_id: string
+    profile_id: string
 }
 interface VpnDisconnectPayload {
     agent_id: number
@@ -520,7 +527,11 @@ async function main(): Promise<void> {
         'agent:vpn:connect' as never,
         async (payload) => {
             try {
-                await vpn.connect(payload.agent_id, payload.hostname)
+                await vpn.connect(
+                    payload.agent_id,
+                    payload.hostname,
+                    payload.mode === 'reauth' ? 'reauth' : 'add'
+                )
                 return { ok: true, accepted: true }
             } catch (err) {
                 const notRunning = err instanceof Error && err.message === 'not_running'
@@ -545,6 +556,33 @@ async function main(): Promise<void> {
             await vpn.disconnect(payload.agent_id)
             return { ok: true, accepted: true }
         }
+    )
+    // Another saved account active (like Tailscale's account switcher), or one
+    // forgotten. Both answer only once it's done: the agent waits for it.
+    const vpnProfileOp =
+        (op: (agent_id: number, profile_id: string) => Promise<void>) =>
+        async (payload: VpnProfilePayload): Promise<ControlCommandAck> => {
+            try {
+                await op(payload.agent_id, payload.profile_id)
+                return { ok: true, accepted: true }
+            } catch (err) {
+                return {
+                    ok: false,
+                    error: {
+                        code: WS_ERROR_CODES.INTERNAL_ERROR,
+                        message: `vpn: ${err instanceof Error ? err.message : String(err)}`,
+                        retryable: false,
+                    },
+                }
+            }
+        }
+    client.onCommand<VpnProfilePayload, ControlCommandAck>(
+        'agent:vpn:switch' as never,
+        vpnProfileOp((a, p) => vpn.switchTo(a, p))
+    )
+    client.onCommand<VpnProfilePayload, ControlCommandAck>(
+        'agent:vpn:remove' as never,
+        vpnProfileOp((a, p) => vpn.removeProfile(a, p))
     )
     client.onCommand<AgentBackupPayload, AgentBackupAck>('agent:backup', (payload) =>
         backupHandler.handleBackup(payload)

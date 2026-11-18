@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 
 import {
     buildVpnContainerSpec,
+    parseProfiles,
     parseTailscaleStatus,
+    switchCommand,
     upCommand,
     withMagicDns,
     withoutMagicDns,
@@ -84,5 +86,26 @@ describe('MagicDNS in the agent resolver', () => {
         )
         expect(withMagicDns(withIt, 'tail1.ts.net')).toBe(withIt)
         expect(withoutMagicDns(withIt)).toBe(original)
+    })
+})
+
+describe('saved accounts', () => {
+    test('reads tailscale switch --list, the active one marked', () => {
+        const raw = [
+            'ID    Tailnet           Account',
+            'a1b2  example.com       it@example.com*',
+            'c3d4  other.org         ops@other.org',
+            'e5f6                    new@example.net',
+        ].join('\n')
+        expect(parseProfiles(raw)).toEqual([
+            { id: 'a1b2', tailnet: 'example.com', account: 'it@example.com', active: true },
+            { id: 'c3d4', tailnet: 'other.org', account: 'ops@other.org', active: false },
+            { id: 'e5f6', account: 'new@example.net', active: false },
+        ])
+    })
+
+    test('a profile id that could be read as a flag is refused', () => {
+        expect(() => switchCommand('--help')).toThrow()
+        expect(switchCommand('a1b2').at(-1)).toBe('a1b2')
     })
 })
