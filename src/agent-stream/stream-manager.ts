@@ -752,10 +752,21 @@ export class AgentStreamManager {
             : undefined
 
         // The session's `result` closes its turn (the wrapper also sends one for
-        // a turn whose process died). After it, nothing of that session carries
-        // the turn any more.
+        // a turn whose process died). The input that opened it is spent; the ones
+        // that landed mid-turn are still waiting — Claude Code takes each one as
+        // its own turn right after this `result` — so they carry over as the next
+        // turn, headed by the oldest. Dropping them left that follow-up turn with
+        // no inputs, and a turn without inputs is never sealed: the person's own
+        // message, typed while the agent was answering, could not use their
+        // computer.
         if (event.type === 'result') {
-            entry.turn_by_session.delete(conversation_session_id ?? entry.session_id)
+            const key = conversation_session_id ?? entry.session_id
+            const waiting = entry.turn_by_session.get(key)?.request_ids.slice(1) ?? []
+            if (waiting.length > 0) {
+                entry.turn_by_session.set(key, { id: randomUUID(), request_ids: waiting })
+            } else {
+                entry.turn_by_session.delete(key)
+            }
         }
 
         // Patch the classifier context so the session_id stamped on the
