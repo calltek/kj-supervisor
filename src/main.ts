@@ -122,6 +122,8 @@ interface VpnConnectPayload {
     hostname: string
     /** `add` (default): another account; `reauth`: log the active one in again. */
     mode?: 'add' | 'reauth'
+    /** A Tailscale auth key, once: a secret, never logged (REDACT_PATHS). */
+    auth_key?: string
 }
 interface VpnProfilePayload {
     agent_id: number
@@ -530,7 +532,8 @@ async function main(): Promise<void> {
                 await vpn.connect(
                     payload.agent_id,
                     payload.hostname,
-                    payload.mode === 'reauth' ? 'reauth' : 'add'
+                    payload.mode === 'reauth' ? 'reauth' : 'add',
+                    typeof payload.auth_key === 'string' ? payload.auth_key : undefined
                 )
                 return { ok: true, accepted: true }
             } catch (err) {

@@ -2433,10 +2433,12 @@ export class KJDocker {
     async execInVpnSidecar(
         agent_id: number,
         cmd: string[],
-        opts: { detach?: boolean; timeout_ms?: number } = {}
+        opts: { detach?: boolean; timeout_ms?: number; env?: string[] } = {}
     ): Promise<{ code: number; output: string }> {
         const exec = await this.docker.getContainer(vpnContainerName(agent_id)).exec({
             Cmd: cmd,
+            // Only this exec's own environment (an auth key): never the container's.
+            ...(opts.env ? { Env: opts.env } : {}),
             AttachStdout: !opts.detach,
             AttachStderr: !opts.detach,
             Tty: true,

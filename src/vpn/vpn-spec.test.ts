@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+    AUTH_KEY_ENV,
     buildVpnContainerSpec,
+    keyLoginCommand,
     parseProfiles,
     parseTailscaleStatus,
     switchCommand,
     upCommand,
+    validAuthKey,
     withMagicDns,
     withoutMagicDns,
 } from './vpn-spec'
@@ -107,5 +110,20 @@ describe('saved accounts', () => {
     test('a profile id that could be read as a flag is refused', () => {
         expect(() => switchCommand('--help')).toThrow()
         expect(switchCommand('a1b2').at(-1)).toBe('a1b2')
+    })
+})
+
+describe('logging in with an auth key', () => {
+    test('the key never goes in the command line, only in the env var the script reads', () => {
+        const cmd = keyLoginCommand('kujira-gaz-48', 'login')
+        expect(cmd.join(' ')).not.toContain('tskey-')
+        expect(cmd.at(-1)).toContain(`"$${AUTH_KEY_ENV}"`)
+        expect(cmd.at(-1)).toContain('--auth-key=file:')
+    })
+
+    test('only something shaped like a Tailscale key is accepted', () => {
+        expect(validAuthKey('tskey-auth-kAbCdEf123-XYZ')).toBe(true)
+        expect(validAuthKey('tskey-abc;evil$(x)')).toBe(false)
+        expect(validAuthKey('--auth-key=x')).toBe(false)
     })
 })

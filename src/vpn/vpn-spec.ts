@@ -104,6 +104,46 @@ const ts = (...args: string[]) => ['tailscale', `--socket=${VPN_SOCKET}`, ...arg
  * detached; the URL is read from `status`. With `reauth`, a node already in a
  * tailnet asks for a new login (connect again, another account).
  */
+/** A Tailscale auth key, as the panel sends it once (never stored here). */
+export function validAuthKey(k: unknown): k is string {
+    return typeof k === 'string' && /^tskey-[A-Za-z0-9_-]{8,240}$/.test(k)
+}
+
+/** The exec's own env var with the key: read by the script, never in its argv. */
+export const AUTH_KEY_ENV = 'KJ_TS_AUTHKEY'
+
+/**
+ * Log in with an auth key instead of the browser: `up` for the first account,
+ * `login` for another one. The key goes in through the exec's environment, into
+ * a 0600 file on the sidecar's tmpfs that tailscale reads (`--auth-key=file:`),
+ * and is removed whatever happens. It never appears in a command line.
+ */
+export function keyLoginCommand(hostname: string, verb: 'up' | 'login', reauth = false): string[] {
+    if (!validHostname(hostname)) throw new Error(`bad vpn hostname: ${hostname}`)
+    const file = '/run/tailscale/.authkey'
+    const args = [
+        verb,
+        `--hostname=${hostname}`,
+        '--accept-routes',
+        '--accept-dns=false',
+        '--netfilter-mode=off',
+        ...(reauth ? ['--force-reauth'] : []),
+        `--auth-key=file:${file}`,
+        '--timeout=60s',
+    ].join(' ')
+    return [
+        'sh',
+        '-c',
+        [
+            'set -eu',
+            'umask 077',
+            `trap 'rm -f ${file}' EXIT`,
+            `printf %s "$${AUTH_KEY_ENV}" > ${file}`,
+            `tailscale --socket=${VPN_SOCKET} ${args}`,
+        ].join('\n'),
+    ]
+}
+
 export function upCommand(hostname: string, reauth = false): string[] {
     if (!validHostname(hostname)) throw new Error(`bad vpn hostname: ${hostname}`)
     return ts(

@@ -21,7 +21,9 @@ import type Docker from 'dockerode'
 
 import type { KJLogger } from '../logger'
 import {
+    AUTH_KEY_ENV,
     buildVpnContainerSpec,
+    keyLoginCommand,
     listProfilesCommand,
     loginCommand,
     logoutCommand,
@@ -32,6 +34,7 @@ import {
     upCommand,
     validProfileId,
     type VpnProfile,
+    validAuthKey,
     validHostname,
     vpnVolumeName,
     withMagicDns,
@@ -49,7 +52,7 @@ export interface VpnDocker {
     execInVpnSidecar(
         agent_id: number,
         cmd: string[],
-        opts?: { detach?: boolean; timeout_ms?: number }
+        opts?: { detach?: boolean; timeout_ms?: number; env?: string[] }
     ): Promise<{ code: number; output: string }>
     readResolvConf(container_id: string): Promise<string>
     writeResolvConf(container_id: string, content: string): Promise<void>
@@ -191,14 +194,36 @@ export class VpnManager {
      * `reauth` logs the active account in again (it expired). Throws
      * `not_running` when the agent has no container here.
      */
-    connect(agent_id: number, hostname: string, mode: 'add' | 'reauth' = 'add'): Promise<void> {
+    connect(
+        agent_id: number,
+        hostname: string,
+        mode: 'add' | 'reauth' = 'add',
+        auth_key?: string
+    ): Promise<void> {
         if (!validHostname(hostname)) return Promise.reject(new Error('bad hostname'))
+        if (auth_key !== undefined && !validAuthKey(auth_key))
+            return Promise.reject(new Error('bad auth key'))
         return this.serial(agent_id, async () => {
             const container_id = await this.containerOf(agent_id)
             if (!container_id) throw new Error('not_running')
             this.wanted.set(agent_id, hostname)
             await this.ensureSidecar(agent_id, container_id)
             const profiles = await this.profiles(agent_id)
+            if (auth_key) {
+                // With a key there's no browser step: it logs in now, or fails now.
+                const verb = mode === 'reauth' || profiles.length === 0 ? 'up' : 'login'
+                const r = await this.deps.docker.execInVpnSidecar(
+                    agent_id,
+                    keyLoginCommand(hostname, verb, mode === 'reauth'),
+                    { timeout_ms: 75_000, env: [`${AUTH_KEY_ENV}=${auth_key}`] }
+                )
+                this.watch(agent_id, true)
+                if (r.code !== 0)
+                    throw new Error(
+                        `auth key login failed: ${r.output.replaceAll(auth_key, '[redacted]').trim().slice(0, 200)}`
+                    )
+                return
+            }
             // The first account goes with `up`; the next ones, with `login`.
             const cmd =
                 mode === 'reauth'

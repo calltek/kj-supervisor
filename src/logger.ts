@@ -16,6 +16,9 @@ export const REDACT_PATHS = [
     'agent_token',
     '*.agent_token',
     'session_env',
+    // A Tailscale auth key in agent:vpn:connect.
+    'auth_key',
+    '*.auth_key',
     '*.session_env',
     // kj-keychain: an agent's token (its container env, `agent:token`,
     // `agents:reset`) and a resolved credential's value (`resolve:result`).
