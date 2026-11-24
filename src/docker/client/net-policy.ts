@@ -367,15 +367,30 @@ export function vpnRules(t: Pick<NetTargets, 'vpn_uids'>): string[] {
     ]
 }
 
+/**
+ * What comes IN by the tunnel: only the replies to what the agent opened. With
+ * `--netfilter-mode=off` tailscaled filters nothing, so without this any port
+ * the agent listens on (a dev server, a debugger) would be open to every node
+ * of the tailnet its ACLs let through.
+ */
+export const VPN_IN_CHAIN = 'KJVPN1-IN'
+
+export function vpnInRules(): string[] {
+    const a = `-A ${VPN_IN_CHAIN}`
+    return [`${a} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`, `${a} -j DROP`]
+}
+
 function table(policy: NetPolicy, t: NetTargets, family: 4 | 6): string {
     return [
         '*filter',
         `:${CONV_CHAIN} - [0:0]`,
         `:${WEB_CHAIN} - [0:0]`,
         `:${VPN_CHAIN} - [0:0]`,
+        `:${VPN_IN_CHAIN} - [0:0]`,
         ...chainRules(CONV_CHAIN, policy, t, family),
         ...chainRules(WEB_CHAIN, policy, t, family, true),
         ...vpnRules(t),
+        ...vpnInRules(),
         'COMMIT',
     ].join('\n')
 }
@@ -401,6 +416,7 @@ export function buildNetPolicyScript(
     const web = browserUid ? `OUTPUT -m owner --uid-owner ${browserUid} -j ${WEB_CHAIN}` : null
     const old = OLD_CHAINS.join('|')
     const vpnJump = `OUTPUT -o ${VPN_IF} -j ${VPN_CHAIN}`
+    const vpnInJump = `INPUT -i ${VPN_IF} -j ${VPN_IN_CHAIN}`
     return [
         'set -eu',
         'TABLES=iptables',
@@ -421,9 +437,12 @@ export function buildNetPolicyScript(
         `        $T -w -I ${vpnJump.replace('OUTPUT', 'OUTPUT 1')}`,
         `        $T -w -L OUTPUT -n --line-numbers | awk 'NR>3 && $2=="${VPN_CHAIN}" {print $1}' | sort -rn | while read -r N; do $T -w -D OUTPUT "$N"; done`,
         '    fi',
+        // Into the agent by the tunnel: first of INPUT (nothing else of ours is there).
+        `    $T -w -C ${vpnInJump} 2>/dev/null || $T -w -I ${vpnInJump.replace('INPUT', 'INPUT 1')}`,
         ...jumps.map((j) => `    $T -w -C ${j}`),
         ...(web ? [`    $T -w -C ${web}`] : []),
         `    $T -w -C ${vpnJump}`,
+        `    $T -w -C ${vpnInJump}`,
         `    $T -w -S OUTPUT | sed -n -E 's/^-A (.* -j (${old}))$/\\1/p' | while read -r R; do $T -w -D $R; done`,
         'done',
         'echo netpolicy',

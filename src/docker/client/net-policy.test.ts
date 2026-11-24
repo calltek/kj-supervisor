@@ -11,6 +11,7 @@ import {
     normalizeNetPolicy,
     VPN_CHAIN,
     VPN_IF,
+    VPN_IN_CHAIN,
     vpnRules,
     WEB_CHAIN,
 } from './net-policy'
@@ -315,5 +316,19 @@ describe('the VPN chain', () => {
             script.indexOf('--uid-owner 200050 -j KJNET1-WEB')
         )
         expect(script).toContain(`$T -w -C OUTPUT ${jump}`)
+    })
+})
+
+describe('what comes in by the tunnel', () => {
+    test('only replies get in, on both families, and the jump is checked', () => {
+        const script = buildNetPolicyScript(defaultNetPolicy(), T)
+        for (const table of ['iptables', 'ip6tables'] as const) {
+            expect(rules(script, table, VPN_IN_CHAIN)).toEqual([
+                `-A ${VPN_IN_CHAIN} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`,
+                `-A ${VPN_IN_CHAIN} -j DROP`,
+            ])
+        }
+        expect(script).toContain(`$T -w -I INPUT 1 -i ${VPN_IF} -j ${VPN_IN_CHAIN}`)
+        expect(script).toContain(`$T -w -C INPUT -i ${VPN_IF} -j ${VPN_IN_CHAIN}`)
     })
 })
