@@ -782,6 +782,31 @@ describe('AgentStreamManager turn tracking', () => {
         expect(next.turn_request_ids).toEqual(['r2'])
     })
 
+    test('an input that landed mid-turn carries over as the next turn', async () => {
+        const { m, out } = await withStdout()
+        m.write(input('r1'))
+        m.write(input('r2'))
+        const first = m.resolveTarget(7, 'sess-a', true).turn_id
+        await result(out)
+        const next = m.resolveTarget(7, 'sess-a', true)
+        expect(next.turn_id).toBeDefined()
+        expect(next.turn_id).not.toBe(first)
+        expect(next.turn_request_ids).toEqual(['r2'])
+        await result(out)
+        expect(m.resolveTarget(7, 'sess-a', true).turn_id).toBeUndefined()
+    })
+
+    test('several mid-turn inputs are consumed one result at a time', async () => {
+        const { m, out } = await withStdout()
+        m.write(input('r1'))
+        m.write(input('r2'))
+        m.write(input('r3'))
+        await result(out)
+        expect(m.resolveTarget(7, 'sess-a', true).turn_request_ids).toEqual(['r2', 'r3'])
+        await result(out)
+        expect(m.resolveTarget(7, 'sess-a', true).turn_request_ids).toEqual(['r3'])
+    })
+
     test('a call that does not name its session gets no turn', async () => {
         const { m } = await withStdout()
         m.write(input('r1'))
