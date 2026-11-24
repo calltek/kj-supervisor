@@ -461,7 +461,7 @@ async function main(): Promise<void> {
         vpn.markSession(
             payload.agent_id,
             payload.conversation_session_id ?? undefined,
-            (payload as { client?: unknown }).client === true
+            (payload as { client?: unknown }).client !== false
         )
         return inputHandler.handle(payload)
     })
@@ -685,7 +685,7 @@ async function main(): Promise<void> {
         vpn.markSession(
             payload.agent_id,
             payload.conversation_session_id ?? undefined,
-            (payload as { client?: unknown }).client === true
+            (payload as { client?: unknown }).client !== false
         )
         const delivered = streams.warmup(payload)
         logger
