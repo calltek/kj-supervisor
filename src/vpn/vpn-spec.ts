@@ -330,26 +330,3 @@ export function withoutMagicDns(resolv: string): string {
     }
     return out.join('\n')
 }
-
-/** A tar with one regular file, for `putArchive` (root-owned, as the file it replaces). */
-export function singleFileTar(name: string, content: string, mode = 0o644): Buffer {
-    const body = Buffer.from(content, 'utf8')
-    const header = Buffer.alloc(512, 0)
-    const put = (s: string, off: number, len: number) => header.write(s, off, len, 'ascii')
-    const oct = (n: number, len: number) => `${n.toString(8).padStart(len - 1, '0')}\0`
-    put(name, 0, 100)
-    put(oct(mode, 8), 100, 8)
-    put(oct(0, 8), 108, 8)
-    put(oct(0, 8), 116, 8)
-    put(oct(body.length, 12), 124, 12)
-    put(oct(Math.floor(Date.now() / 1000), 12), 136, 12)
-    put('        ', 148, 8)
-    put('0', 156, 1)
-    put('ustar\0', 257, 6)
-    put('00', 263, 2)
-    let sum = 0
-    for (const b of header) sum += b
-    put(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8)
-    const pad = Buffer.alloc((512 - (body.length % 512)) % 512, 0)
-    return Buffer.concat([header, body, pad, Buffer.alloc(1024, 0)])
-}
