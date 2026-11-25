@@ -2291,14 +2291,24 @@ export class KJDocker {
      * Docker (dev).
      */
     async inspectOwnContainer(): Promise<{ image: string; network_mode?: string } | null> {
-        const name = await this.getOwnContainerName()
-        if (!name) return null
-        try {
-            const info = await this.docker.getContainer(name).inspect()
-            return { image: info.Image, network_mode: info.HostConfig?.NetworkMode }
-        } catch {
-            return null
+        // After a blue/green swap KJ_OWN_CONTAINER still holds the clone's temp
+        // name, which no longer exists (we were renamed to the canonical one):
+        // fall back to our id from /proc and the hostname, as getOwnContainerName
+        // does when there's no env var.
+        const candidates = [
+            await this.getOwnContainerName(),
+            readOwnContainerId(),
+            os.hostname(),
+        ].filter((c): c is string => !!c)
+        for (const c of new Set(candidates)) {
+            try {
+                const info = await this.docker.getContainer(c).inspect()
+                return { image: info.Image, network_mode: info.HostConfig?.NetworkMode }
+            } catch {
+                /* next */
+            }
         }
+        return null
     }
 
     /** Gateway IP of the default `bridge` network (what `host-gateway` maps to), or null. */
