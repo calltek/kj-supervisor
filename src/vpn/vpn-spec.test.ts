@@ -21,7 +21,7 @@ describe('the sidecar', () => {
         expect(spec.HostConfig?.CapAdd).toEqual(['NET_ADMIN'])
         expect(spec.HostConfig?.Privileged).toBeUndefined()
         expect(spec.HostConfig?.Binds).toBeUndefined()
-        expect(spec.HostConfig?.Mounts?.map((m) => m.Source)).toEqual(['kj-agent-7-vpn'])
+        expect(spec.HostConfig?.Mounts?.map((m) => m.Source)).toEqual(['kj-agent-7-tailscale'])
         expect(Object.keys(spec.Labels ?? {})).not.toContain('kj-agent')
     })
 

@@ -11,7 +11,7 @@
  * - **NET_ADMIN and /dev/net/tun, nothing else.** A real interface
  *   (`tailscale0`) in the agent's namespace, so ssh, ping and UDP work and the
  *   LANs behind a subnet router come with `--accept-routes`.
- * - **State on its own volume** (`kj-agent-<id>-vpn`): without it every restart
+ * - **State on its own volume** (`kj-agent-<id>-tailscale`): without it every restart
  *   would ask for the login again. It holds the node key; it goes with a
  *   disconnect and with the agent.
  * - **Never the `kj-agent` label**: reconciliation would take it for an orphan
@@ -27,14 +27,17 @@ import type Docker from 'dockerode'
 export const VPN_LABEL = 'kj-vpn'
 export const VPN_LABEL_AGENT_ID = 'kj-vpn-agent-id'
 export const VPN_INTERFACE = 'tailscale0'
-export const VPN_STATE_DIR = '/var/lib/tailscale'
+// Not /var/lib/tailscale: Alpine's package ships it as uid 101, mode 750, and a
+// fresh volume takes that owner, so this root (no DAC_OVERRIDE) couldn't write
+// its state. A path the image doesn't have gives a root-owned volume.
+export const VPN_STATE_DIR = '/var/lib/kj-vpn'
 export const VPN_SOCKET = '/run/tailscale/tailscaled.sock'
 /** MagicDNS: tailscaled answers the tailnet's names here, over the tunnel. */
 export const MAGIC_DNS = '100.100.100.100'
 export const VPN_MEMORY_BYTES = 256 * 1024 * 1024
 
 export const vpnContainerName = (agent_id: number) => `kj-vpn-${agent_id}`
-export const vpnVolumeName = (agent_id: number) => `kj-agent-${agent_id}-vpn`
+export const vpnVolumeName = (agent_id: number) => `kj-agent-${agent_id}-tailscale`
 
 export interface VpnContainerOptions {
     agent_id: number
