@@ -56,7 +56,7 @@ import {
     KEYCHAIN_NETWORK_LABEL,
     withKeychainEndpoint,
 } from '../../keychain-host/keychain-network'
-import { singleFileTar, vpnContainerName } from '../../vpn/vpn-spec'
+import { vpnContainerName } from '../../vpn/vpn-spec'
 import { buildSeedScript } from './seed-script'
 import {
     AGENT_PIDS_LIMIT,
@@ -517,6 +517,9 @@ export function detachedExecCmd(cmd: string[]): string[] {
 
 /** uid:gid of the agent user (`bun`) inside the agent images. */
 export const EXEC_USER = '1000:1000'
+
+/** The exec's own env var carrying the new resolv.conf (writeResolvConf). */
+const RESOLV_ENV = 'KJ_RESOLV_CONF'
 
 /**
  * An agent's stdout is its stream, and Docker keeps a copy of it in the
@@ -2485,13 +2488,44 @@ export class KJDocker {
     }
 
     /**
-     * Replace the agent's resolv.conf through the daemon (`PUT …/archive`):
-     * the agent has no root to do it, and nothing runs in its container.
+     * Rewrite the agent's resolv.conf IN PLACE. Docker bind-mounts it, so
+     * replacing it (`PUT …/archive`) fails with `unlinkat … device or resource
+     * busy`; truncating and writing doesn't. A root exec with a fixed command
+     * (the agent has no root to do it): the content goes in through this exec's
+     * own environment, never its argv, and the credential vars are unset.
      */
     async writeResolvConf(container_id: string, content: string): Promise<void> {
-        await this.docker
-            .getContainer(container_id)
-            .putArchive(singleFileTar('resolv.conf', content), { path: '/etc' })
+        const exec = await this.docker.getContainer(container_id).exec({
+            Cmd: detachedExecCmd([
+                '/bin/sh',
+                '-c',
+                `printf '%s' "$${RESOLV_ENV}" > ${RESOLV_CONF}`,
+            ]),
+            Env: [`${RESOLV_ENV}=${content}`],
+            User: '0:0',
+            AttachStdout: true,
+            AttachStderr: true,
+            Tty: true,
+        })
+        const stream = (await exec.start({ Tty: true })) as NodeJS.ReadableStream
+        const output = await withTimeout(
+            new Promise<string>((resolve, reject) => {
+                const chunks: Buffer[] = []
+                stream.on('data', (c: Buffer) => chunks.push(c))
+                stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+                stream.on('error', reject)
+            }),
+            10_000,
+            'resolv.conf write'
+        ).catch((err) => {
+            ;(stream as unknown as { destroy?: () => void }).destroy?.()
+            throw err
+        })
+        const info = await exec.inspect()
+        if (info.ExitCode !== 0) {
+            const why = output.trim().slice(0, 200)
+            throw new Error(`resolv.conf write failed (${info.ExitCode}): ${why}`)
+        }
     }
 
     /**
