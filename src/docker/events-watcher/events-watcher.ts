@@ -41,6 +41,15 @@ export interface KJDockerEventsWatcherDeps {
      * and an agent they can't be written for is stopped (net-policy-service).
      */
     netPolicy?: Pick<NetPolicyService, 'enforce'>
+    /**
+     * The agent's VPN sidecar shares the container's network namespace, which
+     * dies with it: it goes on every stop, and comes back on every start
+     * (vpn-manager.ts).
+     */
+    vpn?: {
+        onAgentStarted(agent_id: number, container_id: string): void
+        onAgentStopped(agent_id: number): void
+    }
 }
 
 const RECONNECT_DELAY_MS = 2_000
@@ -59,6 +68,7 @@ export class KJDockerEventsWatcher {
     private readonly streams: AgentStreamManager
     private readonly logger: KJLogger
     private readonly netPolicy?: Pick<NetPolicyService, 'enforce'>
+    private readonly vpn?: KJDockerEventsWatcherDeps['vpn']
 
     private stream: NodeJS.ReadableStream | null = null
     private stopped = false
@@ -70,6 +80,7 @@ export class KJDockerEventsWatcher {
         this.status = deps.status
         this.streams = deps.streams
         this.netPolicy = deps.netPolicy
+        this.vpn = deps.vpn
         this.logger = deps.logger.child({ component: 'docker-events' })
     }
 
@@ -165,10 +176,12 @@ export class KJDockerEventsWatcher {
         // is gone and the stream manager must release the entry.
         if (TERMINAL_ACTIONS.has(event.Action)) {
             this.streams.detach(agent_id)
+            this.vpn?.onAgentStopped(agent_id)
         }
 
         if (event.Action === 'start') {
             this.reapplyNetPolicy(agent_id, container_id)
+            this.vpn?.onAgentStarted(agent_id, container_id)
             if (!this.tracker.isTracked(container_id)) {
                 void this.reattachAfterRestart(agent_id, container_id).catch((err) =>
                     this.logger.warn(
